@@ -45,7 +45,9 @@ func batchHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 		}
 		results := make([]model.CmdsTestResult, len(req.Nodes))
 
-		g, ctx := errgroup.WithContext(r.Context())
+		// errgroup 提供并发上限与 ctx 取消语义；单节点失败不取消其他节点
+		// （由 results[i].Success 表达失败），故闭包仍 return nil。
+		g, _ := errgroup.WithContext(r.Context())
 		g.SetLimit(10) // 并发上限
 		for i, node := range req.Nodes {
 			i, node := i, node
@@ -54,7 +56,6 @@ func batchHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 				return nil
 			})
 		}
-		_ = ctx
 		_ = g.Wait()
 
 		w.Header().Set("Content-Type", "application/json")

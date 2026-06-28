@@ -156,6 +156,21 @@ describe('useWebSocket', () => {
     expect(MockWebSocket.instances).toHaveLength(3)
   })
 
+  it('close() cancels pending reconnect timer (A9 fix)', async () => {
+    // N4：验证 close() 在已调度重连定时器后调用会 clearTimeout，避免连接"复活"
+    const { result } = withSetup(() => useWebSocket('/ws', { maxReconnect: 5 }))
+    result.connect()
+    MockWebSocket.LAST!.fireOpen()
+    // 意外关闭 → 调度 1000ms 后重连
+    MockWebSocket.LAST!.fireClose()
+    expect(MockWebSocket.instances).toHaveLength(1)
+    // 在重连触发前调用 close()，应取消定时器
+    result.close()
+    // 推进足够长时间，验证无新 WebSocket 创建
+    await vi.advanceTimersByTimeAsync(60000)
+    expect(MockWebSocket.instances).toHaveLength(1)
+  })
+
   it('onUnmounted triggers close() on component unmount', () => {
     const { result, unmount } = withSetup(() => useWebSocket('/ws'))
     result.connect()

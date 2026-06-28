@@ -12,7 +12,15 @@ const API_URI = {
 
 function getApiUrl(): string {
   const stored = localStorage.getItem('managi-api-host')
-  const host = stored ?? (location.protocol === 'https:' ? location.hostname : `${location.hostname}:${location.port}`)
+  if (stored) return `${location.protocol}//${stored}`
+  // https 保留非默认端口（修复 A8：部署在 8443 时丢端口）
+  const port = location.port
+  let host: string
+  if (location.protocol === 'https:') {
+    host = port && port !== '443' ? `${location.hostname}:${port}` : location.hostname
+  } else {
+    host = port ? `${location.hostname}:${port}` : location.hostname
+  }
   return `${location.protocol}//${host}`
 }
 

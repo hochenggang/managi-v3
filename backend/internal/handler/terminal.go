@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -154,15 +155,12 @@ func forwardInput(conn *websocket.Conn, sess *terminal.Session, cancel context.C
 }
 
 // isResizeControl 判断是否为结构化 resize 控制消息（前缀匹配，避免完整解析）。
+// 修复 A16：容忍前导空白，避免协议脆弱（前端可能在 JSON 前误带空格/换行）。
 func isResizeControl(data []byte) bool {
 	prefix := []byte(`{"type":"resize"`)
-	if len(data) < len(prefix) {
+	trimmed := bytes.TrimLeft(data, " \t\r\n")
+	if len(trimmed) < len(prefix) {
 		return false
 	}
-	for i := 0; i < len(prefix); i++ {
-		if data[i] != prefix[i] {
-			return false
-		}
-	}
-	return true
+	return bytes.HasPrefix(trimmed, prefix)
 }

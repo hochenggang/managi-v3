@@ -48,15 +48,16 @@ func TestTerminalWSHandler_Basic(t *testing.T) {
 	echo := readWSRaw(t, conn)
 	assert.Equal(t, input, echo)
 
-	// 发送 resize 控制消息（不产生输出，验证不报错即可）
-	writeWSJSON(t, conn, map[string]any{
-		"type": "resize",
-		"cols": 120,
-		"rows": 40,
-	})
+	// 发送 resize 控制消息（与前端 resizeMessage 格式一致：type 字段在前）
+	resizeJSON := []byte(`{"type":"resize","cols":120,"rows":40}`)
+	require.NoError(t, conn.WriteMessage(websocket.TextMessage, resizeJSON))
 
-	// 短暂等待确保 resize 被处理
-	time.Sleep(100 * time.Millisecond)
+	// 验证 resize 不破坏会话：发 stdin 并读回显
+	resizeCheck := []byte("echo RESIZE_OK\n")
+	require.NoError(t, conn.WriteMessage(websocket.TextMessage, resizeCheck))
+	echo2 := readWSRaw(t, conn)
+	assert.Contains(t, string(echo2), "RESIZE_OK",
+		"session should remain usable after resize")
 }
 
 // TestTerminalWSHandler_BadAuthFrame 验证首帧非法 JSON → 连接关闭。

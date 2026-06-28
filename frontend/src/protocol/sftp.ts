@@ -49,6 +49,7 @@ export interface SFTPResponse {
   complete?: boolean
   progress?: number
   operation?: string
+  total?: number
   // v3 断点续传扩展
   upload_id?: string
   uploaded_offset?: number

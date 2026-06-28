@@ -58,26 +58,48 @@ func NewWithSize(cfg *config.Config, maxSize int) *Pool {
 
 // Get 按 node.ConnectionKey() 获取连接，引用计数 +1。
 // 不存在或失效则新建并入池。
+// 修复 A10：isAlive 是阻塞网络调用，移出 p.mu.Lock() 范围，避免慢节点卡死全池。
 func (p *Pool) Get(node model.Node) (*Connection, error) {
 	key := node.ConnectionKey()
 	perKey := p.keyLock(key)
 	perKey.Lock()
 	defer perKey.Unlock()
 
+	// 第一阶段：锁内取引用，锁外做 isAlive 网络探测
 	p.mu.Lock()
-	if c, ok := p.conns[key]; ok && c.client != nil && isAlive(c.client) {
-		c.refs++
-		c.lastUsed = time.Now()
+	c, ok := p.conns[key]
+	if ok && c.client != nil {
+		clientRef := c.client
 		p.mu.Unlock()
-		return c, nil
-	}
-	if c, ok := p.conns[key]; ok {
-		// 存在但失效：清理
-		if c.client != nil {
-			_ = c.client.Close()
+		// 锁外探测（perKey 锁保证同 key 串行，不会重复探测）
+		if isAlive(clientRef) {
+			p.mu.Lock()
+			// re-validate：探测期间连接可能被 cleanIdle/evict 清理
+			c2, ok2 := p.conns[key]
+			if ok2 && c2 == c && c2.client != nil {
+				c2.refs++
+				c2.lastUsed = time.Now()
+				p.mu.Unlock()
+				return c2, nil
+			}
+			p.mu.Unlock()
+		} else {
+			// 失效：锁内清理
+			p.mu.Lock()
+			if cStill, ok2 := p.conns[key]; ok2 && cStill == c {
+				if cStill.client != nil {
+					_ = cStill.client.Close()
+				}
+				delete(p.conns, key)
+			}
+			p.mu.Unlock()
 		}
-		delete(p.conns, key)
+	} else {
+		p.mu.Unlock()
 	}
+
+	// 第二阶段：新建连接（锁外 dial）
+	p.mu.Lock()
 	if len(p.conns) >= p.maxSize {
 		p.evictOldestLocked()
 	}
@@ -87,11 +109,11 @@ func (p *Pool) Get(node model.Node) (*Connection, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := &Connection{key: key, refs: 1, lastUsed: time.Now(), client: client}
+	cNew := &Connection{key: key, refs: 1, lastUsed: time.Now(), client: client}
 	p.mu.Lock()
-	p.conns[key] = c
+	p.conns[key] = cNew
 	p.mu.Unlock()
-	return c, nil
+	return cNew, nil
 }
 
 // Release 引用计数 -1，不立即关闭（修正 v2 release 即关闭的缺陷）。

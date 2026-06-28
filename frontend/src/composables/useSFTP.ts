@@ -17,6 +17,7 @@ export function useSFTP(node: ApiNode) {
   const downloadProgress = ref(0)
 
   let pendingResolve: ((r: SFTPResponse) => void) | null = null
+  let pendingTimer: ReturnType<typeof setTimeout> | null = null
   let downloadBuffer: Uint8Array[] = []
   let downloadTotalSize = 0
   let downloadReceivedSize = 0
@@ -26,6 +27,11 @@ export function useSFTP(node: ApiNode) {
     onText: (data) => {
       const resp = JSON.parse(data) as SFTPResponse
       if (resp.type === 'connected') return
+      if (resp.type === 'download_start') {
+        // 后端流式下载起始帧，告知总大小供进度计算
+        downloadTotalSize = resp.total ?? 0
+        return
+      }
       if (resp.type === 'progress') {
         downloadProgress.value = resp.progress ?? 0
         return
@@ -39,26 +45,43 @@ export function useSFTP(node: ApiNode) {
         triggerDownload(blob, resp.filename ?? 'download')
         downloadBuffer = []
       }
-      pendingResolve?.(resp)
-      pendingResolve = null
+      // resolve 等待中的请求（上传 chunk_ack / list / mkdir 等）
+      if (pendingResolve) {
+        const fn = pendingResolve
+        pendingResolve = null
+        if (pendingTimer) {
+          clearTimeout(pendingTimer)
+          pendingTimer = null
+        }
+        fn(resp)
+      }
     },
     onBinary: (data) => {
       downloadBuffer.push(new Uint8Array(data))
       downloadReceivedSize += data.byteLength
       downloadProgress.value = downloadTotalSize
-        ? Math.round((downloadReceivedSize / downloadTotalSize) * 100)
+        ? Math.min(100, Math.round((downloadReceivedSize / downloadTotalSize) * 100))
         : 0
     },
   })
 
   connect()
 
-  function sendRequest(req: SFTPRequest): Promise<SFTPResponse> {
+  // sendAndAwait 发送文本或二进制帧并等待服务端响应（resolve 时 clear 超时，避免 A18 泄漏）。
+  function sendAndAwait(sendData: string | ArrayBuffer): Promise<SFTPResponse> {
     return new Promise((resolve, reject) => {
       pendingResolve = resolve
-      send(JSON.stringify(req))
-      setTimeout(() => reject(new Error('SFTP request timeout')), 30000)
+      pendingTimer = setTimeout(() => {
+        pendingResolve = null
+        pendingTimer = null
+        reject(new Error('SFTP request timeout'))
+      }, 30000)
+      send(sendData)
     })
+  }
+
+  function sendRequest(req: SFTPRequest): Promise<SFTPResponse> {
+    return sendAndAwait(JSON.stringify(req))
   }
 
   async function list(path: string): Promise<void> {
@@ -68,8 +91,8 @@ export function useSFTP(node: ApiNode) {
     loading.value = false
   }
 
-  // v3 断点续传上传：upload_init 查询 offset → 分片上传 → upload_complete。
-  // 设计见 design-v3.md §6.4。
+  // v3 断点续传上传：upload_init 查询 offset → 二进制帧头发送分片 → upload_complete。
+  // 帧格式见 buildChunkFrame。设计见 design-v3.md §6.4。
   async function upload(remotePath: string, file: File): Promise<void> {
     uploadProgress.value = 0
     const init = await sendRequest({
@@ -84,21 +107,14 @@ export function useSFTP(node: ApiNode) {
     for (let pos = offset; pos < file.size; pos += CHUNK_SIZE) {
       const chunk = file.slice(pos, pos + CHUNK_SIZE)
       const buf = await chunk.arrayBuffer()
-      // TODO(P0): 发送带 header 的二进制帧（upload_id + chunk_index + offset）
-      send(buf)
-      const ack = await sendRequest({
-        operation: 'upload_chunk',
-        remote_path: remotePath,
-        upload_id: init.upload_id,
-        chunk_index: idx,
-        offset: pos,
-      })
-      uploadProgress.value = Math.round(((pos + CHUNK_SIZE) / file.size) * 100)
+      const frame = buildChunkFrame(init.upload_id!, idx, pos, new Uint8Array(buf))
+      await sendAndAwait(frame)
+      // 进度用实际写入字节数，封顶 100%（修复 A7：小文件进度爆表）
+      const written = Math.min(pos + buf.byteLength, file.size)
+      uploadProgress.value = Math.round((written / file.size) * 100)
       idx++
     }
     await sendRequest({ operation: 'upload_complete', upload_id: init.upload_id, remote_path: remotePath })
-    // 进度持久化到 localStorage（断点恢复用）
-    localStorage.removeItem(`upload-${init.upload_id}`)
   }
 
   // v3 断点续传下载：改用 HTTP Range（design-v3.md §6.5），WS 仅小文件回退。
@@ -107,6 +123,7 @@ export function useSFTP(node: ApiNode) {
     downloadProgress.value = 0
     downloadBuffer = []
     downloadReceivedSize = 0
+    downloadTotalSize = 0
     await sendRequest({ operation: 'download', remote_path: remotePath })
   }
 
@@ -122,6 +139,23 @@ export function useSFTP(node: ApiNode) {
     currentPath, files, loading, uploadProgress, downloadProgress,
     connected, list, upload, download, mkdir, del, close,
   }
+}
+
+// buildChunkFrame 构造二进制分片帧（与后端 parseChunkFrame 对齐）。
+// 帧格式（大端序）：[4字节 upload_id_len][upload_id][4字节 chunk_index][8字节 offset][8字节 data_len][data]
+function buildChunkFrame(uploadId: string, chunkIndex: number, offset: number, data: Uint8Array): ArrayBuffer {
+  const idBytes = new TextEncoder().encode(uploadId)
+  const headerLen = 4 + idBytes.length + 4 + 8 + 8
+  const buf = new ArrayBuffer(headerLen + data.length)
+  const view = new DataView(buf)
+  let pos = 0
+  view.setUint32(pos, idBytes.length); pos += 4
+  new Uint8Array(buf, pos, idBytes.length).set(idBytes); pos += idBytes.length
+  view.setUint32(pos, chunkIndex); pos += 4
+  view.setBigUint64(pos, BigInt(offset)); pos += 8
+  view.setBigUint64(pos, BigInt(data.length)); pos += 8
+  new Uint8Array(buf, pos, data.length).set(data)
+  return buf
 }
 
 function triggerDownload(blob: Blob, filename: string): void {

@@ -1,0 +1,96 @@
+{
+    "header": {
+        "total": "共",
+        "nodes": "节点",
+        "choosed": "已选",
+        "actions": {
+            "all": "全选",
+            "none": "全不选",
+            "add": "添加节点"
+        }
+    },
+    "footer": {
+        "actions": {
+            "export": "导出",
+            "import": "导入"
+        }
+    },
+    "addNode": {
+        "title": "编辑节点",
+        "name": "备注名：",
+        "namePlaceholder": "输入节点别名",
+        "host": "IP地址或域名：",
+        "hostPlaceholder": "输入 IPV4/V6/域名",
+        "port": "SSH端口号：",
+        "portPlaceholder": "输入SSH端口号",
+        "username": "SSH用户名：",
+        "usernamePlaceholder": "输入SSH用户名",
+        "authType": "认证类型：",
+        "authTypePassword": "密码认证",
+        "authTypePrivateKey": "密钥认证",
+        "authValue": "密码或密钥：",
+        "authValuePlaceholder": "输入密码或密钥的值",
+        "actions": {
+            "save": "保存",
+            "cancel": "取消"
+        },
+        "importSucess": "节点导入成功",
+        "importError": "节点导入失败",
+        "exportSucess": "节点导出成功"
+    },
+    "cmdPanel": {
+        "shortcut": "快捷命令：",
+        "commandPlaceholder": "在此输入 Shell 命令行",
+        "saveShortCut": "保存当前命令为",
+        "saveShortCutPlaceholder": "输入快捷命令名称",
+        "confirmAddShortcut": "确定",
+        "cancelShortCut": "取消",
+        "executeCommand": "开始执行",
+        "addNodeToContinue": "添加一个节点以继续",
+        "noCmd": "输入框里面似乎没东西，无法保存为快捷命令",
+        "shortcutNameRequired": "请输入快捷命令名称",
+        "shortcutDeleteConfirm": "确定要删除该快捷命令吗？",
+        "renameShortcut": "请输入新的名称",
+        "rename": "重命名",
+        "delete": "删除",
+        "emptyCmd": "输入框里面似乎没东西",
+        "nothingSelected": "请选择至少1个节点再执行命令",
+        "copied": "已复制",
+        "copyError": "复制失败"
+    },
+    "xtermPanel": {
+        "finder": "文件管理",
+        "back": "返回",
+        "hello": "鼠标浮在左侧节点上，点击终端图标来开启一个连接吧"
+    },
+    "finder": {
+        "actions": {
+            "reflush": "刷新",
+            "newDir": "新建文件夹",
+            "upload": "上传文件",
+            "download": "下载文件",
+            "delete": "删除文件"
+        },
+        "filename": "文件名",
+        "size": "文件大小",
+        "mtime": "修改时间",
+        "loading": "加载中...",
+        "empty": "空文件夹",
+        "upDir": "..",
+        "connecting": "正在连接",
+        "disconnected": "连接已断开",
+        "reconnecting": "即将重连",
+        "error": "出现错误",
+        "downloaded": "下载完成",
+        "uploaded": "上传完成",
+        "deleteConfire": "确认删除吗？",
+        "ok": "确定",
+        "cancle": "取消",
+        "newDirPlaceholder": "输入文件夹名称",
+        "total": "当前目录共",
+        "item": "项",
+        "current": "，当前选中",
+        "file": "文件",
+        "dir": "文件夹"
+    }
+}

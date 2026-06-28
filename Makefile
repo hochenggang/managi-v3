@@ -37,8 +37,15 @@ desktop-build:
 
 # ===== 测试与检查 =====
 test:
-	cd $(BACKEND_DIR) && go test ./...
-	cd $(FRONTEND_DIR) && npm run build  # 类型检查
+	cd $(BACKEND_DIR) && go test -cover ./...
+	cd $(FRONTEND_DIR) && npm run test
+
+type-check:
+	cd $(FRONTEND_DIR) && npm run type-check
+
+test-coverage:
+	cd $(BACKEND_DIR) && go test -coverprofile=coverage.out ./...
+	cd $(FRONTEND_DIR) && npm run test:coverage
 
 lint:
 	cd $(BACKEND_DIR) && go vet ./...

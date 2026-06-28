@@ -1,0 +1,96 @@
+{
+    "header": {
+        "total": "Total",
+        "nodes": "nodes",
+        "choosed": "Selected",
+        "actions": {
+            "all": "All",
+            "none": "None",
+            "add": "Add node"
+        }
+    },
+    "footer": {
+        "actions": {
+            "export": "Export",
+            "import": "Import"
+        }
+    },
+    "addNode": {
+        "title": "Edit Node",
+        "name": "Name:",
+        "namePlaceholder": "Enter nickname for node.",
+        "host": "IP or Domain:",
+        "hostPlaceholder": "Enter ip or domain.",
+        "port": "Port Number:",
+        "portPlaceholder": "Enter ssh port number.",
+        "username": "SSH Username:",
+        "usernamePlaceholder": "Enter ssh username.",
+        "authType": "Auth Type:",
+        "authTypePassword": "Password",
+        "authTypePrivateKey": "Private Key",
+        "authValue": "Password or Private Key",
+        "authValuePlaceholder": "Enter value of Password or Private Key.",
+        "actions": {
+            "save": "Save",
+            "cancel": "Cancel"
+        },
+        "importSucess": "Import Sucessful",
+        "importError": "Import Failed",
+        "exportSucess": "Export Sucessful"
+    },
+    "cmdPanel": {
+        "shortcut": "Shortcut Command: ",
+        "commandPlaceholder": "Enter Shell command here",
+        "saveShortCut": "Save current command as",
+        "saveShortCutPlaceholder": "Enter shortcut command name",
+        "confirmAddShortcut": "Confirm",
+        "cancelShortCut": "Cancel",
+        "executeCommand": "Execute",
+        "addNodeToContinue": "Add a node to proceed",
+        "noCmd": "Input is empty. Cannot save as a shortcut.",
+        "shortcutNameRequired": "Enter a shortcut name.",
+        "shortcutDeleteConfirm": "Delete this shortcut?",
+        "renameShortcut": "Enter new name",
+        "rename": "Rename",
+        "delete": "Delete",
+        "emptyCmd": "Input is empty.",
+        "nothingSelected": "Select at least one node to proceed.",
+        "copied": "Copied.",
+        "copyError": "Copy failed."
+    },
+    "xtermPanel": {
+        "finder": "File Manager",
+        "back": "Back",
+        "hello": "Hover over a node on the left and click the terminal icon to open a connection."
+    },
+    "finder": {
+        "actions": {
+            "reflush": "Reflush",
+            "newDir": "New Dir",
+            "upload": "Upload",
+            "download": "Download",
+            "delete": "Delete"
+        },
+        "filename": "Filename",
+        "size": "Size",
+        "mtime": "Mtime",
+        "loading": "Loading...",
+        "empty": "Empty",
+        "upDir": "..",
+        "connecting": "Connecting",
+        "disconnected": "Connection lost",
+        "reconnecting": "Reconnecting soon",
+        "error": "An error occurred",
+        "downloaded": "Download completed",
+        "uploaded": "Upload completed",
+        "deleteConfire": "Are you sure you want to delete this?",
+        "ok": "Confirm",
+        "cancle": "Cancel",
+        "newDirPlaceholder": "Enter folder name",
+        "total": "Total",
+        "item": "items",
+        "current": ", Selected ",
+        "file": "File",
+        "dir": "Dir"
+    }
+}

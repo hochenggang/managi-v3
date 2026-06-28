@@ -1,0 +1,10 @@
+# golangci-lint 配置（managi-v3 后端）。
+# 启用核心 linters，保持轻量；运行：golangci-lint run ./...
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+run:
+  timeout: 3m

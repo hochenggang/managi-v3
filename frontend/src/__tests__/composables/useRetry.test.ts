@@ -17,15 +17,25 @@ describe('useRetry', () => {
   })
 
   it('retries then succeeds', async () => {
-    const { withRetry } = useRetry()
+    const { retrying, withRetry } = useRetry()
+    // D8：在 fn 内捕获 retrying.value，验证首次调用=false、重试调用=true
+    const retryingDuringCall: boolean[] = []
     const fn = vi.fn()
-      .mockRejectedValueOnce(new Error('boom'))
-      .mockResolvedValueOnce('ok')
+      .mockImplementationOnce(async () => {
+        retryingDuringCall.push(retrying.value)
+        throw new Error('boom')
+      })
+      .mockImplementationOnce(async () => {
+        retryingDuringCall.push(retrying.value)
+        return 'ok'
+      })
     const p = withRetry(fn, { baseDelay: 100, maxRetries: 3 })
     await vi.advanceTimersByTimeAsync(100)
     const r = await p
     expect(r).toBe('ok')
     expect(fn).toHaveBeenCalledTimes(2)
+    expect(retryingDuringCall[0]).toBe(false) // 首次调用：未在重试
+    expect(retryingDuringCall[1]).toBe(true) // 重试调用：正在重试
   })
 
   it('throws after exceeding maxRetries', async () => {

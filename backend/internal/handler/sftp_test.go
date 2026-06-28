@@ -1,7 +1,7 @@
 package handler
 
 import (
-	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -197,7 +197,17 @@ func TestSftpWSHandler_Basic(t *testing.T) {
 	assert.Equal(t, "list", msg["type"])
 	files, ok := msg["files"].([]any)
 	require.True(t, ok)
-	assert.NotEmpty(t, files)
+	// 验证预置的 hello.txt 存在且 size==2
+	var foundHello bool
+	for _, f := range files {
+		fm, _ := f.(map[string]any)
+		if fm["filename"] == "hello.txt" {
+			foundHello = true
+			assert.Equal(t, float64(2), fm["size"])
+			assert.False(t, fm["is_dir"].(bool))
+		}
+	}
+	assert.True(t, foundHello, "hello.txt should be in listing")
 }
 
 // TestSftpWSHandler_UploadFlow 验证完整断点续传上传流程。
@@ -236,15 +246,10 @@ func TestSftpWSHandler_UploadFlow(t *testing.T) {
 	offset, _ := msg["offset"].(float64)
 	assert.Equal(t, float64(0), offset)
 
-	// upload_chunk（base64 数据放 Filename 字段）
+	// upload_chunk：发二进制帧（帧头协议，design-v3.md §6.4）
 	chunkData := []byte("hello world")
-	writeWSJSON(t, conn, map[string]any{
-		"operation":    string(model.OpUploadChunk),
-		"upload_id":    uploadID,
-		"chunk_index":  0,
-		"offset":       0,
-		"filename":     base64.StdEncoding.EncodeToString(chunkData),
-	})
+	frame := buildChunkFrame(uploadID, 0, 0, chunkData)
+	require.NoError(t, conn.WriteMessage(websocket.BinaryMessage, frame))
 	msg = readWSJSON(t, conn)
 	assert.Equal(t, "chunk_ack", msg["type"])
 
@@ -282,4 +287,18 @@ func TestSftpWSHandler_BadAuthFrame(t *testing.T) {
 
 	msg := readWSJSON(t, conn)
 	assert.Equal(t, "error", msg["type"])
+}
+
+// buildChunkFrame 构造二进制分片帧（与 parseChunkFrame 对齐）。
+// 帧格式（大端序）：[4字节 upload_id_len][upload_id][4字节 chunk_index][8字节 offset][8字节 data_len][data]
+func buildChunkFrame(uploadID string, chunkIndex int, offset int64, data []byte) []byte {
+	idBytes := []byte(uploadID)
+	buf := make([]byte, 4+len(idBytes)+4+8+8+len(data))
+	binary.BigEndian.PutUint32(buf[0:], uint32(len(idBytes)))
+	copy(buf[4:], idBytes)
+	binary.BigEndian.PutUint32(buf[4+len(idBytes):], uint32(chunkIndex))
+	binary.BigEndian.PutUint64(buf[4+len(idBytes)+4:], uint64(offset))
+	binary.BigEndian.PutUint64(buf[4+len(idBytes)+4+8:], uint64(len(data)))
+	copy(buf[4+len(idBytes)+4+8+8:], data)
+	return buf
 }

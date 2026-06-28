@@ -172,7 +172,7 @@ func TestPool_Concurrent(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-// TestCloseAll 验证 CloseAll 后连接不可用。
+// TestCloseAll 验证 CloseAll 后旧连接已关闭，再 Get 会新建连接。
 func TestCloseAll(t *testing.T) {
 	srv := testutil.Start(t)
 	defer srv.Close()
@@ -184,13 +184,15 @@ func TestCloseAll(t *testing.T) {
 	require.NoError(t, err)
 	pool.Release(node)
 
+	beforeAccepts := srv.Accepts()
 	pool.CloseAll()
 
-	// CloseAll 后 Get 应重新建连（旧连接已关闭）
-	// 由于 mock server 仍可接受新连接，这里验证不 panic 即可
+	// CloseAll 后再 Get 同 node，应新建连接（旧连接已关闭）
 	_, err = pool.Get(node)
-	// 可能成功（新建连接）也可能失败（取决于时序），关键是不 panic
-	_ = err
+	require.NoError(t, err)
+	// srv.Accepts() 增加 1 证明是新建连接而非复用
+	require.Equal(t, beforeAccepts+1, srv.Accepts(),
+		"CloseAll should close old conn, forcing new dial")
 }
 
 // TestJoinLines 验证命令拼接。

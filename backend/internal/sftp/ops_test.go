@@ -274,16 +274,21 @@ func TestDownloadStream_NotFound(t *testing.T) {
 	assert.Error(t, err)
 }
 
-// TestMakeUploadID 验证 upload ID 生成不重复。
+// TestMakeUploadID 验证 upload ID 生成格式与唯一性。
 func TestMakeUploadID(t *testing.T) {
 	id1 := makeUploadID("/path/a", "key1")
 	id2 := makeUploadID("/path/b", "key2")
-	id3 := makeUploadID("/path/a", "key1")
 
 	assert.NotEmpty(t, id1)
-	assert.Len(t, id1, 16)        // hex 前 16 字符
-	// id1 和 id3 路径/key 相同但时间戳不同，大概率不同（极低碰撞可能）
-	// 这里只验证长度和格式
-	assert.Len(t, id3, 16)
-	_ = id2
+	assert.Len(t, id1, 16)
+	assert.Regexp(t, `^[0-9a-f]{16}$`, id1) // hex 格式
+	assert.NotEqual(t, id1, id2)            // 不同输入产生不同 ID
+
+	// 唯一性：同输入连续 100 次不应碰撞（时间戳保证）
+	seen := map[string]bool{}
+	for i := 0; i < 100; i++ {
+		id := makeUploadID("/path/a", "key1")
+		assert.False(t, seen[id], "collision at iteration %d", i)
+		seen[id] = true
+	}
 }

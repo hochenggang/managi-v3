@@ -66,11 +66,27 @@ install_deps() {
 # ===== 下载二进制 =====
 download_binary() {
     info "下载 managi 二进制 (version=$VERSION, os=linux, arch=$ARCH)..."
-    # TODO(P1): 从 GitHub Release 下载对应平台二进制
-    # URL="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/managi-linux-${ARCH}"
-    # wget -qO "$INSTALL_DIR/managi" "$URL" || error "下载失败"
-    # chmod +x "$INSTALL_DIR/managi"
-    warn "download_binary 待 GitHub Release 发布后启用（design-v3.md §8.3 步骤4）"
+    if [ "$VERSION" = "latest" ]; then
+        URL="https://github.com/${GITHUB_REPO}/releases/latest/download/managi-linux-${ARCH}"
+    else
+        URL="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/managi-linux-${ARCH}"
+    fi
+    wget -qO "$INSTALL_DIR/managi" "$URL" || error "下载失败: $URL"
+    chmod +x "$INSTALL_DIR/managi"
+    info "二进制已安装到 $INSTALL_DIR/managi"
+}
+
+# ===== 下载前端 =====
+download_frontend() {
+    mkdir -p "$CONFIG_DIR"
+    info "下载前端 index.html (version=$VERSION)..."
+    if [ "$VERSION" = "latest" ]; then
+        URL="https://github.com/${GITHUB_REPO}/releases/latest/download/index.html"
+    else
+        URL="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/index.html"
+    fi
+    wget -qO "$CONFIG_DIR/index.html" "$URL" || error "下载前端失败: $URL"
+    info "前端已安装到 $CONFIG_DIR/index.html"
 }
 
 # ===== 配置初始化 =====
@@ -205,6 +221,7 @@ upgrade() {
     detect_os
     detect_arch
     download_binary
+    download_frontend
     case "$OS_FAMILY" in
         alpine) rc-service managi restart ;;
         debian) systemctl restart managi ;;

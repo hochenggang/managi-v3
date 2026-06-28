@@ -4,6 +4,7 @@
 package sftp
 
 import (
+	"crypto/rand"
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
@@ -11,7 +12,6 @@ import (
 	"os"
 	"path"
 	"sync"
-	"time"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
@@ -214,17 +214,24 @@ func (c *Client) DownloadStream(remotePath string, offset int64) (io.ReadCloser,
 
 // Close 关闭 SFTP 客户端（不关底层 ssh.Client，由 sshpool 管）。
 func (c *Client) Close() error {
+	c.mu.Lock()
+	c.uploads = make(map[string]*uploadState) // 清理未完成的 upload 会话，避免泄漏
+	c.mu.Unlock()
 	if c.sc != nil {
 		return c.sc.Close()
 	}
 	return nil
 }
 
-// makeUploadID 生成 upload 会话 ID（基于路径 + 节点 + 时间戳的哈希）。
+// makeUploadID 生成 upload 会话 ID（基于路径 + 节点 + 随机数的哈希）。
+// 修正：原用 time.Now() 在 Windows 等时钟分辨率粗糙平台会产生碰撞，
+// 改用 crypto/rand 保证跨平台唯一性。
 func makeUploadID(finalPath, connKey string) string {
 	h := sha1.New()
 	h.Write([]byte(finalPath))
 	h.Write([]byte(connKey))
-	h.Write([]byte(time.Now().Format(time.RFC3339Nano)))
+	rb := make([]byte, 16)
+	_, _ = rand.Read(rb)
+	h.Write(rb)
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }

@@ -27,17 +27,20 @@ export function useRetry() {
     let attempt = 0
     while (true) {
       try {
-        return await fn()
+        const result = await fn()
+        retrying.value = false
+        return result
       } catch (err) {
         if (attempt >= maxRetries || !shouldRetry(err)) {
+          retrying.value = false
           throw err
         }
+        // retrying 在 sleep 期间为 true，重试 fn() 期间也保持 true，
+        // 仅在成功或最终失败时置 false（修复 A12：finally 每次迭代重置导致 spinner 闪烁）
         retrying.value = true
         const delay = Math.min(baseDelay * 2 ** attempt, maxDelay)
         await sleep(delay)
         attempt++
-      } finally {
-        retrying.value = false
       }
     }
   }
