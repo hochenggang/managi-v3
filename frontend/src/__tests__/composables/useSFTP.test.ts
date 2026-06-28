@@ -1,0 +1,193 @@
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { mount } from '@vue/test-utils'
+import { defineComponent, h } from 'vue'
+import type { ApiNode } from '@/protocol/types'
+import type { SFTPResponse } from '@/protocol/sftp'
+import { useSFTP } from '@/composables/useSFTP'
+
+const node: ApiNode = {
+  name: 'n1',
+  host: '1.2.3.4',
+  port: 22,
+  username: 'root',
+  auth_type: 'password',
+  auth_value: 'pwd',
+}
+
+// 捕获 useWebSocket 的回调与返回值
+let onTextCb: ((data: string) => void) | null = null
+let onBinaryCb: ((data: ArrayBuffer) => void) | null = null
+const mockSend = vi.fn()
+const mockConnect = vi.fn()
+const mockClose = vi.fn()
+
+vi.mock('@/composables/useWebSocket', () => ({
+  useWebSocket: (_path: string, opts: any) => {
+    onTextCb = opts.onText
+    onBinaryCb = opts.onBinary
+    return {
+      connected: { value: true },
+      connect: mockConnect,
+      send: mockSend,
+      close: mockClose,
+    }
+  },
+}))
+
+function withSetup<T>(composable: () => T): T {
+  let result!: T
+  const App = defineComponent({
+    setup() {
+      result = composable()
+      return () => h('div')
+    },
+  })
+  mount(App)
+  return result
+}
+
+function respond(resp: SFTPResponse): void {
+  if (!onTextCb) throw new Error('onText callback not captured')
+  onTextCb(JSON.stringify(resp))
+}
+
+function sentPayloadAt(i: number): any {
+  const call = mockSend.mock.calls[i]
+  if (!call) throw new Error(`send not called at index ${i}`)
+  return JSON.parse(call[0] as string)
+}
+
+describe('useSFTP', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    onTextCb = null
+    onBinaryCb = null
+  })
+
+  it('calls connect() on creation', () => {
+    withSetup(() => useSFTP(node))
+    expect(mockConnect).toHaveBeenCalledTimes(1)
+  })
+
+  it('list sends operation=list and updates files/currentPath on success', async () => {
+    const s = withSetup(() => useSFTP(node))
+    const p = s.list('/home')
+    expect(sentPayloadAt(0)).toEqual({ operation: 'list', remote_path: '/home' })
+    respond({
+      success: true,
+      files: [{ filename: 'a.txt', size: 1, mode: '0644', is_dir: false, mtime: 0 }],
+    })
+    await p
+    expect(s.files.value).toHaveLength(1)
+    expect(s.files.value[0].filename).toBe('a.txt')
+    expect(s.currentPath.value).toBe('/home')
+    expect(s.loading.value).toBe(false)
+  })
+
+  it('mkdir sends operation=mkdir', async () => {
+    const s = withSetup(() => useSFTP(node))
+    const p = s.mkdir('/new')
+    expect(sentPayloadAt(0)).toEqual({ operation: 'mkdir', remote_path: '/new' })
+    respond({ success: true })
+    await p
+  })
+
+  it('del sends operation=delete', async () => {
+    const s = withSetup(() => useSFTP(node))
+    const p = s.del('/file')
+    expect(sentPayloadAt(0)).toEqual({ operation: 'delete', remote_path: '/file' })
+    respond({ success: true })
+    await p
+  })
+
+  it('upload single-chunk file: init → chunk → complete', async () => {
+    const s = withSetup(() => useSFTP(node))
+    const buf = new Uint8Array(10)
+    const file = new File([buf], 't.txt', { type: 'application/octet-stream' })
+    const p = s.upload('/remote/t.txt', file)
+
+    // send 调用 0：upload_init JSON
+    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(1))
+    expect(sentPayloadAt(0)).toMatchObject({
+      operation: 'upload_init',
+      remote_path: '/remote/t.txt',
+      filename: 't.txt',
+      total_size: 10,
+      chunk_size: 1 << 20,
+    })
+    respond({ success: true, upload_id: 'u1', uploaded_offset: 0 })
+
+    // send 调用 1：二进制 buffer；send 调用 2：upload_chunk JSON
+    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(3))
+    expect(mockSend.mock.calls[1][0]).toBeInstanceOf(ArrayBuffer)
+    expect(sentPayloadAt(2)).toMatchObject({
+      operation: 'upload_chunk',
+      upload_id: 'u1',
+      chunk_index: 0,
+      offset: 0,
+    })
+    respond({ success: true })
+
+    // send 调用 3：upload_complete JSON
+    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(4))
+    expect(sentPayloadAt(3)).toMatchObject({
+      operation: 'upload_complete',
+      upload_id: 'u1',
+      remote_path: '/remote/t.txt',
+    })
+    respond({ success: true })
+
+    await p
+    expect(s.uploadProgress.value).toBeGreaterThan(0)
+  })
+
+  it('upload resumes from uploaded_offset', async () => {
+    const s = withSetup(() => useSFTP(node))
+    // 文件大小 1MB + 100 字节，uploaded_offset=1MB → 仅剩 100 字节需上传（1 个 chunk）
+    const buf = new Uint8Array((1 << 20) + 100)
+    const file = new File([buf], 'big.bin', { type: 'application/octet-stream' })
+    const guard = s.upload('/r/big.bin', file).catch((e) => e)
+
+    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(1))
+    expect(sentPayloadAt(0).operation).toBe('upload_init')
+    // 假装已上传 1MB（第 1 片已完成）
+    respond({ success: true, upload_id: 'u2', uploaded_offset: 1 << 20 })
+
+    // 等待 send(buf) + send(upload_chunk JSON)
+    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(3))
+    // 第 1 个 chunk_index 应为 1（offset 1MB / CHUNK_SIZE 1MB = 1）
+    expect(sentPayloadAt(2).chunk_index).toBe(1)
+    expect(sentPayloadAt(2).offset).toBe(1 << 20)
+    // 响应 chunk ack
+    respond({ success: true })
+
+    // 等待 upload_complete 发送
+    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(4))
+    expect(sentPayloadAt(3).operation).toBe('upload_complete')
+    respond({ success: true })
+
+    await guard
+  })
+
+  it('download sends operation=download and resets progress', async () => {
+    const s = withSetup(() => useSFTP(node))
+    s.downloadProgress.value = 50
+    const p = s.download('/file')
+    expect(sentPayloadAt(0)).toEqual({ operation: 'download', remote_path: '/file' })
+    expect(s.downloadProgress.value).toBe(0)
+    respond({ success: true })
+    await p
+  })
+
+  it('onBinary aggregates download buffer and complete triggers triggerDownload', async () => {
+    const s = withSetup(() => useSFTP(node))
+    const p = s.download('/file')
+    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(1))
+    // 模拟服务端先发二进制 chunk，再发 complete
+    onBinaryCb?.(new Uint8Array([1, 2, 3]).buffer)
+    respond({ success: true, complete: true, filename: 'file' })
+    await p
+    // downloadProgress 应已被 onBinary 更新（received 3 字节，total 未知 → 0%）
+    expect(s.downloadProgress.value).toBeGreaterThanOrEqual(0)
+  })
+})

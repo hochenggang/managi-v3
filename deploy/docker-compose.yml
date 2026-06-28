@@ -1,0 +1,30 @@
+# Managi v3 docker-compose
+# 设计见 ../design-v3.md §8.2
+
+services:
+  managi:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: managi:v3
+    container_name: managi
+    # 跳板机场景推荐 network_mode: host；普通场景用端口映射
+    ports:
+      - "18001:18001"
+    environment:
+      - MANAGI_HOST=0.0.0.0
+      - MANAGI_PORT=18001
+      - MANAGI_BASICAUTH_ENABLED=false
+      # - MANAGI_BASICAUTH_USERNAME=admin
+      # - MANAGI_BASICAUTH_PASSWORD=changeme
+      - MANAGI_SSH_TIMEOUT=15
+      - MANAGI_KEEPALIVE=30
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:18001/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    # 跳板机需要访问内网 SSH，使用 host 网络更合适：
+    # network_mode: host

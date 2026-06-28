@@ -1,0 +1,43 @@
+:root {
+
+  --color-main: #9ec1eb;
+  --color-sub: #d5e5f7;
+  --color-bg: #e4f0ff79;
+  
+  
+  --color-while: #f4f9ff;
+  --color-green: #1cad70;
+  --color-red: #eb4646;
+  --color-orange: #f59b00;
+
+  --color-bg-1: #333333;
+
+  /* 文字主题色 */
+  --color-font-1: #555555;
+  /* 主要文字颜色，深灰色 */
+  --color-font-2: #555555;
+  /* 次要文字颜色，中灰色 */
+  --color-font-3: #777777;
+  /* 辅助文字颜色，浅灰色 */
+
+}
+
+
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  font-weight: normal;
+  text-decoration: none;
+  outline: none;
+}
+
+
+body {
+  font-size: 15px;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
