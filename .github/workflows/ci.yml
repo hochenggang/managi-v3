@@ -72,12 +72,8 @@ jobs:
         run: ls -lh dist/index.html
 
   build-tauri:
-    name: Tauri Build (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    name: Tauri Build (windows-latest)
+    runs-on: windows-latest
     if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4

@@ -6,10 +6,10 @@
   "build": {
     "beforeDevCommand": "cd ../../frontend && npm run dev",
     "beforeBuildCommand": "cd ../../frontend && npm run build",
-    "devUrl": "http://localhost:5173",
-    "frontendDist": "../../frontend/dist"
+    "devPath": "http://localhost:5173",
+    "distDir": "../../frontend/dist"
   },
-  "app": {
+  "tauri": {
     "windows": [
       {
         "title": "Managi",
@@ -21,20 +21,18 @@
     ],
     "security": {
       "csp": null
-    }
-  },
-  "bundle": {
-    "active": true,
-    "targets": "all",
-    "icon": [
-      "icons/icon.png"
-    ],
-    "externalBin": [
-      "binaries/managi"
-    ],
-    "resources": []
-  },
-  "tauri": {
+    },
+    "bundle": {
+      "active": true,
+      "targets": "all",
+      "icon": [
+        "icons/icon.png"
+      ],
+      "externalBin": [
+        "binaries/managi"
+      ],
+      "resources": []
+    },
     "systemTray": {
       "iconPath": "icons/icon.png",
       "iconAsTemplate": false
