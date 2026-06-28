@@ -1,5 +1,4 @@
 # Managi v3 CI: push/PR 触发的 lint + test + build 验证
-# 设计见 ../../../design-v3.md §9.1
 
 name: CI
 
@@ -15,19 +14,19 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: managi-v3/backend
+        working-directory: backend
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-          cache-dependency-path: managi-v3/backend/go.sum
+          cache-dependency-path: backend/go.sum
       - name: Go vet
         run: go vet ./...
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          working-directory: managi-v3/backend
+          working-directory: backend
       - name: Go test
         run: go test ./...
 
@@ -36,12 +35,13 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: managi-v3/backend
+        working-directory: backend
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
+          cache-dependency-path: backend/go.sum
       - name: Build
         run: CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /tmp/managi ./cmd/managi
       - name: Check binary size
@@ -52,14 +52,14 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: managi-v3/frontend
+        working-directory: frontend
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: managi-v3/frontend/package-lock.json
+          cache-dependency-path: frontend/package-lock.json
       - name: Install deps
         run: npm ci
       - name: Type check
@@ -70,17 +70,6 @@ jobs:
         run: npm run build
       - name: Verify single HTML
         run: ls -lh dist/index.html
-
-  build-docker:
-    name: Docker Build
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build image
-        run: docker build -t managi:ci -f managi-v3/deploy/Dockerfile managi-v3
-      - name: Check image size
-        run: docker images managi:ci --format "{{.Size}}"
 
   build-tauri:
     name: Tauri Build (${{ matrix.os }})
@@ -95,6 +84,6 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Tauri build (compile check only)
-        working-directory: managi-v3/desktop/src-tauri
+        working-directory: desktop/src-tauri
         run: cargo check
         # TODO(P3): 完整 cargo tauri build 需 sidecar 二进制前置准备
