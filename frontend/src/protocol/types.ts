@@ -38,6 +38,19 @@ export interface BatchCmdRequest {
   cmds: string[]
 }
 
+/** 快捷命令项。 */
+export interface ShortcutItem {
+  label: string
+  cmd: string
+}
+
+/** 应用配置文件（v3），导出/导入时使用。 */
+export interface AppConfig {
+  version: 3
+  nodes: Record<string, ApiNode>
+  shortcuts: ShortcutItem[]
+}
+
 /** 节点唯一 ID：host:port。 */
 export function generateNodeId(node: ApiNode): string {
   return `${node.host}:${node.port}`

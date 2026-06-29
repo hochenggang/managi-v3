@@ -1,6 +1,9 @@
 // Package main 是 Managi v3 Windows 托盘客户端。
 // 单一可执行文件，内嵌 HTTP/WebSocket 服务、前端单页与托盘图标。
 // 启动后进入系统托盘并自动通过默认浏览器打开 http://127.0.0.1:18001。
+
+//go:build windows
+
 package main
 
 import (

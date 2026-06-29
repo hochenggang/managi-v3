@@ -72,6 +72,9 @@ func terminalWSHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc 
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()
 
+		// 服务端 WS 心跳：控制帧 Ping，避免浏览器后台定时器节流导致断连
+		go startPingLoop(ctx, wc, deadline, cfg.WSPingInterval)
+
 		// goroutine: stdout → ws（封装为 msg envelope）
 		go forwardOutput(ctx, wc, sess.Stdout(), cancel)
 

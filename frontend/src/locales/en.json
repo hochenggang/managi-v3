@@ -9,6 +9,10 @@
             "add": "Add node"
         }
     },
+    "sidebar": {
+        "collapse": "Collapse Sidebar",
+        "expand": "Expand Sidebar"
+    },
     "footer": {
         "actions": {
             "export": "Export",
@@ -36,7 +40,10 @@
         },
         "importSucess": "Import Sucessful",
         "importError": "Import Failed",
-        "exportSucess": "Export Sucessful"
+        "exportSucess": "Export Sucessful",
+        "exportConfigSucess": "Config Exported",
+        "importConfigSucess": "Config Imported",
+        "importConfigError": "Config Import Failed"
     },
     "cmdPanel": {
         "shortcut": "Shortcut Command: ",

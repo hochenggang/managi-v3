@@ -13,12 +13,14 @@ type Config struct {
 	// SSH
 	SSHTimeout        int // 秒
 	KeepaliveInterval int // 秒
+	SSHIdleTimeout    int // 秒，SSH 连接池空闲清理时间
 
 	// WebSocket
-	WSReadDeadline int // 秒，心跳超时
+	WSReadDeadline int // 秒，读超时
+	WSPingInterval int // 秒，服务端 WS Ping 间隔
 
 	// SFTP
-	ChunkSize        int // 上传分片
+	ChunkSize         int // 上传分片
 	DownloadChunkSize int // 下载分片
 
 	// BasicAuth
@@ -42,7 +44,9 @@ func Load() *Config {
 		Port:              envInt("MANAGI_PORT", 18001),
 		SSHTimeout:        envInt("MANAGI_SSH_TIMEOUT", 15),
 		KeepaliveInterval: envInt("MANAGI_KEEPALIVE", 30),
-		WSReadDeadline:    envInt("MANAGI_WS_READ_DEADLINE", 60),
+		SSHIdleTimeout:    envInt("MANAGI_SSH_IDLE_TIMEOUT", 120),
+		WSReadDeadline:    envInt("MANAGI_WS_READ_DEADLINE", 90),
+		WSPingInterval:    envInt("MANAGI_WS_PING_INTERVAL", 30),
 		ChunkSize:         envInt("MANAGI_SFTP_CHUNK_SIZE", 1<<20), // 1MB
 		DownloadChunkSize: envInt("MANAGI_SFTP_DOWNLOAD_CHUNK", 1 << 16),
 		BasicAuthEnabled:  envBool("MANAGI_BASICAUTH_ENABLED", false),

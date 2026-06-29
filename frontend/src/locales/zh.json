@@ -9,6 +9,10 @@
             "add": "添加节点"
         }
     },
+    "sidebar": {
+        "collapse": "收起侧边栏",
+        "expand": "展开侧边栏"
+    },
     "footer": {
         "actions": {
             "export": "导出",
@@ -36,7 +40,10 @@
         },
         "importSucess": "节点导入成功",
         "importError": "节点导入失败",
-        "exportSucess": "节点导出成功"
+        "exportSucess": "节点导出成功",
+        "exportConfigSucess": "配置导出成功",
+        "importConfigSucess": "配置导入成功",
+        "importConfigError": "配置导入失败"
     },
     "cmdPanel": {
         "shortcut": "快捷命令：",

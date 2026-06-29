@@ -10,8 +10,8 @@ import (
 func TestLoad_Defaults(t *testing.T) {
 	// 清空所有相关环境变量，确保使用默认值
 	keys := []string{
-		"MANAGI_HOST", "MANAGI_PORT", "MANAGI_SSH_TIMEOUT", "MANAGI_KEEPALIVE",
-		"MANAGI_WS_READ_DEADLINE", "MANAGI_SFTP_CHUNK_SIZE", "MANAGI_SFTP_DOWNLOAD_CHUNK",
+		"MANAGI_HOST", "MANAGI_PORT", "MANAGI_SSH_TIMEOUT", "MANAGI_KEEPALIVE", "MANAGI_SSH_IDLE_TIMEOUT",
+		"MANAGI_WS_READ_DEADLINE", "MANAGI_WS_PING_INTERVAL", "MANAGI_SFTP_CHUNK_SIZE", "MANAGI_SFTP_DOWNLOAD_CHUNK",
 		"MANAGI_BASICAUTH_ENABLED", "MANAGI_BASICAUTH_USERNAME", "MANAGI_BASICAUTH_PASSWORD",
 		"MANAGI_INDEX_HTML",
 	}
@@ -24,7 +24,9 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, 18001, cfg.Port)
 	assert.Equal(t, 15, cfg.SSHTimeout)
 	assert.Equal(t, 30, cfg.KeepaliveInterval)
-	assert.Equal(t, 60, cfg.WSReadDeadline)
+	assert.Equal(t, 120, cfg.SSHIdleTimeout)
+	assert.Equal(t, 90, cfg.WSReadDeadline)
+	assert.Equal(t, 30, cfg.WSPingInterval)
 	assert.Equal(t, 1<<20, cfg.ChunkSize)      // 1MB
 	assert.Equal(t, 1<<16, cfg.DownloadChunkSize)
 	assert.False(t, cfg.BasicAuthEnabled)
@@ -39,7 +41,9 @@ func TestLoad_EnvOverride(t *testing.T) {
 	t.Setenv("MANAGI_PORT", "8080")
 	t.Setenv("MANAGI_SSH_TIMEOUT", "30")
 	t.Setenv("MANAGI_KEEPALIVE", "60")
+	t.Setenv("MANAGI_SSH_IDLE_TIMEOUT", "300")
 	t.Setenv("MANAGI_WS_READ_DEADLINE", "120")
+	t.Setenv("MANAGI_WS_PING_INTERVAL", "20")
 	t.Setenv("MANAGI_SFTP_CHUNK_SIZE", "2097152")
 	t.Setenv("MANAGI_SFTP_DOWNLOAD_CHUNK", "4096")
 	t.Setenv("MANAGI_BASICAUTH_ENABLED", "true")
@@ -52,7 +56,9 @@ func TestLoad_EnvOverride(t *testing.T) {
 	assert.Equal(t, 8080, cfg.Port)
 	assert.Equal(t, 30, cfg.SSHTimeout)
 	assert.Equal(t, 60, cfg.KeepaliveInterval)
+	assert.Equal(t, 300, cfg.SSHIdleTimeout)
 	assert.Equal(t, 120, cfg.WSReadDeadline)
+	assert.Equal(t, 20, cfg.WSPingInterval)
 	assert.Equal(t, 2097152, cfg.ChunkSize)
 	assert.Equal(t, 4096, cfg.DownloadChunkSize)
 	assert.True(t, cfg.BasicAuthEnabled)

@@ -1,7 +1,10 @@
 <template>
     <Finder v-if="finderNode" :node="finderNode" @close="finderNode = null" />
     <AddNode v-if="showAddNodeModal" :node="newNode" @close="showAddNodeModal = false" @add-node="handleAddNode" />
-    <div class="node-list-container">
+    <button class="sidebar-toggle" :title="collapsed ? t('sidebar.expand') : t('sidebar.collapse')" @click="toggle">
+        <IconPanelToggle :collapsed="collapsed" />
+    </button>
+    <div class="node-list-container" :class="{ collapsed }">
         <div class="node-list">
             <div class="bar">
                 <span class="header-title" v-if="nodesStore.selectedNodes.length <= 0">{{ t("header.total") }} {{
@@ -65,19 +68,24 @@ import IconDelete from '@/components/icons/IconDelete.vue'
 import IconEdit from '@/components/icons/IconEdit.vue'
 import IconTerm from '@/components/icons/IconTerm.vue'
 import IconFinder from '@/components/icons/IconFinder.vue'
+import IconPanelToggle from '@/components/icons/IconPanelToggle.vue'
 import Finder from '@/components/Finder.vue'
+import { useSidebar } from '@/composables/useSidebar'
 
 
 import { useI18n } from 'vue-i18n'
 import { handleError, handleMsg } from "@/helper";
 import { setCachedNodes, getCachedNodes, oldApiNodeConvert } from '@/api';
-import type { ApiNode, OldApiNode } from '@/protocol/types';
+import type { ApiNode, OldApiNode, AppConfig, ShortcutItem } from '@/protocol/types';
 import { generateNodeId } from '@/protocol/types';
 import { useNodesStore } from '@/stores/nodesStore';
+import { useShortcutsStore } from '@/stores/shortcutsStore';
 
 
 const router = useRouter();
 const nodesStore = useNodesStore();
+const shortcutsStore = useShortcutsStore();
+const { collapsed, toggle } = useSidebar();
 const finderNode = ref<ApiNode | null>(null);
 
 const { t, locale } = useI18n()
@@ -164,19 +172,25 @@ const exploreNodes = () => {
     if (nodesLength.value === 0) {
         return
     }
-    // 导出 nodes 为json文件
-    const blob = new Blob([JSON.stringify(nodesStore.nodes)], { type: 'application/json' });
+    shortcutsStore.ensureLoaded();
+    // 导出 v3 配置文件：同时包含节点与快捷命令
+    const config: AppConfig = {
+        version: 3,
+        nodes: nodesStore.nodes,
+        shortcuts: shortcutsStore.shortcuts,
+    };
+    const blob = new Blob([JSON.stringify(config)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `nodes-${new Date().getTime()}.json`;
+    a.download = `managi-config-${new Date().getTime()}.json`;
     a.click();
     URL.revokeObjectURL(url);
-    handleMsg(t("addNode.exportSucess"));
+    handleMsg(t("addNode.exportConfigSucess"));
 }
 
 const importNodes = () => {
-    // 导入 json文件 为 nodes
+    // 导入 json 配置文件：支持 v3 {nodes, shortcuts} 与旧版纯 nodes 字典
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = 'application/json';
@@ -187,34 +201,62 @@ const importNodes = () => {
             const reader = new FileReader();
             reader.onload = () => {
                 try {
-                    const inputNodes = JSON.parse(reader.result as string) as Record<string, ApiNode | OldApiNode>;
-                    // 进行数据校验，nodes需要是一个字典，key为string，值为 ApiNode or OldApiNode
-                    if (typeof inputNodes === 'object') {
-                        for (const key1 in inputNodes) {
-                            // nodes[key] 为包含[port, auth_type, auth_value]的对象
-                            const requiredKeys = ['port', 'auth_type', 'auth_value'];
-                            for (const key2 of requiredKeys) {
-                                if (!Object.prototype.hasOwnProperty.call(inputNodes[key1], key2)) {
-                                    handleError(`${t("addNode.importError")} -> [${key1}].${key2} `);
-                                    return;
-                                }
+                    const raw = JSON.parse(reader.result as string);
+                    if (typeof raw !== 'object' || raw === null) {
+                        handleError(t("addNode.importConfigError"));
+                        return;
+                    }
+
+                    // 区分 v3 配置文件与旧版纯 nodes 字典
+                    const isV3Config = Object.prototype.hasOwnProperty.call(raw, 'nodes');
+                    const inputNodes = isV3Config
+                        ? (raw.nodes as Record<string, ApiNode | OldApiNode>)
+                        : (raw as Record<string, ApiNode | OldApiNode>);
+                    const inputShortcuts = isV3Config ? (raw.shortcuts as ShortcutItem[] | undefined) : undefined;
+
+                    // 校验节点必填字段
+                    for (const key1 in inputNodes) {
+                        const requiredKeys = ['port', 'auth_type', 'auth_value'];
+                        for (const key2 of requiredKeys) {
+                            if (!Object.prototype.hasOwnProperty.call(inputNodes[key1], key2)) {
+                                handleError(`${t("addNode.importConfigError")} -> [${key1}].${key2} `);
+                                return;
                             }
                         }
-                        // v3 setAllNodes 接收 ApiNode[]，inputNodes 是字典，需 Object.values + oldApiNodeConvert
-                        nodesStore.setAllNodes(Object.values(inputNodes).map(oldApiNodeConvert));
-                        setCachedNodes(Object.values(nodesStore.nodes));
-                        handleMsg(t("addNode.importSucess"));
                     }
+
+                    // 校验快捷命令
+                    if (inputShortcuts !== undefined) {
+                        if (!Array.isArray(inputShortcuts)) {
+                            handleError(t("addNode.importConfigError"));
+                            return;
+                        }
+                        for (let i = 0; i < inputShortcuts.length; i++) {
+                            const sc = inputShortcuts[i];
+                            if (typeof sc?.label !== 'string' || typeof sc?.cmd !== 'string') {
+                                handleError(`${t("addNode.importConfigError")} -> shortcuts[${i}]`);
+                                return;
+                            }
+                        }
+                    }
+
+                    // 写入节点
+                    nodesStore.setAllNodes(Object.values(inputNodes).map(oldApiNodeConvert));
+                    setCachedNodes(Object.values(nodesStore.nodes));
+
+                    // 写入快捷命令（如存在）
+                    if (inputShortcuts) {
+                        shortcutsStore.setAll(inputShortcuts);
+                    }
+
+                    handleMsg(t("addNode.importConfigSucess"));
                 } catch (error) {
-                    handleError(`${t("addNode.importError")} ${error}`);
+                    handleError(`${t("addNode.importConfigError")} ${error}`);
                 }
             };
             reader.readAsText(file);
         }
     };
-
-
-
 };
 
 // N2 修正：v3 nodesStore.removeNode 接收 id: string。
@@ -240,17 +282,41 @@ watch(nodesStore.nodes, () => {
     left: 0;
     top: 0;
     height: 100%;
-    width: 20rem;
+    width: var(--sidebar-width, 20rem);
     z-index: 2;
     background: var(--color-bg);
+    transition: width 0.2s ease-in-out;
+}
 
+.sidebar-toggle {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.75rem;
+    height: 3rem;
+    padding: 0;
+    color: var(--color-font-1);
+    background: var(--color-bg);
+    border: none;
+    border-right: 1px solid var(--color-sub);
+    border-bottom: 1px solid var(--color-sub);
+    border-radius: 0;
+    cursor: pointer;
+}
+
+.sidebar-toggle:hover {
+    color: var(--color-main);
 }
 
 .node-list {
     display: flex;
     flex-direction: column;
     justify-content: space-between;
-    /* padding: 1rem; */
+    padding-left: 1.75rem;
     border-right: 1px solid var(--color-sub);
     height: 100%;
     width: 20rem;

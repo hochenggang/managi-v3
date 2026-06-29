@@ -6,6 +6,7 @@ package sshpool
 import (
 	"bytes"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"sync"
 	"time"
@@ -40,12 +41,16 @@ type Pool struct {
 
 // New 创建连接池。
 func New(cfg *config.Config) *Pool {
+	idleTimeout := time.Duration(cfg.SSHIdleTimeout) * time.Second
+	if idleTimeout <= 0 {
+		idleTimeout = 120 * time.Second
+	}
 	return &Pool{
 		conns:       make(map[string]*Connection),
 		perKeyLocks: make(map[string]*sync.Mutex),
 		cfg:         cfg,
 		maxSize:     20,
-		idleTimeout: 5 * time.Minute,
+		idleTimeout: idleTimeout,
 	}
 }
 
@@ -79,6 +84,7 @@ func (p *Pool) Get(node model.Node) (*Connection, error) {
 			if ok2 && c2 == c && c2.client != nil {
 				c2.refs++
 				c2.lastUsed = time.Now()
+				slog.Debug("ssh pool hit", "key", key)
 				p.mu.Unlock()
 				return c2, nil
 			}

@@ -29,9 +29,20 @@ export function useWebSocket(path: string, opts: WSOptions = {}) {
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let reconnectAttempts = 0
   let manualClose = false
+  let pageHidden = false
 
   const wsHost = getWsHost()
   const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${wsHost}${path}`
+
+  function handleVisibilityChange(): void {
+    pageHidden = document.hidden
+    if (!pageHidden && ws?.readyState === WebSocket.OPEN) {
+      // 切回前台立即补发一次 ping，并重置心跳定时器
+      ws.send(wsMessage('ping'))
+      startHeartbeat()
+    }
+  }
+  document.addEventListener('visibilitychange', handleVisibilityChange)
 
   function connect(): void {
     manualClose = false
@@ -61,9 +72,11 @@ export function useWebSocket(path: string, opts: WSOptions = {}) {
       }
     }
 
-    ws.onclose = () => {
+    ws.onclose = (ev: CloseEvent) => {
       connected.value = false
       stopHeartbeat()
+      // 日志记录关闭原因，便于排查后台重连问题
+      console.warn('[useWebSocket] closed', ev.code, ev.reason)
       if (!manualClose && reconnectAttempts < (opts.maxReconnect ?? 3)) {
         const delay = Math.min(1000 * 2 ** reconnectAttempts, 16000)
         reconnectAttempts++
@@ -84,6 +97,8 @@ export function useWebSocket(path: string, opts: WSOptions = {}) {
     const interval = opts.heartbeatInterval ?? 30000
     stopHeartbeat()
     heartbeatTimer = setInterval(() => {
+      // 标签页在后台时 JS 定时器会被节流，跳过发送；依赖服务端控制帧 Ping 保活
+      if (pageHidden) return
       if (ws?.readyState === WebSocket.OPEN) {
         ws.send(wsMessage('ping'))
       }
@@ -114,6 +129,7 @@ export function useWebSocket(path: string, opts: WSOptions = {}) {
       clearTimeout(reconnectTimer)
       reconnectTimer = null
     }
+    document.removeEventListener('visibilitychange', handleVisibilityChange)
     if (ws) {
       ws.onclose = null
       ws.onerror = null

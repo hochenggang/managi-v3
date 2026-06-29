@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"sync"
 	"time"
@@ -113,6 +114,37 @@ func (w *wsConn) writeMsg(data string) error {
 
 func (w *wsConn) writePong() error {
 	return w.writeRaw(websocket.TextMessage, []byte(`{"type":"pong"}`))
+}
+
+func (w *wsConn) writePing() error {
+	return w.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(10*time.Second))
+}
+
+func (w *wsConn) setPongHandler(h func(string) error) {
+	w.conn.SetPongHandler(h)
+}
+
+// startPingLoop 启动服务端 WS Ping 循环：定期发送控制帧 Ping，并在收到 Pong 时重置读超时。
+func startPingLoop(ctx context.Context, wc *wsConn, deadline time.Duration, intervalSec int) {
+	if intervalSec <= 0 {
+		intervalSec = 30
+	}
+	interval := time.Duration(intervalSec) * time.Second
+	_ = wc.setPongHandler(func(string) error {
+		return wc.setReadDeadline(time.Now().Add(deadline))
+	})
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := wc.writePing(); err != nil {
+				return
+			}
+		}
+	}
 }
 
 // parseEnvelope 解析 envelope，失败返回 ok=false。

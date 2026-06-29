@@ -23,6 +23,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -94,6 +95,12 @@ func sftpWSHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 
 		// 登录成功
 		_ = wc.writeLoginResult(true, "")
+
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+
+		// 服务端 WS 心跳：控制帧 Ping
+		go startPingLoop(ctx, wc, deadline, cfg.WSPingInterval)
 
 		// 主动列根目录（修复：原 connected 后前端空白需手动刷新）
 		listRoot(wc, sc, "/")

@@ -4,7 +4,7 @@
       <div class="bar">
         <div v-auto-animate class="buttons shortcuts">
           <span class="shortcuts-note shortcut">{{ t("cmdPanel.shortcut") }}</span>
-          <button class="small-button shortcut" v-for="(shortcut, index) in shortcuts" :key="index"
+          <button class="small-button shortcut" v-for="(shortcut, index) in shortcutsStore.shortcuts" :key="index"
             @click="fillCommand(shortcut.label, shortcut.cmd)"
             @contextmenu.prevent="showContextMenu($event, index)">
             {{ shortcut.label }}
@@ -72,6 +72,7 @@ import { ref, computed } from 'vue';
 import Modal from "@/components/Modal.vue";
 import ButtonWithSpinner from "@/components/ButtonWithSpinner.vue";
 import { useNodesStore } from '@/stores/nodesStore';
+import { useShortcutsStore } from '@/stores/shortcutsStore';
 import { generateNodeId } from '@/protocol/types';
 import { handleError, handleMsg } from "@/helper";
 import { batchSSH } from '@/api';
@@ -84,11 +85,12 @@ const { t } = useI18n()
 
 
 const nodesStore = useNodesStore();
+const shortcutsStore = useShortcutsStore();
+shortcutsStore.load();
 
 
 const command = ref('');
 const executionResults = ref<CmdsTestResult[]>([]);
-const shortcuts = ref<{ label: string; cmd: string }[]>([]);
 const newShortcutLabel = ref('');
 const showAddShortcutModal = ref(false);
 const showContextMenuFlag = ref(false);
@@ -98,18 +100,6 @@ const isExecuting = ref(false);
 
 const totalCount = computed(() => nodesStore.getSelectedNodes.length);
 const completedCount = ref(0);
-
-const loadShortcuts = () => {
-  const savedShortcuts = localStorage.getItem('shortcuts');
-  if (savedShortcuts) {
-    shortcuts.value = JSON.parse(savedShortcuts);
-  } else {
-    shortcuts.value = [{ "label": "Status", "cmd": "system_info=$(uname -a | awk '{print $1, $2, $3}')\ncpu_info=$(grep -m 1 \"model name\" /proc/cpuinfo | cut -d ':' -f 2 | sed 's/^ *//')\ncpu_cores=$(grep -c ^processor /proc/cpuinfo)\ncpu_usage=$(top -bn1 | grep \"Cpu(s)\" | sed \"s/.*, *\\([0-9.]*\\)%* id.*/\\1/\" | awk '{print 100 - $1\"%\"}')\ndisk_info=$(df -h | awk '/^\\/dev\\// {print $1, $3\"/\"$2, \"(\"$5\")\"}' | tr '\\n' ';' | sed 's/;$/ /')\nmemory_total=$(free -m | awk '/Mem:/ {print $2}')\nmemory_used=$(free -m | awk '/Mem:/ {print $3}')\nmemory_percent=$(free -m | awk '/Mem:/ {printf \"%.2f%%\", ($3/$2)*100}')\n\nmax_network_info=$(awk 'NR > 2 {rx+=$2; tx+=$10} END {printf \"%.2fG|%.2fG\", rx/1024/1024/1024, tx/1024/1024/1024}' /proc/net/dev)\nnetwork_in=$(echo \"$max_network_info\" | cut -d '|' -f1)\nnetwork_out=$(echo \"$max_network_info\" | cut -d '|' -f2)\nload_info=$(awk '{printf \"%.2f/%.2f/%.2f\", $1, $2, $3}' /proc/loadavg)\nprocess_count=$(ps -e | wc -l)\ntcp_connections=$(ss -t | grep -c ESTAB)\nudp_connections=$(ss -u | grep -c UNCONN)\nuptime_seconds=$(awk '{print int($1)}' /proc/uptime)\nuptime_days=$((uptime_seconds / 86400))\necho \"System: $system_info\"\necho \"CPU: $cpu_info $cpu_cores Virtual Core ($cpu_usage)\"\necho \"Disk: $disk_info\"\necho \"Memery: $memory_used\"M\"/$memory_total\"M\" ($memory_percent)\"\necho \"Trafic: IN $network_in OUT $network_out\"\necho \"Load: $load_info\"\necho \"Process Num: $process_count\"\necho \"Connections: TCP $tcp_connections UDP $udp_connections\"\necho \"Uptime: $uptime_days Days\"" }, { "label": "Change Password", "cmd": "echo \"$(whoami):Aabbcc\" | sudo chpasswd" }]
-    localStorage.setItem('shortcuts', JSON.stringify(shortcuts.value));
-  }
-};
-
-loadShortcuts();
 
 
 const fillCommand = (label: string, cmd: string) => {
@@ -126,9 +116,7 @@ const startAddShortcut = () => {
 
 const confirmAddShortcut = () => {
   if (newShortcutLabel.value && command.value) {
-    const newShortcut = { label: newShortcutLabel.value, cmd: command.value };
-    shortcuts.value.push(newShortcut);
-    localStorage.setItem('shortcuts', JSON.stringify(shortcuts.value));
+    shortcutsStore.add({ label: newShortcutLabel.value, cmd: command.value });
     newShortcutLabel.value = '';
     showAddShortcutModal.value = false;
   } else {
@@ -139,8 +127,7 @@ const confirmAddShortcut = () => {
 const deleteShortcut = (index: number) => {
   const yes = confirm(t("cmdPanel.shortcutDeleteConfirm"));
   if (yes) {
-    shortcuts.value.splice(index, 1);
-    localStorage.setItem('shortcuts', JSON.stringify(shortcuts.value));
+    shortcutsStore.remove(index);
   }
   closeContextMenu();
 };
@@ -157,11 +144,14 @@ const closeContextMenu = () => {
 };
 
 const renameShortcut = (index: number) => {
-  const shortcut = shortcuts.value[index];
+  const shortcut = shortcutsStore.shortcuts[index];
+  if (!shortcut) {
+    closeContextMenu();
+    return;
+  }
   const newLabel = prompt(t("cmdPanel.renameShortcut") || "Enter new name:", shortcut.label);
   if (newLabel && newLabel.trim()) {
-    shortcuts.value[index].label = newLabel.trim();
-    localStorage.setItem('shortcuts', JSON.stringify(shortcuts.value));
+    shortcutsStore.rename(index, newLabel.trim());
   }
   closeContextMenu();
 };
@@ -266,7 +256,7 @@ const copyCode = (text: string) => {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: calc(100% - 20rem);
+  width: calc(100% - var(--sidebar-width, 20rem));
   height: 100%;
 }
 

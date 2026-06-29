@@ -119,10 +119,11 @@ h2 {
   top: 0;
   right: 0;
   height: 100%;
-  width: calc(100% - 20rem);
+  width: calc(100% - var(--sidebar-width, 20rem));
   z-index: 2;
   background-color: var(--color-bg);
   overflow: auto;
+  transition: width 0.2s ease-in-out;
 }
 
 button.sucess {
