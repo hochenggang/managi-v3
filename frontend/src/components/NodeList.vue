@@ -41,15 +41,21 @@
             </ul>
 
             <div class="bar ">
+
                 <span class="footer-title">
                     @Managi
                 </span>
                 <div class="buttons ">
-                    <select value="" class="small-button" @change="handleLangChange">
+                    <!-- <select value="" class="small-button" >
                         <option :disabled="true" value="">Language</option>
                         <option value="en">English</option>
                         <option value="zh">中文</option>
-                    </select>
+                    </select> -->
+
+                    <button class="language-btn small-button" @click="handleLangChange">
+                        <svg t="1782719021282" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="10665" width="128" height="128"><path d="M785.1008 297.8816V121.4464L531.456 208.64l253.6448 89.2416zM499.3024 197.632L232.5504 102.4v184.1664l266.752-88.9344zM334.1824 337.408l44.4416-12.7488v53.9648l95.2832-34.9184v171.52l-38.0928 12.6464v-25.344l-63.488 25.344 0.256 95.4368-38.4 12.544-0.3072-94.4128-63.1808 24.576v19.0464l-38.144 12.6976V426.2912l101.632-31.744V337.3568z m101.632 60.3136l-57.1904 22.2208v63.488l57.1904-19.0464V397.7216z m-165.12 123.8016l63.488-22.2208V432.64l-63.488 22.2208v66.6624z m247.6544-308.3776L175.4112 331.008v470.016l342.9376-114.3808V213.1456z m9.5744 489.4208c-123.392 41.2672-248.2688 82.5344-371.5584 123.8016V318.3104L804.1472 102.4v202.1888l63.488 20.0704v489.0112l-339.712-111.104z m266.6496-20.1728l-44.9024-162.56-45.2608-164.1472-48.8448-18.944-44.6976 131.1744-45.056 132.3008 49.664 17.8688 19.2512-60.5696 91.4432 33.4848 19.5072 73.8304 48.896 17.5616z m-83.2512-146.5344c-10.5472-40.2944-21.1456-80.5888-31.5904-120.8832l-30.9248 97.6896 62.464 23.1936z m-30.5664 312.1152c-121.1904 75.776-241.6128 85.1968-365.3632 6.5024l-6.656 10.3424c118.4768 75.264 236.3392 74.0864 357.6832 6.0416 7.1168-4.096 14.08-8.192 20.992-12.544l14.0288 21.9136 31.8976-58.5728-66.56 4.4544 13.9776 21.8624z" fill="#82AAFC" p-id="10666"></path></svg>
+                    </button>
+
                     <button class="small-button" v-show="nodesLength > 0" @click="exploreNodes">{{
                         t("footer.actions.export") }}</button>
                     <button class="small-button" @click="importNodes">{{ t("footer.actions.import") }}</button>
@@ -96,10 +102,10 @@ const nodesLength = computed(() => Object.keys(nodesStore.nodes).length);
 const showAddNodeModal = ref(false);
 
 
-const handleLangChange = (event: Event) => {
-    const taget = event.target as HTMLSelectElement
-    localStorage.setItem('lang', taget.value)
-    setLanguage(taget.value)
+const handleLangChange = () => {
+    const nextLang = locale.value === 'en' ? 'zh' : 'en'
+    setLanguage(nextLang)
+    localStorage.setItem('lang', nextLang)
 }
 
 
@@ -290,7 +296,7 @@ watch(nodesStore.nodes, () => {
 
 .sidebar-toggle {
     position: fixed;
-    top: 0;
+    bottom: 0;
     left: 0;
     z-index: 10;
     display: flex;
@@ -300,10 +306,11 @@ watch(nodesStore.nodes, () => {
     height: 3rem;
     padding: 0;
     color: var(--color-font-1);
-    background: var(--color-bg);
+    background: transparent;
+    /* background: var(--color-bg); */
     border: none;
-    border-right: 1px solid var(--color-sub);
-    border-bottom: 1px solid var(--color-sub);
+    /* border-right: 1px solid var(--color-sub);
+    border-bottom: 1px solid var(--color-sub); */
     border-radius: 0;
     cursor: pointer;
 }
@@ -316,7 +323,6 @@ watch(nodesStore.nodes, () => {
     display: flex;
     flex-direction: column;
     justify-content: space-between;
-    padding-left: 1.75rem;
     border-right: 1px solid var(--color-sub);
     height: 100%;
     width: 20rem;
@@ -328,6 +334,7 @@ watch(nodesStore.nodes, () => {
     font-size: 0.9rem;
     flex-shrink: 0;
     color: var(--color-font-1);
+
 }
 
 
@@ -415,11 +422,20 @@ watch(nodesStore.nodes, () => {
 }
 
 .footer-title {
+    padding-left: 1.25rem;
     font-weight: lighter;
     color: var(--color-font-3);
 }
 
+.language-btn {
+    width: 1.5rem;
+    height: 1.5rem;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 
+}
 
 * {
     overflow: hidden;
