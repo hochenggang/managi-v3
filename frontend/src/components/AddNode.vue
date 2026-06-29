@@ -32,6 +32,10 @@
 
           <textarea v-model="newNode.auth_value" placeholder="" required></textarea>
         </label>
+        <label>
+          {{ t('addNode.group') }}
+          <input v-model="newNode.group" :placeholder="t('addNode.groupPlaceholder')" />
+        </label>
         <button class="sucess" type="submit">{{ t("addNode.actions.save") }}</button>
         <button type="button" @click="$emit('close')">{{ t("addNode.actions.cancel") }}</button>
       </form>
@@ -64,6 +68,7 @@ const props = defineProps({
       username: 'root',
       auth_type: 'password' as const,
       auth_value: '',
+      group: '',
     })
   }
 });

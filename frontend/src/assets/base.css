@@ -1,27 +1,136 @@
-:root {
+:root,
+.theme-nord {
+  /* Nord 暗色主题（默认） */
+  --color-accent: #88C0D0;
+  --color-main: #88C0D0;
+  --color-sub: #434C5E;
 
-  --color-main: #9ec1eb;
-  --color-sub: #d5e5f7;
-  --color-bg: #e4f0ff79;
-  
-  
-  --color-while: #f4f9ff;
-  --color-green: #1cad70;
-  --color-red: #eb4646;
-  --color-orange: #f59b00;
+  --color-bg: #2E3440;
+  --color-panel-bg: #3B4252;
+  --color-sidebar-bg: #2E3440;
+  --color-surface: #434C5E;
+  --color-input-bg: #2E3440;
+  --color-hover-bg: rgba(136, 192, 208, 0.12);
+  --color-selected-bg: rgba(136, 192, 208, 0.18);
+  --color-menu-bg: #3B4252;
 
-  --color-bg-1: #333333;
+  --color-border: #4C566A;
+  --color-border-subtle: #434C5E;
 
-  /* 文字主题色 */
-  --color-font-1: #555555;
-  /* 主要文字颜色，深灰色 */
-  --color-font-2: #555555;
-  /* 次要文字颜色，中灰色 */
-  --color-font-3: #777777;
-  /* 辅助文字颜色，浅灰色 */
+  --color-font-1: #D8DEE9;
+  --color-font-2: #E5E9F0;
+  --color-font-3: #81A1C1;
 
+  --color-green: #A3BE8C;
+  --color-red: #BF616A;
+  --color-orange: #D08770;
+  --color-yellow: #EBCB8B;
+
+  --color-tab-bar-bg: #2E3440;
+  --color-tab-active-bg: #3B4252;
+  --color-tab-inactive-bg: #2E3440;
+  --color-tab-hover-bg: #434C5E;
+  --color-terminal-bg: #002b36;
 }
 
+.theme-nord-light {
+  --color-accent: #5E81AC;
+  --color-main: #5E81AC;
+  --color-sub: #D8DEE9;
+
+  --color-bg: #ECEFF4;
+  --color-panel-bg: #FFFFFF;
+  --color-sidebar-bg: #ECEFF4;
+  --color-surface: #FFFFFF;
+  --color-input-bg: #ECEFF4;
+  --color-hover-bg: rgba(94, 129, 172, 0.12);
+  --color-selected-bg: rgba(94, 129, 172, 0.18);
+  --color-menu-bg: #FFFFFF;
+
+  --color-border: #D8DEE9;
+  --color-border-subtle: #E5E9F0;
+
+  --color-font-1: #2E3440;
+  --color-font-2: #3B4252;
+  --color-font-3: #4C566A;
+
+  --color-green: #A3BE8C;
+  --color-red: #BF616A;
+  --color-orange: #D08770;
+  --color-yellow: #EBCB8B;
+
+  --color-tab-bar-bg: #ECEFF4;
+  --color-tab-active-bg: #FFFFFF;
+  --color-tab-inactive-bg: #ECEFF4;
+  --color-tab-hover-bg: #D8DEE9;
+  --color-terminal-bg: #FFFFFF;
+}
+
+.theme-dracula {
+  --color-accent: #8BE9FD;
+  --color-main: #8BE9FD;
+  --color-sub: #44475A;
+
+  --color-bg: #282A36;
+  --color-panel-bg: #44475A;
+  --color-sidebar-bg: #282A36;
+  --color-surface: #44475A;
+  --color-input-bg: #282A36;
+  --color-hover-bg: rgba(139, 233, 253, 0.12);
+  --color-selected-bg: rgba(139, 233, 253, 0.18);
+  --color-menu-bg: #44475A;
+
+  --color-border: #6272A4;
+  --color-border-subtle: #44475A;
+
+  --color-font-1: #F8F8F2;
+  --color-font-2: #F8F8F2;
+  --color-font-3: #BD93F9;
+
+  --color-green: #50FA7B;
+  --color-red: #FF5555;
+  --color-orange: #FFB86C;
+  --color-yellow: #F1FA8C;
+
+  --color-tab-bar-bg: #282A36;
+  --color-tab-active-bg: #44475A;
+  --color-tab-inactive-bg: #282A36;
+  --color-tab-hover-bg: #6272A4;
+  --color-terminal-bg: #282A36;
+}
+
+.theme-tokyo-night {
+  --color-accent: #7AA2F7;
+  --color-main: #7AA2F7;
+  --color-sub: #24283B;
+
+  --color-bg: #1A1B26;
+  --color-panel-bg: #24283B;
+  --color-sidebar-bg: #1A1B26;
+  --color-surface: #24283B;
+  --color-input-bg: #1A1B26;
+  --color-hover-bg: rgba(122, 162, 247, 0.12);
+  --color-selected-bg: rgba(122, 162, 247, 0.18);
+  --color-menu-bg: #24283B;
+
+  --color-border: #414868;
+  --color-border-subtle: #24283B;
+
+  --color-font-1: #A9B1D6;
+  --color-font-2: #C0CAF5;
+  --color-font-3: #565F89;
+
+  --color-green: #9ECE6A;
+  --color-red: #F7768E;
+  --color-orange: #FF9E64;
+  --color-yellow: #E0AF68;
+
+  --color-tab-bar-bg: #1A1B26;
+  --color-tab-active-bg: #24283B;
+  --color-tab-inactive-bg: #1A1B26;
+  --color-tab-hover-bg: #414868;
+  --color-terminal-bg: #1A1B26;
+}
 
 *,
 *::before,
@@ -34,10 +143,20 @@
   outline: none;
 }
 
-
 body {
-  font-size: 15px;
+  font-size: 14px;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* 隐藏滚动条但保留滚动能力 */
+*::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+* {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }

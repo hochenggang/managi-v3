@@ -63,6 +63,9 @@ export function useSFTP(node: ApiNode) {
   const { connected, connect, send, close } = useWebSocket('/ws/sftp', {
     authPayload: sftpLogin(node),
     maxReconnect: 3,
+    onClose: () => {
+      loading.value = false
+    },
     onText: (data) => {
       const msg = parseWSMessage(data)
       if (!msg) return
@@ -70,6 +73,7 @@ export function useSFTP(node: ApiNode) {
         case 'login': {
           const r = msg.data as WSLoginResult
           if (r && !r.success) {
+            loading.value = false
             handleError(`登录失败：${r.message ?? 'unknown'}`)
             close() // 抑制重连
           }
@@ -82,6 +86,7 @@ export function useSFTP(node: ApiNode) {
             files.value = d.files
             if (d.path) currentPath.value = d.path
           }
+          loading.value = false
           resolvePending(msg)
           return
         }
@@ -100,6 +105,7 @@ export function useSFTP(node: ApiNode) {
           resolvePending(msg)
           return
         case 'error':
+          loading.value = false
           handleError((msg.data as WSError)?.message ?? 'SFTP error')
           resolvePending(msg)
           return
@@ -121,6 +127,7 @@ export function useSFTP(node: ApiNode) {
     },
   })
 
+  loading.value = true
   connect()
 
   /** sendAndAwait 发送并等待服务端响应（resolve 时 clear 超时，避免泄漏）。

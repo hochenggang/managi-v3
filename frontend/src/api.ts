@@ -106,7 +106,23 @@ export function oldApiNodeConvert(n: ApiNode | OldApiNode): ApiNode {
       username: n.ssh_username,
       auth_type: n.auth_type,
       auth_value: n.auth_value,
+      group: 'group' in n ? (n as unknown as ApiNode).group : undefined,
     }
   }
   return n
+}
+
+export function getCachedGroups(): string[] {
+  const raw = localStorage.getItem('cached-groups')
+  if (!raw) return []
+  try {
+    const arr = JSON.parse(raw) as unknown
+    return Array.isArray(arr) ? (arr as string[]).filter((g) => typeof g === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+export function setCachedGroups(list: string[]): void {
+  localStorage.setItem('cached-groups', JSON.stringify(list))
 }

@@ -10,6 +10,7 @@ export interface ApiNode {
   username: string
   auth_type: 'password' | 'key'
   auth_value: string
+  group?: string
 }
 
 /** 旧版节点格式（兼容迁移用）。 */
@@ -48,7 +49,9 @@ export interface ShortcutItem {
 export interface AppConfig {
   version: 3
   nodes: Record<string, ApiNode>
+  groups: string[]
   shortcuts: ShortcutItem[]
+  settings?: Partial<import('@/stores/settingsStore').Settings>
 }
 
 /** 节点唯一 ID：host:port。 */

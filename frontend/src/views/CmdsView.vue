@@ -1,76 +1,69 @@
 <template>
-  <main class="panel">
-    <div v-if="Object.keys(nodesStore.nodes).length > 0">
-      <div class="bar">
-        <div v-auto-animate class="buttons shortcuts">
-          <span class="shortcuts-note shortcut">{{ t("cmdPanel.shortcut") }}</span>
-          <button class="small-button shortcut" v-for="(shortcut, index) in shortcutsStore.shortcuts" :key="index"
-            @click="fillCommand(shortcut.label, shortcut.cmd)"
-            @contextmenu.prevent="showContextMenu($event, index)">
-            {{ shortcut.label }}
-          </button>
-          <button class="small-button shortcut" @click="startAddShortcut">+</button>
-        </div>
-      </div>
-      <div class="command-container">
+  <main class="batch-tab">
+    <QuickCommandPanel
+      :custom-commands="shortcutsStore.shortcuts"
+      @select="command = $event"
+      @rename="handleRenameShortcut"
+      @delete="handleDeleteShortcut"
+    />
 
-        <textarea v-model="command" :placeholder="t('cmdPanel.commandPlaceholder')" class="command-input"></textarea>
+    <div class="batch-main">
+      <div class="command-area">
+        <textarea
+          v-model="command"
+          :placeholder="t('cmdPanel.commandPlaceholder')"
+          class="command-input"
+          @keydown.ctrl.enter="triggerExecute"
+        ></textarea>
 
-        <Modal @close="showAddShortcutModal = false" v-if="showAddShortcutModal">
-          <main class="modal-content">
-
-            <h2>{{ t("cmdPanel.saveShortCut") }}</h2>
-            <input class="shortcut-input" v-model="newShortcutLabel"
-              :placeholder="t('cmdPanel.saveShortCutPlaceholder')" autofocus />
-            <div class="buttons">
-              <button class="sucess" @click="confirmAddShortcut">{{ t("cmdPanel.confirmAddShortcut") }}</button>
-              <button @click="showAddShortcutModal = false">{{ t("cmdPanel.cancelShortCut") }}</button>
-            </div>
-          </main>
-        </Modal>
-
-        <div v-if="showContextMenuFlag" class="context-menu" :style="{ top: contextMenuPosition.y + 'px', left: contextMenuPosition.x + 'px' }">
-          <div class="context-menu-item" @click="renameShortcut(contextMenuIndex)">{{ t("cmdPanel.rename") || "Rename" }}</div>
-          <div class="context-menu-item danger" @click="deleteShortcut(contextMenuIndex)">{{ t("cmdPanel.delete") || "Delete" }}</div>
-        </div>
-        <div v-if="showContextMenuFlag" class="context-menu-overlay" @click="closeContextMenu"></div>
-
-        <div class="action-bar">
+        <div class="command-actions">
           <ButtonWithSpinner class="execute-button" :loading="isExecuting" :action="executeCommand">
             {{ isExecuting ? t("cmdPanel.executing") : t("cmdPanel.executeCommand") }}
           </ButtonWithSpinner>
-
+          <button class="small-button save-button" @click="startAddShortcut" :disabled="command.length < 2">
+            {{ t("cmdPanel.saveShortCut") }}
+          </button>
         </div>
-        <ul v-auto-animate class="results">
-          <li v-for="(result, index) in executionResults" :key="generateNodeId(result.node)" class="result">
-            <div class="result-header">
-              <strong :class="{ 'success': result.success, 'failed': !result.success }">
-                {{ nodesStore.getNodeById(generateNodeId(result.node))?.name || result.node.host }}
-              </strong>
-              <span class="execution-time">{{ result.time_elapsed }}s</span>
-            </div>
-            <div class="output-block" v-if="result.output && result.output.length > 0">
-              <pre><code>{{ result.output.join('\n') }}</code><button class="small-button copy-button" @click="copyCode(result.output.join(''))">Copy</button></pre>
-            </div>
-            <div class="output-block error-block" v-if="result.error && result.error.length > 0">
-              <pre><code>{{ result.error.join('\n') }}</code><button class="small-button copy-button" @click="copyCode(result.error.join(''))">Copy</button></pre>
-            </div>
-          </li>
-        </ul>
       </div>
 
+      <ul v-auto-animate class="results">
+        <li v-for="(result, index) in executionResults" :key="generateNodeId(result.node) + index" class="result">
+          <div class="result-header">
+            <strong :class="{ 'success': result.success, 'failed': !result.success }">
+              {{ nodesStore.getNodeById(generateNodeId(result.node))?.name || result.node.host }}
+            </strong>
+            <span class="execution-time">{{ result.time_elapsed }}s</span>
+          </div>
+          <div class="output-block" v-if="result.output && result.output.length > 0">
+            <pre><code>{{ result.output.join('\n') }}</code><button class="small-button copy-button" @click="copyCode(result.output.join(''))">{{ t('cmdPanel.copy') }}</button></pre>
+          </div>
+          <div class="output-block error-block" v-if="result.error && result.error.length > 0">
+            <pre><code>{{ result.error.join('\n') }}</code><button class="small-button copy-button" @click="copyCode(result.error.join(''))">{{ t('cmdPanel.copy') }}</button></pre>
+          </div>
+        </li>
+      </ul>
     </div>
-    <div class="full-center" v-if="nodesStore.nodes && Object.keys(nodesStore.nodes).length === 0">
-      <p>{{ t("cmdPanel.addNodeToContinue") }}</p>
-    </div>
+
+    <Modal @close="showAddShortcutModal = false" v-if="showAddShortcutModal">
+      <main class="modal-content">
+        <h2>{{ t("cmdPanel.saveShortCut") }}</h2>
+        <input class="shortcut-input" v-model="newShortcutLabel" :placeholder="t('cmdPanel.saveShortCutPlaceholder')" autofocus />
+        <div class="buttons">
+          <button class="sucess" @click="confirmAddShortcut">{{ t("cmdPanel.confirmAddShortcut") }}</button>
+          <button @click="showAddShortcutModal = false">{{ t("cmdPanel.cancelShortCut") }}</button>
+        </div>
+      </main>
+    </Modal>
   </main>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 import Modal from "@/components/Modal.vue";
 import ButtonWithSpinner from "@/components/ButtonWithSpinner.vue";
+import QuickCommandPanel from "@/components/QuickCommandPanel.vue";
 import { useNodesStore } from '@/stores/nodesStore';
 import { useShortcutsStore } from '@/stores/shortcutsStore';
 import { generateNodeId } from '@/protocol/types';
@@ -78,33 +71,16 @@ import { handleError, handleMsg } from "@/helper";
 import { batchSSH } from '@/api';
 import type { CmdsTestResult } from '@/protocol/types';
 
-
-import { useI18n } from 'vue-i18n'
-
 const { t } = useI18n()
-
-
 const nodesStore = useNodesStore();
 const shortcutsStore = useShortcutsStore();
 shortcutsStore.load();
-
 
 const command = ref('');
 const executionResults = ref<CmdsTestResult[]>([]);
 const newShortcutLabel = ref('');
 const showAddShortcutModal = ref(false);
-const showContextMenuFlag = ref(false);
-const contextMenuIndex = ref(-1);
-const contextMenuPosition = ref({ x: 0, y: 0 });
 const isExecuting = ref(false);
-
-const totalCount = computed(() => nodesStore.getSelectedNodes.length);
-const completedCount = ref(0);
-
-
-const fillCommand = (label: string, cmd: string) => {
-  command.value = cmd;
-};
 
 const startAddShortcut = () => {
   if (command.value.length < 2) {
@@ -124,37 +100,22 @@ const confirmAddShortcut = () => {
   }
 };
 
-const deleteShortcut = (index: number) => {
-  const yes = confirm(t("cmdPanel.shortcutDeleteConfirm"));
-  if (yes) {
-    shortcutsStore.remove(index);
-  }
-  closeContextMenu();
-};
+const handleRenameShortcut = (index: number) => {
+  const item = shortcutsStore.shortcuts[index]
+  if (!item) return
+  const name = window.prompt(t('cmdPanel.renameShortcut'), item.label)
+  if (name) shortcutsStore.rename(index, name.trim())
+}
 
-const showContextMenu = (event: MouseEvent, index: number) => {
-  contextMenuIndex.value = index;
-  contextMenuPosition.value = { x: event.clientX, y: event.clientY };
-  showContextMenuFlag.value = true;
-};
-
-const closeContextMenu = () => {
-  showContextMenuFlag.value = false;
-  contextMenuIndex.value = -1;
-};
-
-const renameShortcut = (index: number) => {
-  const shortcut = shortcutsStore.shortcuts[index];
-  if (!shortcut) {
-    closeContextMenu();
-    return;
+const handleDeleteShortcut = (index: number) => {
+  if (confirm(t('cmdPanel.shortcutDeleteConfirm'))) {
+    shortcutsStore.remove(index)
   }
-  const newLabel = prompt(t("cmdPanel.renameShortcut") || "Enter new name:", shortcut.label);
-  if (newLabel && newLabel.trim()) {
-    shortcutsStore.rename(index, newLabel.trim());
-  }
-  closeContextMenu();
-};
+}
+
+const triggerExecute = () => {
+  executeCommand().catch(() => {})
+}
 
 const executeCommand = async () => {
   if (command.value.length < 2) {
@@ -165,7 +126,6 @@ const executeCommand = async () => {
   }
 
   isExecuting.value = true;
-  completedCount.value = 0;
   executionResults.value = [];
 
   const selectedNodes = nodesStore.getSelectedNodes;
@@ -174,7 +134,6 @@ const executeCommand = async () => {
   try {
     const results = await batchSSH(selectedNodes, cmds);
     executionResults.value = results;
-    completedCount.value = results.length;
   } catch (error: any) {
     console.error(error);
     handleError(error);
@@ -182,7 +141,6 @@ const executeCommand = async () => {
     isExecuting.value = false;
   }
 };
-
 
 const copyCode = (text: string) => {
   navigator.clipboard.writeText(text).then(() => {
@@ -194,77 +152,70 @@ const copyCode = (text: string) => {
 </script>
 
 <style scoped>
-.panel {
+.batch-tab {
+  display: flex;
+  height: 100%;
   background-color: var(--color-bg);
+  overflow: hidden;
 }
 
-.shortcuts {
-  margin: 0.5rem 0;
-  flex-wrap: no-wrap;
-  justify-content: left;
+.batch-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 0.75rem;
+  gap: 0.75rem;
+  overflow: hidden;
 }
 
-.shortcuts-note {
-  font-size: 0.85rem;
-  color: var(--color-font-1);
-}
-
-.shortcut {
-  position: relative;
+.command-area {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
   flex-shrink: 0;
-  width: auto;
-  transition: all 0.2s ease-in-out;
-}
-
-.shortcut-input {
-  margin: 0.5rem 0;
-  line-height: 1.5rem;
 }
 
 .command-input {
   width: 100%;
-  height: 100px;
-  padding: 10px;
-  background-color: var(--color-background-3);
-  font-size: 0.8rem;
+  height: 7rem;
+  padding: 0.5rem;
+  background-color: var(--color-input-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  font-size: 0.85rem;
+  color: var(--color-font-1);
+  resize: none;
 }
 
-.action-bar {
+.command-actions {
   display: flex;
-  align-items: center;
-  gap: 1rem;
-  margin: 0.5rem 0;
+  gap: 0.5rem;
 }
 
 .execute-button {
-  font-size: 0.8rem;
+  font-size: 0.85rem;
 }
 
-.execution-info {
+.save-button {
   font-size: 0.85rem;
-  color: var(--color-font-1);
+  flex-shrink: 0;
 }
 
 .results {
+  flex: 1;
   margin: 0;
   padding: 0;
-  margin-top: 0.5rem;
   list-style: none;
-}
-
-.full-center {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: calc(100% - var(--sidebar-width, 20rem));
-  height: 100%;
+  overflow-y: auto;
+  min-height: 0;
 }
 
 .result {
   padding: 0.5rem;
-  background-color: var(--color-background-3);
-  border-radius: 5px;
-  border: 1px solid #ddd;
+  background-color: var(--color-panel-bg);
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
   margin-bottom: 0.5rem;
   font-size: 0.85rem;
 }
@@ -278,7 +229,7 @@ const copyCode = (text: string) => {
 
 .execution-time {
   font-size: 0.75rem;
-  color: var(--color-font-1);
+  color: var(--color-font-3);
 }
 
 .success {
@@ -294,8 +245,8 @@ const copyCode = (text: string) => {
 .output-block {
   margin: 0.5rem 0;
   position: relative;
-  background-color: #f4f4f4;
-  border-radius: 5px;
+  background-color: var(--color-input-bg);
+  border-radius: 4px;
   overflow-x: auto;
 }
 
@@ -303,30 +254,18 @@ const copyCode = (text: string) => {
   margin: 0;
   white-space: pre-wrap;
   word-wrap: break-word;
-  padding: 0.75rem 0;
-  padding-left: 1rem;
+  padding: 0.75rem 1rem;
 }
 
 .output-block code {
   display: block;
   font-family: monospace;
   font-size: 0.8rem;
-  line-height: 1;
+  line-height: 1.4;
 }
 
-.output-block::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 0;
-  width: 0.5rem;
-  height: 100%;
-  background-color: #e0e0e0;
-  border-right: 1px solid #ccc;
-}
-
-.error-block::before {
-  background-color: var(--color-orange);
+.error-block {
+  border-left: 3px solid var(--color-orange);
 }
 
 .copy-button {
@@ -339,43 +278,11 @@ const copyCode = (text: string) => {
 
 .modal-content {
   width: 25rem;
-  padding: 2rem;
+  padding: 1.5rem;
 }
 
-.context-menu {
-  position: fixed;
-  background: var(--color-while);
-  border: 1px solid #ddd;
-  border-radius: 4px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-  z-index: 1000;
-  min-width: 100px;
-}
-
-.context-menu-item {
-  padding: 8px 16px;
-  cursor: pointer;
-  font-size: 0.85rem;
-}
-
-.context-menu-item:hover {
-  background: var(--color-bg);
-}
-
-.context-menu-item.danger {
-  color: var(--color-red);
-}
-
-.context-menu-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 999;
-}
-
-.command-container {
-  padding: 0.5rem;
+.shortcut-input {
+  margin: 0.5rem 0;
+  line-height: 1.5rem;
 }
 </style>

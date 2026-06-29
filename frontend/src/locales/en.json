@@ -6,12 +6,26 @@
         "actions": {
             "all": "All",
             "none": "None",
-            "add": "Add node"
+            "add": "Add node",
+            "edit": "Edit",
+            "delete": "Delete",
+            "batch": "Batch",
+            "settings": "Settings"
         }
     },
     "sidebar": {
         "collapse": "Collapse Sidebar",
-        "expand": "Expand Sidebar"
+        "expand": "Expand Sidebar",
+        "search": "Search hosts...",
+        "allHosts": "All Hosts",
+        "newGroup": "New Group",
+        "newGroupPlaceholder": "Enter group name",
+        "renameGroup": "Rename Group",
+        "renameGroupPlaceholder": "Enter new group name",
+        "deleteGroup": "Delete Group",
+        "deleteGroupConfirm": "Delete group",
+        "moveToGroup": "Move to",
+        "moveToUngrouped": "Move out of group"
     },
     "footer": {
         "actions": {
@@ -34,6 +48,8 @@
         "authTypePrivateKey": "Private Key",
         "authValue": "Password or Private Key",
         "authValuePlaceholder": "Enter value of Password or Private Key.",
+        "group": "Group:",
+        "groupPlaceholder": "Leave empty for default group",
         "actions": {
             "save": "Save",
             "cancel": "Cancel"
@@ -53,6 +69,7 @@
         "confirmAddShortcut": "Confirm",
         "cancelShortCut": "Cancel",
         "executeCommand": "Execute",
+        "executing": "Executing...",
         "addNodeToContinue": "Add a node to proceed",
         "noCmd": "Input is empty. Cannot save as a shortcut.",
         "shortcutNameRequired": "Enter a shortcut name.",
@@ -63,12 +80,15 @@
         "emptyCmd": "Input is empty.",
         "nothingSelected": "Select at least one node to proceed.",
         "copied": "Copied.",
-        "copyError": "Copy failed."
+        "copyError": "Copy failed.",
+        "copy": "Copy"
     },
     "xtermPanel": {
         "finder": "File Manager",
+        "terminal": "Terminal",
         "back": "Back",
-        "hello": "Hover over a node on the left and click the terminal icon to open a connection."
+        "hello": "Hover over a node on the left and click the terminal icon to open a connection.",
+        "idle": "No node connected"
     },
     "finder": {
         "actions": {
@@ -85,6 +105,7 @@
         "empty": "Empty",
         "upDir": "..",
         "connecting": "Connecting",
+        "connected": "Connected",
         "disconnected": "Connection lost",
         "reconnecting": "Reconnecting soon",
         "error": "An error occurred",
@@ -99,5 +120,70 @@
         "current": ", Selected ",
         "file": "File",
         "dir": "Dir"
+    },
+    "tabs": {
+        "close": "Close",
+        "closeOthers": "Close Others",
+        "closeAll": "Close All",
+        "empty": "No tabs",
+        "newBatch": "New Batch Tab",
+        "batch": "Batch",
+        "terminal": "Terminal",
+        "sftp": "SFTP",
+        "settings": "Settings"
+    },
+    "quickCommand": {
+        "searchPlaceholder": "Search commands...",
+        "noResult": "No matching commands",
+        "categories": {
+            "system": "System",
+            "network": "Network",
+            "text": "Text",
+            "custom": "Custom"
+        },
+        "cmds": {
+            "systemInfo": "System Info",
+            "cpu": "CPU",
+            "memory": "Memory",
+            "disk": "Disk",
+            "process": "Processes",
+            "uptime": "Uptime",
+            "ip": "IP Address",
+            "route": "Route",
+            "ping": "Ping",
+            "ports": "Ports",
+            "findLargeFiles": "Large Files",
+            "tailLog": "Tail Log",
+            "grep": "Text Search"
+        }
+    },
+    "settings": {
+        "appearance": {
+            "title": "Appearance",
+            "theme": "Theme",
+            "language": "Language"
+        },
+        "terminal": {
+            "title": "Terminal",
+            "fontSize": "Font Size",
+            "fontFamily": "Font Family"
+        },
+        "security": {
+            "title": "Security",
+            "desc": "Security settings will be available in a future release."
+        },
+        "data": {
+            "title": "Data",
+            "desc": "Export or import a config file containing nodes, groups and shortcuts.",
+            "export": "Export Config",
+            "import": "Import Config",
+            "exportSuccess": "Config exported",
+            "importSuccess": "Config imported",
+            "importError": "Config import failed"
+        },
+        "about": {
+            "title": "About",
+            "desc": "Managi is a lightweight server management tool."
+        }
     }
 }

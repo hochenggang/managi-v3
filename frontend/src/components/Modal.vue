@@ -26,8 +26,9 @@ const emits = defineEmits(['close'])
 }
 
 .modal {
-  border-radius: 3px;
+  border-radius: 6px;
   position: absolute;
-  background: var(--color-while);
+  background: var(--color-panel-bg);
+  border: 1px solid var(--color-border);
 }
 </style>

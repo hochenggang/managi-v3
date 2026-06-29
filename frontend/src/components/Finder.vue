@@ -1,6 +1,5 @@
 <template>
-  <Modal @close="emit('close')">
-    <div class="file-manager" :class="{ progress: isUploading || isDownloading }">
+  <div class="file-manager" :class="{ progress: isUploading || isDownloading }">
       <div class="toolbar">
         <div class="path-navigator">
           <span v-for="(part, index) in currentPathParts" :key="index" @click="navigateTo(index)"
@@ -102,7 +101,7 @@
       <div v-if="showCreateFolderDialog" class="dialog-overlay">
         <div class="dialog">
           <div class="dialog-header">
-            {{ t("finder.newDir") }}
+            {{ t("finder.actions.newDir") }}
             <button class="small-button close-btn" @click="showCreateFolderDialog = false">×</button>
           </div>
           <div class="dialog-body">
@@ -118,7 +117,6 @@
 
       <input type="file" ref="fileInput" style="display: none" @change="handleFileUpload" multiple />
     </div>
-  </Modal>
 </template>
 
 <script setup lang="ts">
@@ -127,7 +125,6 @@
 // 替代 v2 裸二进制 ws.send(data)（无分片、无断点续传、无进度）。
 import { ref, computed, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
-import Modal from '@/components/Modal.vue'
 import CirclePercent from '@/components/CirclePercent.vue'
 import { useSFTP } from '@/composables/useSFTP'
 import { handleError, handleMsg } from '@/helper'
@@ -135,7 +132,6 @@ import type { ApiNode } from '@/protocol/types'
 import type { SFTPFile } from '@/protocol/sftp'
 
 const props = defineProps<{ node: ApiNode }>()
-const emit = defineEmits(['close'])
 const { t } = useI18n()
 
 const {
@@ -284,14 +280,8 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   height: 100%;
-  background-color: var(--color-bg);
-  border-radius: 4px;
-  overflow: auto;
-  width: 100%;
-  min-width: 50rem;
-  height: 90%;
-  min-height: 30rem;
-  max-height: 90%;
+  background-color: var(--color-panel-bg);
+  overflow: hidden;
 }
 
 .progress {
@@ -302,12 +292,12 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 3rem;
-  width: 100%;
-  padding: 8px 16px;
-  border-bottom: 1px solid #e0e0e0;
+  height: 2.5rem;
+  padding: 0 0.75rem;
+  border-bottom: 1px solid var(--color-border);
   color: var(--color-font-1);
-  background-color: var(--color-while);
+  background-color: var(--color-panel-bg);
+  flex-shrink: 0;
 }
 
 .path-navigator {
@@ -316,11 +306,11 @@ onBeforeUnmount(() => {
   padding: 0 0.25rem;
   margin-right: 1rem;
   align-items: center;
-  border: 1px solid #ddd;
+  border: 1px solid var(--color-border);
   border-radius: 4px;
   white-space: nowrap;
-  overflow-x: scroll;
-  min-width: 15rem;
+  overflow-x: auto;
+  min-width: 10rem;
   height: 1.75rem;
 }
 
@@ -330,16 +320,17 @@ onBeforeUnmount(() => {
   padding: 2px 4px;
   border-radius: 2px;
   margin-right: 2px;
+  font-size: 0.85rem;
 }
 
 .path-part:hover {
-  box-shadow: rgba(0, 0, 0, 0.05) 0px 0px 0px 1px;
+  background-color: var(--color-hover-bg);
 }
 
 .actions {
   display: flex;
-  gap: 8px;
-  height: 1.75rem;
+  gap: 0.5rem;
+  align-items: center;
 }
 
 .actions button {
@@ -349,14 +340,12 @@ onBeforeUnmount(() => {
   justify-content: center;
   width: auto;
   height: auto;
-}
-
-.actions button:hover {
-  box-shadow: rgba(0, 0, 0, 0.05) 0px 0px 0px 1px;
+  padding: 0.25rem;
 }
 
 .actions button:disabled {
   cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .actions button svg {
@@ -364,7 +353,7 @@ onBeforeUnmount(() => {
 }
 
 .actions button:hover svg {
-  fill: var(--color-main);
+  fill: var(--color-accent);
 }
 
 .uploading {
@@ -372,21 +361,24 @@ onBeforeUnmount(() => {
 }
 
 .file-list {
+  flex: 1;
   overflow-y: auto;
-  border-bottom: 1px solid #e0e0e0;
-  display: block;
-  height: 30rem;
-  background-color: var(--color-while);
+  border-bottom: 1px solid var(--color-border);
+  background-color: var(--color-panel-bg);
+  min-height: 0;
 }
 
 .file-list-header {
   display: flex;
-  padding: 8px 16px;
-  border-bottom: 1px solid #e0e0e0;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--color-border);
   font-weight: bold;
   position: sticky;
   top: 0;
   z-index: 1;
+  background-color: var(--color-panel-bg);
+  color: var(--color-font-2);
+  font-size: 0.85rem;
 }
 
 .file-name {
@@ -399,52 +391,51 @@ onBeforeUnmount(() => {
 }
 
 .file-size {
-  width: 120px;
+  width: 100px;
   text-align: right;
-  padding-right: 16px;
+  padding-right: 1rem;
 }
 
 .file-modified {
-  width: 180px;
+  width: 160px;
 }
 
 .file-items {
-  display: block;
-  height: 28rem;
-  padding-bottom: 3rem;
+  padding-bottom: 2rem;
 }
 
 .file-item {
   display: flex;
   align-items: center;
-  padding: 8px 16px;
-  border-bottom: 1px solid #f0f0f0;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--color-border-subtle);
   cursor: pointer;
+  font-size: 0.85rem;
 }
 
 .file-item:hover {
-  background-color: var(--color-bg);
+  background-color: var(--color-hover-bg);
 }
 
 .file-item.selected {
-  background-color: var(--color-sub);
+  background-color: var(--color-selected-bg);
 }
 
 .file-icon {
   width: 24px;
   height: 24px;
-  margin-right: 8px;
+  margin-right: 0.5rem;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
 .file-icon svg {
-  fill: var(--color-font-1);
+  fill: var(--color-font-2);
 }
 
 .directory .file-icon svg {
-  fill: var(--color-main);
+  fill: var(--color-accent);
 }
 
 .loading,
@@ -453,29 +444,25 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   height: 20rem;
-  color: var(--color-font-1);
+  color: var(--color-font-3);
 }
 
 .status-bar {
-  position: absolute;
-  height: 2rem;
-  width: 100%;
-  bottom: 0;
-  left: 0;
+  height: 1.75rem;
   display: flex;
   justify-content: space-between;
-  padding: 8px 16px;
-  font-size: 12px;
-  color: var(--color-font-1);
-  background-color: var(--color-while);
+  align-items: center;
+  padding: 0 0.75rem;
+  font-size: 0.75rem;
+  color: var(--color-font-2);
+  background-color: var(--color-panel-bg);
+  border-top: 1px solid var(--color-border);
+  flex-shrink: 0;
 }
 
 .dialog-overlay {
   position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
+  inset: 0;
   background-color: rgba(0, 0, 0, 0.5);
   display: flex;
   align-items: center;
@@ -484,50 +471,54 @@ onBeforeUnmount(() => {
 }
 
 .dialog {
-  background-color: #fff;
-  border-radius: 4px;
-  width: 400px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  background-color: var(--color-surface);
+  border-radius: 6px;
+  width: 26rem;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--color-border);
 }
 
 .dialog-header {
-  padding: 16px;
-  border-bottom: 1px solid #e0e0e0;
+  padding: 1rem;
+  border-bottom: 1px solid var(--color-border);
   font-weight: bold;
   display: flex;
   justify-content: space-between;
   align-items: center;
+  color: var(--color-font-1);
 }
 
 .close-btn {
   background: none;
   border: none;
-  font-size: 20px;
+  font-size: 1.25rem;
   cursor: pointer;
-  color: #888;
+  color: var(--color-font-3);
 }
 
 .dialog-body {
-  padding: 16px;
+  padding: 1rem;
 }
 
 .dialog-body input {
   width: 100%;
-  padding: 8px;
-  border: 1px solid #ddd;
+  padding: 0.5rem;
+  border: 1px solid var(--color-border);
   border-radius: 4px;
+  background-color: var(--color-input-bg);
+  color: var(--color-font-1);
 }
 
 .dialog-footer {
-  padding: 12px 16px;
-  border-top: 1px solid #e0e0e0;
+  padding: 0.75rem 1rem;
+  border-top: 1px solid var(--color-border);
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 0.5rem;
 }
 
 .dialog-footer button {
-  padding: 6px 12px;
+  padding: 0.35rem 0.75rem;
   border-radius: 4px;
   cursor: pointer;
 }
