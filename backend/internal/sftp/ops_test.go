@@ -38,8 +38,8 @@ func newClient(t *testing.T) (*Client, *testutil.Server, *ssh.Client, func()) {
 	sc, err := New(node, sshc)
 	require.NoError(t, err)
 	cleanup := func() {
-		sc.Close()
-		sshc.Close()
+		_ = sc.Close()
+		_ = sshc.Close()
 		srv.Close()
 	}
 	return sc, srv, sshc, cleanup
@@ -51,8 +51,8 @@ func TestList(t *testing.T) {
 	defer cleanup()
 
 	// 在 rootDir 预建文件
-	os.WriteFile(filepath.Join(srv.RootDir(), "file1.txt"), []byte("hello"), 0644)
-	os.MkdirAll(filepath.Join(srv.RootDir(), "subdir"), 0755)
+	require.NoError(t, os.WriteFile(filepath.Join(srv.RootDir(), "file1.txt"), []byte("hello"), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Join(srv.RootDir(), "subdir"), 0755))
 
 	items, err := sc.List("/")
 	require.NoError(t, err)
@@ -94,7 +94,7 @@ func TestDelete_File(t *testing.T) {
 	defer cleanup()
 
 	target := filepath.Join(srv.RootDir(), "to_delete.txt")
-	os.WriteFile(target, []byte("data"), 0644)
+	require.NoError(t, os.WriteFile(target, []byte("data"), 0644))
 
 	err := sc.Delete("/to_delete.txt")
 	require.NoError(t, err)
@@ -109,8 +109,8 @@ func TestDelete_Dir(t *testing.T) {
 	defer cleanup()
 
 	dirPath := filepath.Join(srv.RootDir(), "dir_to_delete")
-	os.MkdirAll(dirPath, 0755)
-	os.WriteFile(filepath.Join(dirPath, "inner.txt"), []byte("x"), 0644)
+	require.NoError(t, os.MkdirAll(dirPath, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dirPath, "inner.txt"), []byte("x"), 0644))
 
 	err := sc.Delete("/dir_to_delete")
 	require.NoError(t, err)
@@ -125,7 +125,7 @@ func TestRename(t *testing.T) {
 	defer cleanup()
 
 	oldPath := filepath.Join(srv.RootDir(), "old.txt")
-	os.WriteFile(oldPath, []byte("content"), 0644)
+	require.NoError(t, os.WriteFile(oldPath, []byte("content"), 0644))
 
 	err := sc.Rename("/old.txt", "/new.txt")
 	require.NoError(t, err)
@@ -154,9 +154,9 @@ func TestUploadInit_Resume(t *testing.T) {
 	defer cleanup()
 
 	// 预建 .part 文件，写入 1024 字节
-	os.MkdirAll(filepath.Join(srv.RootDir(), "upload"), 0755)
+	require.NoError(t, os.MkdirAll(filepath.Join(srv.RootDir(), "upload"), 0755))
 	partPath := filepath.Join(srv.RootDir(), "upload", "test.bin.part")
-	os.WriteFile(partPath, make([]byte, 1024), 0644)
+	require.NoError(t, os.WriteFile(partPath, make([]byte, 1024), 0644))
 
 	uploadID, offset, err := sc.UploadInit("/upload", "test.bin", 4096, 512)
 	require.NoError(t, err)
@@ -232,11 +232,11 @@ func TestDownloadStream_Full(t *testing.T) {
 
 	// 预建远程文件
 	content := []byte("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-	os.WriteFile(filepath.Join(srv.RootDir(), "download.bin"), content, 0644)
+	require.NoError(t, os.WriteFile(filepath.Join(srv.RootDir(), "download.bin"), content, 0644))
 
 	reader, total, err := sc.DownloadStream("/download.bin", 0)
 	require.NoError(t, err)
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	assert.Equal(t, int64(len(content)), total)
 
@@ -251,12 +251,12 @@ func TestDownloadStream_Range(t *testing.T) {
 	defer cleanup()
 
 	content := []byte("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-	os.WriteFile(filepath.Join(srv.RootDir(), "range.bin"), content, 0644)
+	require.NoError(t, os.WriteFile(filepath.Join(srv.RootDir(), "range.bin"), content, 0644))
 
 	offset := int64(10)
 	reader, total, err := sc.DownloadStream("/range.bin", offset)
 	require.NoError(t, err)
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	assert.Equal(t, int64(len(content)), total) // total 是文件总大小
 

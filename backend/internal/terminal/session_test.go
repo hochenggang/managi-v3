@@ -33,7 +33,7 @@ func TestOpen_Resize_Close(t *testing.T) {
 	defer srv.Close()
 
 	sshc, node := dialMock(t, srv)
-	defer sshc.Close()
+	defer func() { _ = sshc.Close() }()
 
 	sess := New(node, sshc)
 
@@ -56,7 +56,7 @@ func TestResize_NotOpened(t *testing.T) {
 	defer srv.Close()
 
 	sshc, node := dialMock(t, srv)
-	defer sshc.Close()
+	defer func() { _ = sshc.Close() }()
 
 	sess := New(node, sshc)
 	err := sess.Resize(80, 24)
@@ -69,7 +69,7 @@ func TestClose_NotOpened(t *testing.T) {
 	defer srv.Close()
 
 	sshc, node := dialMock(t, srv)
-	defer sshc.Close()
+	defer func() { _ = sshc.Close() }()
 
 	sess := New(node, sshc)
 	err := sess.Close()
@@ -82,11 +82,11 @@ func TestStdin_Stdout_Echo(t *testing.T) {
 	defer srv.Close()
 
 	sshc, node := dialMock(t, srv)
-	defer sshc.Close()
+	defer func() { _ = sshc.Close() }()
 
 	sess := New(node, sshc)
 	require.NoError(t, sess.Open(80, 24))
-	defer sess.Close()
+	defer func() { _ = sess.Close() }()
 
 	stdin := sess.Stdin()
 	stdout := sess.Stdout()

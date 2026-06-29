@@ -166,7 +166,7 @@ func (p *Pool) Execute(node model.Node, cmds []string) (output []string, errs []
 	if err != nil {
 		return nil, nil, err
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 
 	var stdout, stderr bytes.Buffer
 	session.Stdout = &stdout

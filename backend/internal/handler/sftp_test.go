@@ -195,7 +195,7 @@ func TestSftpWSHandler_Basic(t *testing.T) {
 	// 拨号 WS
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL(t, httpSrv.URL, "/ws/sftp"), nil)
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// 首帧：login envelope
 	writeWSEnvelope(t, conn, msgTypeLogin, testutil.TestNode(srv.Host(), srv.Port()))
@@ -238,7 +238,7 @@ func TestSftpWSHandler_UploadFlow(t *testing.T) {
 
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL(t, httpSrv.URL, "/ws/sftp"), nil)
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// 首帧 login
 	writeWSEnvelope(t, conn, msgTypeLogin, testutil.TestNode(srv.Host(), srv.Port()))
@@ -294,7 +294,7 @@ func TestSftpWSHandler_BadAuthFrame(t *testing.T) {
 
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL(t, httpSrv.URL, "/ws/sftp"), nil)
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// 发非法 JSON 首帧
 	require.NoError(t, conn.WriteMessage(websocket.TextMessage, []byte("not json")))

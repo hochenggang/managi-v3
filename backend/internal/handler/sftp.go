@@ -66,7 +66,7 @@ func sftpWSHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		wc := newWSConn(conn)
 
 		deadline := wsReadDeadline(cfg)
@@ -90,7 +90,7 @@ func sftpWSHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 			_ = wc.writeLoginResult(false, err.Error())
 			return
 		}
-		defer sc.Close()
+		defer func() { _ = sc.Close() }()
 
 		// 登录成功
 		_ = wc.writeLoginResult(true, "")
@@ -199,7 +199,7 @@ func handleSftpOp(wc *wsConn, sc *sftp.Client, env wsEnvelope) {
 			_ = wc.writeError(err.Error())
 			return
 		}
-		defer reader.Close()
+		defer func() { _ = reader.Close() }()
 		_ = wc.writeEnvelope(msgTypeDownloadStart, map[string]any{"total": total})
 		buf := make([]byte, 32*1024)
 		for {
@@ -293,7 +293,7 @@ func sftpDownloadHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFun
 			http.Error(w, "sftp init: "+err.Error(), http.StatusBadGateway)
 			return
 		}
-		defer sc.Close()
+		defer func() { _ = sc.Close() }()
 
 		offset := parseRangeOffset(r.Header.Get("Range"))
 		reader, total, err := sc.DownloadStream(remotePath, offset)
@@ -301,7 +301,7 @@ func sftpDownloadHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFun
 			http.Error(w, "sftp open: "+err.Error(), http.StatusBadGateway)
 			return
 		}
-		defer reader.Close()
+		defer func() { _ = reader.Close() }()
 
 		w.Header().Set("Content-Type", "application/octet-stream")
 		// 仅当 offset 有效且 total 大于 offset 时才发 206，避免空文件生成非法 Content-Range

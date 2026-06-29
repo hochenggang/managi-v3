@@ -26,7 +26,7 @@ func TestTerminalWSHandler_Basic(t *testing.T) {
 
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL(t, httpSrv.URL, "/ws"), nil)
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// 首帧 login envelope
 	writeWSEnvelope(t, conn, msgTypeLogin, testutil.TestNode(srv.Host(), srv.Port()))
@@ -69,7 +69,7 @@ func TestTerminalWSHandler_BadAuthFrame(t *testing.T) {
 
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL(t, httpSrv.URL, "/ws"), nil)
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// 发非法 JSON 首帧
 	require.NoError(t, conn.WriteMessage(websocket.TextMessage, []byte("not json")))
@@ -92,7 +92,7 @@ func TestTerminalWSHandler_AuthFailure(t *testing.T) {
 
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL(t, httpSrv.URL, "/ws"), nil)
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// 首帧 login envelope（错误密码）
 	writeWSEnvelope(t, conn, msgTypeLogin, testutil.BadPasswordNode(srv.Host(), srv.Port()))
@@ -118,7 +118,7 @@ func TestTerminalWSHandler_Ping(t *testing.T) {
 
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL(t, httpSrv.URL, "/ws"), nil)
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// 登录
 	writeWSEnvelope(t, conn, msgTypeLogin, testutil.TestNode(srv.Host(), srv.Port()))

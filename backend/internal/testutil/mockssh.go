@@ -90,12 +90,12 @@ func (s *Server) handleConn(nconn net.Conn, cfg *ssh.ServerConfig) {
 	if err != nil {
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	go ssh.DiscardRequests(reqs)
 
 	for newChannel := range chans {
 		if newChannel.ChannelType() != "session" {
-			newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
+			_ = newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
 			continue
 		}
 		channel, reqs, err := newChannel.Accept()
@@ -112,32 +112,32 @@ func (s *Server) handleSession(channel ssh.Channel, reqs <-chan *ssh.Request) {
 		switch req.Type {
 		case "exec":
 			cmd := parseStringPayload(req.Payload)
-			req.Reply(true, nil)
+			_ = req.Reply(true, nil)
 			s.handleExec(channel, cmd)
 			return
 		case "shell":
-			req.Reply(true, nil)
+			_ = req.Reply(true, nil)
 			s.handleShell(channel)
 			return
 		case "subsystem":
 			if parseStringPayload(req.Payload) == "sftp" {
-				req.Reply(true, nil)
+				_ = req.Reply(true, nil)
 				s.handleSFTP(channel)
 			} else {
-				req.Reply(false, nil)
+				_ = req.Reply(false, nil)
 			}
 			return
 		case "pty-req", "window-change", "env":
-			req.Reply(true, nil)
+			_ = req.Reply(true, nil)
 		default:
-			req.Reply(false, nil)
+			_ = req.Reply(false, nil)
 		}
 	}
 }
 
 // handleExec 模拟命令执行（支持多行命令，用 \n 分隔）。
 func (s *Server) handleExec(channel ssh.Channel, cmd string) {
-	defer channel.Close()
+	defer func() { _ = channel.Close() }()
 
 	// 多行命令：按 \n 拆分逐行执行（模拟 shell）
 	lines := strings.Split(cmd, "\n")
@@ -149,12 +149,12 @@ func (s *Server) handleExec(channel ssh.Channel, cmd string) {
 		}
 		switch {
 		case line == "false":
-			channel.Stderr().Write([]byte("command failed\n"))
+			_, _ = channel.Stderr().Write([]byte("command failed\n"))
 			exitCode = 1
 		case strings.HasPrefix(line, "echo "):
-			channel.Write([]byte(line[5:] + "\n"))
+			_, _ = channel.Write([]byte(line[5:] + "\n"))
 		case line == "echo":
-			channel.Write([]byte("\n"))
+			_, _ = channel.Write([]byte("\n"))
 		default:
 			// 其他命令模拟空输出成功
 		}
@@ -164,12 +164,12 @@ func (s *Server) handleExec(channel ssh.Channel, cmd string) {
 
 // handleShell 模拟交互式 shell：回显输入。
 func (s *Server) handleShell(channel ssh.Channel) {
-	defer channel.Close()
+	defer func() { _ = channel.Close() }()
 	buf := make([]byte, 4096)
 	for {
 		n, err := channel.Read(buf)
 		if n > 0 {
-			channel.Write(buf[:n]) // 回显
+			_, _ = channel.Write(buf[:n]) // 回显
 		}
 		if err != nil {
 			break
@@ -179,7 +179,7 @@ func (s *Server) handleShell(channel ssh.Channel) {
 
 // handleSFTP 启动 SFTP request server 服务 rootDir。
 func (s *Server) handleSFTP(channel ssh.Channel) {
-	defer channel.Close()
+	defer func() { _ = channel.Close() }()
 	handler := &osHandler{root: s.rootDir}
 	srv := sftp.NewRequestServer(channel, sftp.Handlers{
 		FileGet:  handler,
@@ -187,7 +187,7 @@ func (s *Server) handleSFTP(channel ssh.Channel) {
 		FileCmd:  handler,
 		FileList: handler,
 	})
-	srv.Serve()
+	_ = srv.Serve()
 }
 
 // Addr 返回服务器监听地址（127.0.0.1:port）。
@@ -217,13 +217,13 @@ func (s *Server) Accepts() int32 {
 // Close 关闭服务器。
 func (s *Server) Close() {
 	s.stopOnce.Do(func() {
-		s.listener.Close()
+		_ = s.listener.Close()
 	})
 }
 
 // sendExitStatus 发送 exit-status 请求。
 func sendExitStatus(channel ssh.Channel, code uint32) {
-	channel.SendRequest("exit-status", false, ssh.Marshal(struct {
+	_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(struct {
 		Code uint32
 	}{code}))
 }

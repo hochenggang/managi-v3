@@ -158,7 +158,7 @@ func (c *Client) UploadChunk(uploadID string, chunkIndex int, offset int64, data
 	if err != nil {
 		return fmt.Errorf("sftp open %s: %w", st.partPath, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
 		return fmt.Errorf("seek: %w", err)
@@ -205,7 +205,7 @@ func (c *Client) DownloadStream(remotePath string, offset int64) (io.ReadCloser,
 	}
 	if offset > 0 {
 		if _, err := f.Seek(offset, io.SeekStart); err != nil {
-			f.Close()
+			_ = f.Close()
 			return nil, 0, fmt.Errorf("seek: %w", err)
 		}
 	}

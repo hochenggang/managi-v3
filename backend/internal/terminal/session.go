@@ -41,20 +41,20 @@ func (s *Session) Open(cols, rows int) error {
 		ssh.TTY_OP_OSPEED: 14400,
 	}
 	if err := s.session.RequestPty("xterm", rows, cols, modes); err != nil {
-		s.session.Close()
+		_ = s.session.Close()
 		s.session = nil
 		return fmt.Errorf("request pty: %w", err)
 	}
 
 	stdin, err := s.session.StdinPipe()
 	if err != nil {
-		s.session.Close()
+		_ = s.session.Close()
 		s.session = nil
 		return fmt.Errorf("stdin pipe: %w", err)
 	}
 	stdout, err := s.session.StdoutPipe()
 	if err != nil {
-		s.session.Close()
+		_ = s.session.Close()
 		s.session = nil
 		return fmt.Errorf("stdout pipe: %w", err)
 	}
@@ -62,7 +62,7 @@ func (s *Session) Open(cols, rows int) error {
 	s.stdout = stdout
 
 	if err := s.session.Shell(); err != nil {
-		s.session.Close()
+		_ = s.session.Close()
 		s.session = nil
 		return fmt.Errorf("start shell: %w", err)
 	}

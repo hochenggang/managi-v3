@@ -41,7 +41,7 @@ func terminalWSHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc 
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		wc := newWSConn(conn)
 
 		deadline := wsReadDeadline(cfg)
@@ -64,7 +64,7 @@ func terminalWSHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc 
 			_ = wc.writeLoginResult(false, err.Error())
 			return
 		}
-		defer sess.Close()
+		defer func() { _ = sess.Close() }()
 
 		// 登录成功
 		_ = wc.writeLoginResult(true, "")
