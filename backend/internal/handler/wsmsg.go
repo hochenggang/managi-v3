@@ -130,7 +130,7 @@ func startPingLoop(ctx context.Context, wc *wsConn, deadline time.Duration, inte
 		intervalSec = 30
 	}
 	interval := time.Duration(intervalSec) * time.Second
-	_ = wc.setPongHandler(func(string) error {
+	wc.setPongHandler(func(string) error {
 		return wc.setReadDeadline(time.Now().Add(deadline))
 	})
 	ticker := time.NewTicker(interval)
