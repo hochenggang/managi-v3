@@ -14,8 +14,7 @@ set -e
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/managi"
 SERVICE_USER="managi"
-VERSION="${MANAGI_VERSION:-latest}"
-GITHUB_REPO="${MANAGI_REPO:-hochenggang/managi}"
+GITHUB_REPO="${MANAGI_REPO:-hochenggang/managi-v3}"
 
 # ===== 颜色 =====
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; NC='\033[0m'
@@ -28,11 +27,13 @@ detect_os() {
     if [ ! -f /etc/os-release ]; then
         error "无法检测操作系统：/etc/os-release 不存在"
     fi
+    # 注意：. /etc/os-release 会设置 ID/VERSION_ID/PRETTY_NAME 等变量，
+    # 但不会覆盖上方已定义的 MANAGI_VER（变量名不同）。
     . /etc/os-release
     OS_ID="$ID"
     case "$ID" in
-        alpine)   OS_FAMILY="alpine" ;;
-        debian|ubuntu) OS_FAMILY="debian" ;;
+        alpine)   OS_FAMILY="alpine"; VARIANT="-musl" ;;
+        debian|ubuntu) OS_FAMILY="debian"; VARIANT="" ;;
         *) error "不支持的操作系统: $ID（仅支持 alpine/debian/ubuntu）" ;;
     esac
     info "检测到操作系统: $PRETTY_NAME (family=$OS_FAMILY)"
@@ -65,12 +66,9 @@ install_deps() {
 
 # ===== 下载二进制 =====
 download_binary() {
-    info "下载 managi 二进制 (version=$VERSION, os=linux, arch=$ARCH)..."
-    if [ "$VERSION" = "latest" ]; then
-        URL="https://github.com/${GITHUB_REPO}/releases/latest/download/managi-linux-${ARCH}"
-    else
-        URL="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/managi-linux-${ARCH}"
-    fi
+    BINARY_NAME="managi-linux-${ARCH}${VARIANT}"
+    info "下载 managi 二进制 (file=$BINARY_NAME)..."
+    URL="https://github.com/${GITHUB_REPO}/releases/latest/download/${BINARY_NAME}"
     wget -qO "$INSTALL_DIR/managi" "$URL" || error "下载失败: $URL"
     chmod +x "$INSTALL_DIR/managi"
     info "二进制已安装到 $INSTALL_DIR/managi"
@@ -79,12 +77,8 @@ download_binary() {
 # ===== 下载前端 =====
 download_frontend() {
     mkdir -p "$CONFIG_DIR"
-    info "下载前端 index.html (version=$VERSION)..."
-    if [ "$VERSION" = "latest" ]; then
-        URL="https://github.com/${GITHUB_REPO}/releases/latest/download/index.html"
-    else
-        URL="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/index.html"
-    fi
+    info "下载前端 index.html..."
+    URL="https://github.com/${GITHUB_REPO}/releases/latest/download/index.html"
     wget -qO "$CONFIG_DIR/index.html" "$URL" || error "下载前端失败: $URL"
     info "前端已安装到 $CONFIG_DIR/index.html"
 }

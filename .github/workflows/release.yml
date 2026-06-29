@@ -12,24 +12,39 @@ permissions:
 
 jobs:
   build-go-binaries:
-    name: Go Binaries (${{ matrix.goos }}/${{ matrix.goarch }})
+    name: Go Binaries (${{ matrix.artifact }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
+          # Linux glibc（Debian/Ubuntu）
           - goos: linux
             goarch: amd64
+            artifact: managi-linux-amd64
           - goos: linux
             goarch: arm64
+            artifact: managi-linux-arm64
+          # Linux musl（Alpine）— CGO_ENABLED=0 静态二进制，兼容 musl
+          - goos: linux
+            goarch: amd64
+            artifact: managi-linux-amd64-musl
+          - goos: linux
+            goarch: arm64
+            artifact: managi-linux-arm64-musl
+          # macOS
           - goos: darwin
             goarch: amd64
+            artifact: managi-darwin-amd64
           - goos: darwin
             goarch: arm64
+            artifact: managi-darwin-arm64
+          # Windows
           - goos: windows
             goarch: amd64
+            artifact: managi-windows-amd64
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.22'
           cache-dependency-path: backend/go.sum
@@ -43,20 +58,20 @@ jobs:
           mkdir -p ../artifacts
           ext=""
           [ "$GOOS" = "windows" ] && ext=".exe"
-          go build -ldflags="-s -w" -o ../artifacts/managi-${{ matrix.goos }}-${{ matrix.goarch }}${ext} ./cmd/managi
+          go build -ldflags="-s -w" -o "../artifacts/${{ matrix.artifact }}${ext}" ./cmd/managi
       - uses: actions/upload-artifact@v4
         with:
-          name: go-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: ${{ matrix.artifact }}
           path: artifacts/
 
   build-frontend:
     name: Frontend
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
       - name: Build
@@ -74,7 +89,7 @@ jobs:
     needs: [build-go-binaries, build-frontend]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
           path: release-assets
@@ -85,6 +100,6 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            release-assets/go-*/*
+            release-assets/managi-*/*
             release-assets/frontend-dist/index.html
             deploy/install.sh
