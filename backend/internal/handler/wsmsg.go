@@ -1,0 +1,124 @@
+// Package handler - WebSocket 消息协议定义。
+// 所有 WS 文本帧统一为 {type, data} envelope，集中定义避免前后端协议漂移。
+// 与前端 protocol/ws.ts 对齐。
+package handler
+
+import (
+	"encoding/json"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+)
+
+// WS 消息类型常量。
+const (
+	msgTypeLogin         = "login"          // 登录（首帧）/ 登录结果
+	msgTypeMsg           = "msg"            // 终端输入/输出
+	msgTypeResize        = "resize"         // 终端尺寸调整
+	msgTypePing          = "ping"           // 心跳请求
+	msgTypePong          = "pong"           // 心跳响应
+	msgTypeError         = "error"          // 错误
+	msgTypeList          = "list"           // SFTP 列目录
+	msgTypeOk            = "ok"             // SFTP 操作成功
+	msgTypeDownloadStart = "download_start" // SFTP 下载开始
+	msgTypeComplete      = "complete"       // SFTP 下载完成
+	msgTypeChunkAck      = "chunk_ack"      // SFTP 分片确认
+	msgTypeUploadInit    = "upload_init"    // SFTP 上传初始化
+	msgTypeUploadDone    = "upload_complete" // SFTP 上传完成
+	msgTypeMkdir         = "mkdir"
+	msgTypeDelete        = "delete"
+	msgTypeRename        = "rename"
+	msgTypeDownload      = "download"
+)
+
+// wsEnvelope 统一消息信封 {type, data}。
+type wsEnvelope struct {
+	Type string          `json:"type"`
+	Data json.RawMessage `json:"data,omitempty"`
+}
+
+// wsLoginResult 登录结果 data 负载。
+type wsLoginResult struct {
+	Success bool   `json:"success"`
+	Message string `json:"message,omitempty"`
+}
+
+// wsErrorData 错误 data 负载。
+type wsErrorData struct {
+	Message string `json:"message"`
+}
+
+// wsResizeData resize data 负载。
+type wsResizeData struct {
+	Cols int `json:"cols"`
+	Rows int `json:"rows"`
+}
+
+// wsConn 封装 *websocket.Conn，加互斥锁保护并发写。
+// 读方法不加锁（由调用方保证单线程读）。
+type wsConn struct {
+	conn *websocket.Conn
+	mu   sync.Mutex
+}
+
+func newWSConn(conn *websocket.Conn) *wsConn {
+	return &wsConn{conn: conn}
+}
+
+func (w *wsConn) readMessage() (int, []byte, error) {
+	return w.conn.ReadMessage()
+}
+
+func (w *wsConn) setReadDeadline(t time.Time) error {
+	return w.conn.SetReadDeadline(t)
+}
+
+func (w *wsConn) writeJSON(v any) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.conn.WriteJSON(v)
+}
+
+func (w *wsConn) writeRaw(msgType int, data []byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.conn.WriteMessage(msgType, data)
+}
+
+// writeEnvelope 写入 {type, data} 消息。data 为 nil 时不带 data 字段。
+func (w *wsConn) writeEnvelope(msgType string, data any) error {
+	var dataBytes json.RawMessage
+	if data != nil {
+		b, err := json.Marshal(data)
+		if err != nil {
+			return err
+		}
+		dataBytes = b
+	}
+	return w.writeJSON(wsEnvelope{Type: msgType, Data: dataBytes})
+}
+
+func (w *wsConn) writeError(message string) error {
+	return w.writeEnvelope(msgTypeError, wsErrorData{Message: message})
+}
+
+func (w *wsConn) writeLoginResult(success bool, message string) error {
+	return w.writeEnvelope(msgTypeLogin, wsLoginResult{Success: success, Message: message})
+}
+
+func (w *wsConn) writeMsg(data string) error {
+	return w.writeEnvelope(msgTypeMsg, data)
+}
+
+func (w *wsConn) writePong() error {
+	return w.writeRaw(websocket.TextMessage, []byte(`{"type":"pong"}`))
+}
+
+// parseEnvelope 解析 envelope，失败返回 ok=false。
+func parseEnvelope(data []byte) (env wsEnvelope, ok bool) {
+	if err := json.Unmarshal(data, &env); err != nil {
+		return wsEnvelope{}, false
+	}
+	return env, true
+}

@@ -1,20 +1,20 @@
-// 终端协议：终端会话消息类型。
-// v3 修正：resize 改为结构化消息，替代 v2 的 \x1b[8;rows;cols t 转义序列。
-// 设计见 ../../../design-v3.md §6.1。
+// 终端协议：基于统一 WS envelope。
+// 与后端 handler/terminal.go 对齐。
 
-/** 终端控制消息（前缀 type 字段区分，与字节流透传分离）。 */
-export interface TerminalControlMessage {
-  type: 'resize'
-  cols: number
-  rows: number
+import type { ApiNode } from './types'
+import { wsMessage, type WSResize } from './ws'
+
+/** 构造 login 首帧。 */
+export function loginMessage(node: ApiNode): string {
+  return wsMessage<ApiNode>('login', node)
 }
 
-/** 判断字符串是否为结构化控制消息。 */
-export function isControlMessage(data: string): boolean {
-  return data.startsWith('{"type":"resize"')
+/** 构造终端输入消息（用户按键透传到 shell stdin）。 */
+export function inputMessage(data: string): string {
+  return wsMessage<string>('msg', data)
 }
 
 /** 构造 resize 消息。 */
 export function resizeMessage(cols: number, rows: number): string {
-  return JSON.stringify({ type: 'resize', cols, rows } satisfies TerminalControlMessage)
+  return wsMessage<WSResize>('resize', { cols, rows })
 }

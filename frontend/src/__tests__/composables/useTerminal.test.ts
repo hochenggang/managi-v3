@@ -3,6 +3,16 @@ import { mount } from '@vue/test-utils'
 import { defineComponent, h } from 'vue'
 import type { ApiNode } from '@/protocol/types'
 
+// vi.hoisted 确保 mock 在 vi.mock 工厂执行前已初始化
+const { mockHandleError } = vi.hoisted(() => ({
+  mockHandleError: vi.fn(),
+}))
+
+vi.mock('@/helper', () => ({
+  handleError: mockHandleError,
+  handleMsg: vi.fn(),
+}))
+
 // 捕获 Terminal 实例回调
 let onDataCb: ((data: string) => void) | null = null
 let onSelectionChangeCb: (() => void) | null = null
@@ -10,6 +20,7 @@ const mockTerminal = {
   loadAddon: vi.fn(),
   open: vi.fn(),
   write: vi.fn(),
+  writeln: vi.fn(),
   onData: vi.fn((cb: (data: string) => void) => {
     onDataCb = cb
     return { dispose: vi.fn() }
@@ -59,6 +70,8 @@ vi.mock('@/composables/useWebSocket', () => ({
 }))
 
 import { useTerminal } from '@/composables/useTerminal'
+import { wsMessage } from '@/protocol/ws'
+import { inputMessage } from '@/protocol/terminal'
 
 const node: ApiNode = {
   name: 'n1',
@@ -99,18 +112,46 @@ describe('useTerminal', () => {
     expect(mockConnect).toHaveBeenCalledTimes(1)
   })
 
-  it('onText non-control message writes to terminal', () => {
+  it('onText msg type writes data to terminal', () => {
     const container = document.createElement('div')
     withSetup(() => useTerminal(container, node))
-    onTextCb!('hello world')
+    onTextCb!(wsMessage('msg', 'hello world'))
     expect(mockTerminal.write).toHaveBeenCalledWith('hello world')
   })
 
-  it('onText control message (resize echo) does NOT write to terminal', () => {
+  it('onText non-msg types (resize/ping/pong) do NOT write to terminal', () => {
     const container = document.createElement('div')
     withSetup(() => useTerminal(container, node))
     mockTerminal.write.mockClear()
-    onTextCb!('{"type":"resize","cols":120,"rows":40}')
+    onTextCb!(wsMessage('resize', { cols: 120, rows: 40 }))
+    onTextCb!(wsMessage('ping'))
+    onTextCb!(wsMessage('pong'))
+    expect(mockTerminal.write).not.toHaveBeenCalled()
+  })
+
+  it('onText login failure writes formatted error, calls handleError and close', () => {
+    const container = document.createElement('div')
+    withSetup(() => useTerminal(container, node))
+    mockTerminal.writeln.mockClear()
+    onTextCb!(wsMessage('login', { success: false, message: 'auth failed' }))
+    expect(mockTerminal.writeln).toHaveBeenCalledWith(expect.stringContaining('登录失败：auth failed'))
+    expect(mockHandleError).toHaveBeenCalledWith('登录失败：auth failed')
+    expect(mockClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('onText error type writes formatted error to terminal', () => {
+    const container = document.createElement('div')
+    withSetup(() => useTerminal(container, node))
+    mockTerminal.writeln.mockClear()
+    onTextCb!(wsMessage('error', { message: 'boom' }))
+    expect(mockTerminal.writeln).toHaveBeenCalledWith(expect.stringContaining('错误：boom'))
+  })
+
+  it('onText non-JSON data is ignored', () => {
+    const container = document.createElement('div')
+    withSetup(() => useTerminal(container, node))
+    mockTerminal.write.mockClear()
+    onTextCb!('not json')
     expect(mockTerminal.write).not.toHaveBeenCalled()
   })
 
@@ -122,11 +163,11 @@ describe('useTerminal', () => {
     expect(mockTerminal.write).toHaveBeenCalledWith('binary text')
   })
 
-  it('term.onData forwards input to ws.send', () => {
+  it('term.onData forwards input as inputMessage envelope', () => {
     const container = document.createElement('div')
     withSetup(() => useTerminal(container, node))
     onDataCb!('ls -la\n')
-    expect(mockSend).toHaveBeenCalledWith('ls -la\n')
+    expect(mockSend).toHaveBeenCalledWith(inputMessage('ls -la\n'))
   })
 
   it('onUnmounted: calls close() and term.dispose()', () => {

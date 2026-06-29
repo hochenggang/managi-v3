@@ -202,14 +202,22 @@ func TestParseRangeOffset(t *testing.T) {
 	}
 }
 
-// TestIsResizeControl 验证 resize 控制消息识别（前缀匹配）。
-func TestIsResizeControl(t *testing.T) {
-	assert.True(t, isResizeControl([]byte(`{"type":"resize","cols":80,"rows":24}`)))
-	assert.True(t, isResizeControl([]byte(`{"type":"resize"`)))   // 截断前缀也匹配
-	assert.True(t, isResizeControl([]byte(`{"type":"resize","cols":1,"rows":1}`)))
-	assert.False(t, isResizeControl([]byte(`ls -la`)))
-	assert.False(t, isResizeControl([]byte(`{"type":"data"}`)))
-	assert.False(t, isResizeControl([]byte(`{"type":"input"}`)))
-	assert.False(t, isResizeControl([]byte(`resize`)))
-	assert.False(t, isResizeControl([]byte(``)))
+// TestParseEnvelope 验证 envelope 解析（取代旧版 isResizeControl 前缀匹配）。
+func TestParseEnvelope(t *testing.T) {
+	// 合法 envelope
+	env, ok := parseEnvelope([]byte(`{"type":"resize","data":{"cols":80,"rows":24}}`))
+	assert.True(t, ok)
+	assert.Equal(t, "resize", env.Type)
+
+	env, ok = parseEnvelope([]byte(`{"type":"msg","data":"hello"}`))
+	assert.True(t, ok)
+	assert.Equal(t, "msg", env.Type)
+
+	// 非法 JSON
+	_, ok = parseEnvelope([]byte(`ls -la`))
+	assert.False(t, ok)
+
+	// 截断 JSON
+	_, ok = parseEnvelope([]byte(`{"type":"resize"`))
+	assert.False(t, ok)
 }

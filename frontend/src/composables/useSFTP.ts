@@ -1,13 +1,34 @@
 // useSFTP：SFTP 文件管理 composable。
-// 修复 v2 缺陷：上传/下载断点续传。
+// v3 协议：统一 {type, data} envelope。服务端登录成功后主动 list /，无需前端首请求。
 // 设计见 ../../../design-v3.md §6.4 §6.5。
 
 import { ref } from 'vue'
 import { useWebSocket } from './useWebSocket'
-import type { SFTPFile, SFTPRequest, SFTPResponse } from '@/protocol/sftp'
+import { parseWSMessage, type WSMessage, type WSLoginResult, type WSError } from '@/protocol/ws'
+import {
+  sftpLogin,
+  sftpList,
+  sftpMkdir,
+  sftpDelete,
+  sftpDownload,
+  sftpUploadInit,
+  sftpUploadComplete,
+  type SFTPFile,
+  type SFTPListData,
+  type SFTPDownloadStartData,
+  type SFTPCompleteData,
+  type SFTPUploadInitData,
+} from '@/protocol/sftp'
 import type { ApiNode } from '@/protocol/types'
+import { handleError } from '@/helper'
 
 const CHUNK_SIZE = 1 << 20 // 1MB
+
+interface SFTPOperationResult {
+  success: boolean
+  message?: string
+  data?: unknown
+}
 
 export function useSFTP(node: ApiNode) {
   const currentPath = ref('/')
@@ -16,44 +37,77 @@ export function useSFTP(node: ApiNode) {
   const uploadProgress = ref(0)
   const downloadProgress = ref(0)
 
-  let pendingResolve: ((r: SFTPResponse) => void) | null = null
+  let pendingResolve: ((r: SFTPOperationResult) => void) | null = null
   let pendingTimer: ReturnType<typeof setTimeout> | null = null
   let downloadBuffer: Uint8Array[] = []
   let downloadTotalSize = 0
   let downloadReceivedSize = 0
 
+  function resolvePending(msg: WSMessage): void {
+    if (!pendingResolve) return
+    const fn = pendingResolve
+    pendingResolve = null
+    if (pendingTimer) {
+      clearTimeout(pendingTimer)
+      pendingTimer = null
+    }
+    fn({
+      success: msg.type !== 'error',
+      message: msg.type === 'error' ? (msg.data as WSError)?.message : undefined,
+      data: msg.data,
+    })
+  }
+
   const { connected, connect, send, close } = useWebSocket('/ws/sftp', {
-    authPayload: node,
+    authPayload: sftpLogin(node),
+    maxReconnect: 3,
     onText: (data) => {
-      const resp = JSON.parse(data) as SFTPResponse
-      if (resp.type === 'connected') return
-      if (resp.type === 'download_start') {
-        // 后端流式下载起始帧，告知总大小供进度计算
-        downloadTotalSize = resp.total ?? 0
-        return
-      }
-      if (resp.type === 'progress') {
-        downloadProgress.value = resp.progress ?? 0
-        return
-      }
-      if (resp.files) {
-        files.value = resp.files
-      }
-      if (resp.complete) {
-        // 下载完成：合并分块触发浏览器下载
-        const blob = new Blob(downloadBuffer as BlobPart[])
-        triggerDownload(blob, resp.filename ?? 'download')
-        downloadBuffer = []
-      }
-      // resolve 等待中的请求（上传 chunk_ack / list / mkdir 等）
-      if (pendingResolve) {
-        const fn = pendingResolve
-        pendingResolve = null
-        if (pendingTimer) {
-          clearTimeout(pendingTimer)
-          pendingTimer = null
+      const msg = parseWSMessage(data)
+      if (!msg) return
+      switch (msg.type) {
+        case 'login': {
+          const r = msg.data as WSLoginResult
+          if (r && !r.success) {
+            handleError(`登录失败：${r.message ?? 'unknown'}`)
+            close() // 抑制重连
+          }
+          return
         }
-        fn(resp)
+        case 'list': {
+          // 服务端登录后主动推送 list /，或响应客户端 list 请求
+          const d = msg.data as SFTPListData
+          if (d) {
+            files.value = d.files
+            if (d.path) currentPath.value = d.path
+          }
+          resolvePending(msg)
+          return
+        }
+        case 'download_start':
+          downloadTotalSize = (msg.data as SFTPDownloadStartData)?.total ?? 0
+          return
+        case 'complete': {
+          const d = msg.data as SFTPCompleteData
+          const blob = new Blob(downloadBuffer as BlobPart[])
+          triggerDownload(blob, d?.filename ?? 'download')
+          downloadBuffer = []
+          resolvePending(msg)
+          return
+        }
+        case 'chunk_ack':
+          resolvePending(msg)
+          return
+        case 'error':
+          handleError((msg.data as WSError)?.message ?? 'SFTP error')
+          resolvePending(msg)
+          return
+        case 'ok':
+          resolvePending(msg)
+          return
+        case 'pong':
+          return
+        default:
+          resolvePending(msg)
       }
     },
     onBinary: (data) => {
@@ -67,8 +121,8 @@ export function useSFTP(node: ApiNode) {
 
   connect()
 
-  // sendAndAwait 发送文本或二进制帧并等待服务端响应（resolve 时 clear 超时，避免 A18 泄漏）。
-  function sendAndAwait(sendData: string | ArrayBuffer): Promise<SFTPResponse> {
+  /** sendAndAwait 发送并等待服务端响应（resolve 时 clear 超时，避免泄漏）。 */
+  function sendAndAwait(sendData: string | ArrayBuffer): Promise<SFTPOperationResult> {
     return new Promise((resolve, reject) => {
       pendingResolve = resolve
       pendingTimer = setTimeout(() => {
@@ -76,63 +130,67 @@ export function useSFTP(node: ApiNode) {
         pendingTimer = null
         reject(new Error('SFTP request timeout'))
       }, 30000)
-      send(sendData)
+      if (!send(sendData)) {
+        pendingResolve = null
+        if (pendingTimer) {
+          clearTimeout(pendingTimer)
+          pendingTimer = null
+        }
+        reject(new Error('WebSocket not connected'))
+      }
     })
-  }
-
-  function sendRequest(req: SFTPRequest): Promise<SFTPResponse> {
-    return sendAndAwait(JSON.stringify(req))
   }
 
   async function list(path: string): Promise<void> {
     loading.value = true
-    const r = await sendRequest({ operation: 'list', remote_path: path })
-    if (r.success) currentPath.value = path
-    loading.value = false
+    try {
+      const r = await sendAndAwait(sftpList(path))
+      if (!r.success) throw new Error(r.message)
+    } finally {
+      loading.value = false
+    }
   }
 
   // v3 断点续传上传：upload_init 查询 offset → 二进制帧头发送分片 → upload_complete。
-  // 帧格式见 buildChunkFrame。设计见 design-v3.md §6.4。
   async function upload(remotePath: string, file: File): Promise<void> {
     uploadProgress.value = 0
-    const init = await sendRequest({
-      operation: 'upload_init',
-      remote_path: remotePath,
-      filename: file.name,
-      total_size: file.size,
-      chunk_size: CHUNK_SIZE,
-    })
-    const offset = init.uploaded_offset ?? 0
+    const init = await sendAndAwait(sftpUploadInit(remotePath, file.name, file.size, CHUNK_SIZE))
+    if (!init.success) throw new Error(init.message)
+    const initData = init.data as SFTPUploadInitData
+    const offset = initData?.offset ?? 0
     let idx = Math.floor(offset / CHUNK_SIZE)
     for (let pos = offset; pos < file.size; pos += CHUNK_SIZE) {
       const chunk = file.slice(pos, pos + CHUNK_SIZE)
       const buf = await chunk.arrayBuffer()
-      const frame = buildChunkFrame(init.upload_id!, idx, pos, new Uint8Array(buf))
-      await sendAndAwait(frame)
+      const frame = buildChunkFrame(initData!.upload_id, idx, pos, new Uint8Array(buf))
+      const ack = await sendAndAwait(frame)
+      if (!ack.success) throw new Error(ack.message)
       // 进度用实际写入字节数，封顶 100%（修复 A7：小文件进度爆表）
       const written = Math.min(pos + buf.byteLength, file.size)
       uploadProgress.value = Math.round((written / file.size) * 100)
       idx++
     }
-    await sendRequest({ operation: 'upload_complete', upload_id: init.upload_id, remote_path: remotePath })
+    const done = await sendAndAwait(sftpUploadComplete(initData!.upload_id))
+    if (!done.success) throw new Error(done.message)
   }
 
-  // v3 断点续传下载：改用 HTTP Range（design-v3.md §6.5），WS 仅小文件回退。
-  // 完整 HTTP Range 实现见 api.ts downloadWithRange。
   async function download(remotePath: string): Promise<void> {
     downloadProgress.value = 0
     downloadBuffer = []
     downloadReceivedSize = 0
     downloadTotalSize = 0
-    await sendRequest({ operation: 'download', remote_path: remotePath })
+    const r = await sendAndAwait(sftpDownload(remotePath))
+    if (!r.success) throw new Error(r.message)
   }
 
   async function mkdir(remotePath: string): Promise<void> {
-    await sendRequest({ operation: 'mkdir', remote_path: remotePath })
+    const r = await sendAndAwait(sftpMkdir(remotePath))
+    if (!r.success) throw new Error(r.message)
   }
 
   async function del(remotePath: string): Promise<void> {
-    await sendRequest({ operation: 'delete', remote_path: remotePath })
+    const r = await sendAndAwait(sftpDelete(remotePath))
+    if (!r.success) throw new Error(r.message)
   }
 
   return {

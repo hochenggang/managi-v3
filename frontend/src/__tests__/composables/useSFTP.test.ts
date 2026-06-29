@@ -2,8 +2,18 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { defineComponent, h } from 'vue'
 import type { ApiNode } from '@/protocol/types'
-import type { SFTPResponse } from '@/protocol/sftp'
+import type { WSMessage } from '@/protocol/ws'
 import { useSFTP } from '@/composables/useSFTP'
+
+// vi.hoisted 确保 mock 在 vi.mock 工厂执行前已初始化
+const { mockHandleError } = vi.hoisted(() => ({
+  mockHandleError: vi.fn(),
+}))
+
+vi.mock('@/helper', () => ({
+  handleError: mockHandleError,
+  handleMsg: vi.fn(),
+}))
 
 const node: ApiNode = {
   name: 'n1',
@@ -17,7 +27,8 @@ const node: ApiNode = {
 // 捕获 useWebSocket 的回调与返回值
 let onTextCb: ((data: string) => void) | null = null
 let onBinaryCb: ((data: ArrayBuffer) => void) | null = null
-const mockSend = vi.fn()
+// mockSend 必须返回 true，sendAndAwait 据此判断连接可用
+const mockSend = vi.fn((_data: string | ArrayBuffer) => true)
 const mockConnect = vi.fn()
 const mockClose = vi.fn()
 
@@ -46,11 +57,13 @@ function withSetup<T>(composable: () => T): T {
   return result
 }
 
-function respond(resp: SFTPResponse): void {
+// respond 模拟服务端发送 envelope 文本帧
+function respond(msg: WSMessage): void {
   if (!onTextCb) throw new Error('onText callback not captured')
-  onTextCb(JSON.stringify(resp))
+  onTextCb(JSON.stringify(msg))
 }
 
+// sentPayloadAt 取第 i 次 send 调用的 JSON 负载（仅用于文本帧）
 function sentPayloadAt(i: number): any {
   const call = mockSend.mock.calls[i]
   if (!call) throw new Error(`send not called at index ${i}`)
@@ -88,13 +101,16 @@ describe('useSFTP', () => {
     expect(mockConnect).toHaveBeenCalledTimes(1)
   })
 
-  it('list sends operation=list and updates files/currentPath on success', async () => {
+  it('list sends type=list and updates files/currentPath on success', async () => {
     const s = withSetup(() => useSFTP(node))
     const p = s.list('/home')
-    expect(sentPayloadAt(0)).toEqual({ operation: 'list', remote_path: '/home' })
+    expect(sentPayloadAt(0)).toEqual({ type: 'list', data: { path: '/home' } })
     respond({
-      success: true,
-      files: [{ filename: 'a.txt', size: 1, mode: '0644', is_dir: false, mtime: 0 }],
+      type: 'list',
+      data: {
+        files: [{ filename: 'a.txt', size: 1, mode: '0644', is_dir: false, mtime: 0 }],
+        path: '/home',
+      },
     })
     await p
     expect(s.files.value).toHaveLength(1)
@@ -103,19 +119,19 @@ describe('useSFTP', () => {
     expect(s.loading.value).toBe(false)
   })
 
-  it('mkdir sends operation=mkdir', async () => {
+  it('mkdir sends type=mkdir', async () => {
     const s = withSetup(() => useSFTP(node))
     const p = s.mkdir('/new')
-    expect(sentPayloadAt(0)).toEqual({ operation: 'mkdir', remote_path: '/new' })
-    respond({ success: true })
+    expect(sentPayloadAt(0)).toEqual({ type: 'mkdir', data: { path: '/new' } })
+    respond({ type: 'ok' })
     await p
   })
 
-  it('del sends operation=delete', async () => {
+  it('del sends type=delete', async () => {
     const s = withSetup(() => useSFTP(node))
     const p = s.del('/file')
-    expect(sentPayloadAt(0)).toEqual({ operation: 'delete', remote_path: '/file' })
-    respond({ success: true })
+    expect(sentPayloadAt(0)).toEqual({ type: 'delete', data: { path: '/file' } })
+    respond({ type: 'ok' })
     await p
   })
 
@@ -128,13 +144,15 @@ describe('useSFTP', () => {
     // send 调用 0：upload_init JSON
     await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(1))
     expect(sentPayloadAt(0)).toMatchObject({
-      operation: 'upload_init',
-      remote_path: '/remote/t.txt',
-      filename: 't.txt',
-      total_size: 10,
-      chunk_size: 1 << 20,
+      type: 'upload_init',
+      data: {
+        remote_path: '/remote/t.txt',
+        filename: 't.txt',
+        total_size: 10,
+        chunk_size: 1 << 20,
+      },
     })
-    respond({ success: true, upload_id: 'u1', uploaded_offset: 0 })
+    respond({ type: 'upload_init', data: { upload_id: 'u1', offset: 0 } })
 
     // send 调用 1：二进制帧（含帧头）
     await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(2))
@@ -146,33 +164,32 @@ describe('useSFTP', () => {
     expect(parsed.offset).toBe(0)
     expect(parsed.data.length).toBe(10)
     // 响应 chunk_ack
-    respond({ success: true, type: 'chunk_ack', chunk_index: 0 })
+    respond({ type: 'chunk_ack', data: { chunk_index: 0 } })
 
     // send 调用 2：upload_complete JSON
     await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(3))
     expect(sentPayloadAt(2)).toMatchObject({
-      operation: 'upload_complete',
-      upload_id: 'u1',
-      remote_path: '/remote/t.txt',
+      type: 'upload_complete',
+      data: { upload_id: 'u1' },
     })
-    respond({ success: true })
+    respond({ type: 'ok' })
 
     await p
-    // 单分片 10 字节文件上传完成应正好 100%（修复 D3 弱断言）
+    // 单分片 10 字节文件上传完成应正好 100%
     expect(s.uploadProgress.value).toBe(100)
   })
 
-  it('upload resumes from uploaded_offset', async () => {
+  it('upload resumes from offset', async () => {
     const s = withSetup(() => useSFTP(node))
-    // 文件大小 1MB + 100 字节，uploaded_offset=1MB → 仅剩 100 字节需上传（1 个 chunk）
+    // 文件大小 1MB + 100 字节，offset=1MB → 仅剩 100 字节需上传（1 个 chunk）
     const buf = new Uint8Array((1 << 20) + 100)
     const file = new File([buf], 'big.bin', { type: 'application/octet-stream' })
     const guard = s.upload('/r/big.bin', file).catch((e) => e)
 
     await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(1))
-    expect(sentPayloadAt(0).operation).toBe('upload_init')
+    expect(sentPayloadAt(0).type).toBe('upload_init')
     // 假装已上传 1MB（第 1 片已完成）
-    respond({ success: true, upload_id: 'u2', uploaded_offset: 1 << 20 })
+    respond({ type: 'upload_init', data: { upload_id: 'u2', offset: 1 << 20 } })
 
     // 等待 send(二进制帧)
     await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(2))
@@ -182,12 +199,12 @@ describe('useSFTP', () => {
     expect(parsed.chunkIndex).toBe(1)
     expect(parsed.offset).toBe(1 << 20)
     // 响应 chunk ack
-    respond({ success: true, type: 'chunk_ack', chunk_index: 1 })
+    respond({ type: 'chunk_ack', data: { chunk_index: 1 } })
 
     // 等待 upload_complete 发送
     await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(3))
-    expect(sentPayloadAt(2).operation).toBe('upload_complete')
-    respond({ success: true })
+    expect(sentPayloadAt(2).type).toBe('upload_complete')
+    respond({ type: 'ok' })
 
     await guard
   })
@@ -200,24 +217,24 @@ describe('useSFTP', () => {
     const p = s.upload('/r/tiny.txt', file)
 
     await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(1))
-    respond({ success: true, upload_id: 'u3', uploaded_offset: 0 })
+    respond({ type: 'upload_init', data: { upload_id: 'u3', offset: 0 } })
     await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(2))
-    respond({ success: true, type: 'chunk_ack', chunk_index: 0 })
+    respond({ type: 'chunk_ack', data: { chunk_index: 0 } })
     await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(3))
-    respond({ success: true })
+    respond({ type: 'ok' })
 
     await p
     expect(s.uploadProgress.value).toBeLessThanOrEqual(100)
     expect(s.uploadProgress.value).toBe(100)
   })
 
-  it('download sends operation=download and resets progress', async () => {
+  it('download sends type=download and resets progress', async () => {
     const s = withSetup(() => useSFTP(node))
     s.downloadProgress.value = 50
     const p = s.download('/file')
-    expect(sentPayloadAt(0)).toEqual({ operation: 'download', remote_path: '/file' })
+    expect(sentPayloadAt(0)).toEqual({ type: 'download', data: { path: '/file', offset: 0 } })
     expect(s.downloadProgress.value).toBe(0)
-    respond({ success: true })
+    respond({ type: 'ok' })
     await p
   })
 
@@ -226,11 +243,18 @@ describe('useSFTP', () => {
     const p = s.download('/file')
     await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(1))
     // 模拟服务端：download_start（total=3）→ 二进制 chunk → complete
-    onTextCb?.(JSON.stringify({ type: 'download_start', total: 3, success: true }))
+    respond({ type: 'download_start', data: { total: 3 } })
     onBinaryCb?.(new Uint8Array([1, 2, 3]).buffer)
-    respond({ success: true, complete: true, filename: 'file' })
+    respond({ type: 'complete', data: { filename: 'file' } })
     await p
-    // 修复 D4：验证进度为 100%（3 字节已全部接收）
+    // 验证进度为 100%（3 字节已全部接收）
     expect(s.downloadProgress.value).toBe(100)
+  })
+
+  it('login failure calls handleError and close', () => {
+    withSetup(() => useSFTP(node))
+    respond({ type: 'login', data: { success: false, message: 'auth failed' } })
+    expect(mockHandleError).toHaveBeenCalledWith('登录失败：auth failed')
+    expect(mockClose).toHaveBeenCalledTimes(1)
   })
 })

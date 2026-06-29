@@ -1,15 +1,16 @@
 // useWebSocket：WebSocket 连接管理 composable。
-// 修复 v2 缺陷：心跳失效（文本 ping/pong）+ 网络重试（指数退避重连）。
+// v3 协议：统一 {type, data} envelope。心跳发 {type:"ping"}，重连上限默认 3 次。
 // 设计见 ../../../design-v3.md §6.2 §6.3。
 
 import { ref, onUnmounted } from 'vue'
+import { wsMessage } from '@/protocol/ws'
 
 export interface WSOptions {
-  /** 首包认证消息（建立后立即发送，如节点 JSON）。 */
-  authPayload?: unknown
+  /** 首包认证消息（已序列化字符串，建立后立即发送）。 */
+  authPayload?: string
   /** 心跳间隔毫秒，默认 30000。 */
   heartbeatInterval?: number
-  /** 最大重连次数，默认 5。 */
+  /** 最大重连次数，默认 3。登录失败由调用方在 onText 中调用 close() 抑制重连。 */
   maxReconnect?: number
   /** 收到文本消息回调。 */
   onText?: (data: string) => void
@@ -17,7 +18,7 @@ export interface WSOptions {
   onBinary?: (data: ArrayBuffer) => void
   /** 连接就绪回调。 */
   onOpen?: () => void
-  /** 连接关闭回调。 */
+  /** 连接关闭回调（重连耗尽后触发）。 */
   onClose?: () => void
 }
 
@@ -46,7 +47,7 @@ export function useWebSocket(path: string, opts: WSOptions = {}) {
       connected.value = true
       reconnectAttempts = 0
       if (opts.authPayload !== undefined) {
-        ws?.send(JSON.stringify(opts.authPayload))
+        ws?.send(opts.authPayload)
       }
       startHeartbeat()
       opts.onOpen?.()
@@ -63,7 +64,7 @@ export function useWebSocket(path: string, opts: WSOptions = {}) {
     ws.onclose = () => {
       connected.value = false
       stopHeartbeat()
-      if (!manualClose && reconnectAttempts < (opts.maxReconnect ?? 5)) {
+      if (!manualClose && reconnectAttempts < (opts.maxReconnect ?? 3)) {
         const delay = Math.min(1000 * 2 ** reconnectAttempts, 16000)
         reconnectAttempts++
         reconnectTimer = setTimeout(doConnect, delay)
@@ -77,14 +78,14 @@ export function useWebSocket(path: string, opts: WSOptions = {}) {
     }
   }
 
-  // v3 心跳：定时发文本 ping 帧，服务端回 pong 刷新连接活跃状态。
-  // 浏览器无法主动发 Ping 控制帧，改用业务层 ping/pong（design-v3.md §6.3）。
+  // v3 心跳：定时发 {type:"ping"} 文本帧，服务端回 {type:"pong"}。
+  // 浏览器无法主动发 WS 协议级 Ping 控制帧，改用业务层 ping/pong（design-v3.md §6.3）。
   function startHeartbeat(): void {
     const interval = opts.heartbeatInterval ?? 30000
     stopHeartbeat()
     heartbeatTimer = setInterval(() => {
       if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'ping' }))
+        ws.send(wsMessage('ping'))
       }
     }, interval)
   }
@@ -96,10 +97,13 @@ export function useWebSocket(path: string, opts: WSOptions = {}) {
     }
   }
 
-  function send(data: string | ArrayBuffer): void {
+  /** 发送数据，仅在 OPEN 时发送。返回是否成功投递。 */
+  function send(data: string | ArrayBuffer): boolean {
     if (ws?.readyState === WebSocket.OPEN) {
       ws.send(data)
+      return true
     }
+    return false
   }
 
   function close(): void {

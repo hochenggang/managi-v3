@@ -1,32 +1,43 @@
 import { describe, it, expect } from 'vitest'
-import { isControlMessage, resizeMessage } from './terminal'
+import { loginMessage, inputMessage, resizeMessage } from './terminal'
+import { parseWSMessage } from './ws'
+import type { ApiNode } from './types'
 
-describe('isControlMessage', () => {
-  it('returns true for full resize message', () => {
-    expect(isControlMessage('{"type":"resize","cols":80,"rows":24}')).toBe(true)
+const node: ApiNode = {
+  name: 'n1',
+  host: '1.2.3.4',
+  port: 22,
+  username: 'root',
+  auth_type: 'password',
+  auth_value: 'pwd',
+}
+
+describe('loginMessage', () => {
+  it('produces envelope with type=login and node as data', () => {
+    const msg = parseWSMessage(loginMessage(node))
+    expect(msg).not.toBeNull()
+    expect(msg!.type).toBe('login')
+    expect(msg!.data).toEqual(node)
   })
-  it('returns true for truncated prefix (prefix match)', () => {
-    expect(isControlMessage('{"type":"resize"')).toBe(true)
-  })
-  it('returns false for non-resize JSON', () => {
-    expect(isControlMessage('{"type":"input","data":"hi"}')).toBe(false)
-  })
-  it('returns false for empty string', () => {
-    expect(isControlMessage('')).toBe(false)
-  })
-  it('returns false for plain text', () => {
-    expect(isControlMessage('ls -la')).toBe(false)
+})
+
+describe('inputMessage', () => {
+  it('produces envelope with type=msg and string data', () => {
+    const msg = parseWSMessage(inputMessage('ls -la\n'))
+    expect(msg).not.toBeNull()
+    expect(msg!.type).toBe('msg')
+    expect(msg!.data).toBe('ls -la\n')
   })
 })
 
 describe('resizeMessage', () => {
-  it('produces valid JSON with resize type', () => {
-    const msg = resizeMessage(80, 24)
-    const parsed = JSON.parse(msg)
-    expect(parsed.type).toBe('resize')
-    expect(parsed.cols).toBe(80)
-    expect(parsed.rows).toBe(24)
+  it('produces envelope with type=resize and cols/rows data', () => {
+    const msg = parseWSMessage(resizeMessage(120, 40))
+    expect(msg).not.toBeNull()
+    expect(msg!.type).toBe('resize')
+    expect(msg!.data).toEqual({ cols: 120, rows: 40 })
   })
+
   it('produces different messages for different sizes', () => {
     expect(resizeMessage(120, 40)).not.toBe(resizeMessage(80, 24))
   })

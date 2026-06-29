@@ -82,10 +82,10 @@ describe('useWebSocket', () => {
     expect(MockWebSocket.LAST!.url).toMatch(/^ws:\/\/.+\/ws\/sftp$/)
   })
 
-  it('onopen flips connected, fires onOpen, and sends authPayload JSON', () => {
+  it('onopen flips connected, fires onOpen, and sends authPayload string as-is', () => {
     const onOpen = vi.fn()
     const auth = { host: '1.2.3.4', port: 22 }
-    const { result } = withSetup(() => useWebSocket('/ws/sftp', { authPayload: auth, onOpen }))
+    const { result } = withSetup(() => useWebSocket('/ws/sftp', { authPayload: JSON.stringify(auth), onOpen }))
     result.connect()
     expect(result.connected.value).toBe(false)
     MockWebSocket.LAST!.fireOpen()
@@ -107,14 +107,14 @@ describe('useWebSocket', () => {
     expect(onBinary.mock.calls[0][0]).toBeInstanceOf(ArrayBuffer)
   })
 
-  it('send() forwards to ws.send only when OPEN', () => {
+  it('send() returns false and skips when not OPEN, returns true when OPEN', () => {
     const { result } = withSetup(() => useWebSocket('/ws'))
     result.connect()
-    // 未 fireOpen 前 readyState=0，send 应静默跳过
-    result.send('before-open')
+    // 未 fireOpen 前 readyState=0，send 返回 false 且不投递
+    expect(result.send('before-open')).toBe(false)
     expect(MockWebSocket.LAST!.sent).toHaveLength(0)
     MockWebSocket.LAST!.fireOpen()
-    result.send('after-open')
+    expect(result.send('after-open')).toBe(true)
     expect(MockWebSocket.LAST!.sent).toEqual(['after-open'])
   })
 

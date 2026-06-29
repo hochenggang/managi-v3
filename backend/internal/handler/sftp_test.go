@@ -160,7 +160,25 @@ func writeWSJSON(t *testing.T, conn *websocket.Conn, v any) {
 	require.NoError(t, conn.WriteMessage(websocket.TextMessage, data))
 }
 
-// TestSftpWSHandler_Basic 验证 SFTP WS 连接 + list 操作。
+// writeWSEnvelope 发送统一 envelope 消息 {type, data}。
+func writeWSEnvelope(t *testing.T, conn *websocket.Conn, typ string, data any) {
+	t.Helper()
+	var dataBytes json.RawMessage
+	if data != nil {
+		b, err := json.Marshal(data)
+		require.NoError(t, err)
+		dataBytes = b
+	}
+	writeWSJSON(t, conn, wsEnvelope{Type: typ, Data: dataBytes})
+}
+
+// envelopeData 取 envelope 的 data 字段为 map。
+func envelopeData(msg map[string]any) map[string]any {
+	d, _ := msg["data"].(map[string]any)
+	return d
+}
+
+// TestSftpWSHandler_Basic 验证 SFTP WS：login → 服务端主动 list / → 文件展示。
 func TestSftpWSHandler_Basic(t *testing.T) {
 	srv := testutil.Start(t)
 	defer srv.Close()
@@ -179,23 +197,20 @@ func TestSftpWSHandler_Basic(t *testing.T) {
 	require.NoError(t, err)
 	defer conn.Close()
 
-	// 首帧：Node JSON
-	writeWSJSON(t, conn, testutil.TestNode(srv.Host(), srv.Port()))
+	// 首帧：login envelope
+	writeWSEnvelope(t, conn, msgTypeLogin, testutil.TestNode(srv.Host(), srv.Port()))
 
-	// 读 connected
+	// 读 login 结果（成功）
 	msg := readWSJSON(t, conn)
-	assert.Equal(t, "connected", msg["type"])
+	assert.Equal(t, "login", msg["type"])
+	assert.True(t, envelopeData(msg)["success"].(bool))
 
-	// 发 list 请求
-	writeWSJSON(t, conn, map[string]any{
-		"operation":   string(model.OpList),
-		"remote_path": "/",
-	})
-
-	// 读 list 响应
+	// 服务端登录后主动推送 list /
 	msg = readWSJSON(t, conn)
 	assert.Equal(t, "list", msg["type"])
-	files, ok := msg["files"].([]any)
+	d := envelopeData(msg)
+	assert.Equal(t, "/", d["path"])
+	files, ok := d["files"].([]any)
 	require.True(t, ok)
 	// 验证预置的 hello.txt 存在且 size==2
 	var foundHello bool
@@ -225,25 +240,27 @@ func TestSftpWSHandler_UploadFlow(t *testing.T) {
 	require.NoError(t, err)
 	defer conn.Close()
 
-	// 首帧认证
-	writeWSJSON(t, conn, testutil.TestNode(srv.Host(), srv.Port()))
+	// 首帧 login
+	writeWSEnvelope(t, conn, msgTypeLogin, testutil.TestNode(srv.Host(), srv.Port()))
 	msg := readWSJSON(t, conn)
-	require.Equal(t, "connected", msg["type"])
+	require.Equal(t, "login", msg["type"])
+	// 服务端主动 list /
+	_ = readWSJSON(t, conn) // list
 
 	// upload_init
-	writeWSJSON(t, conn, map[string]any{
-		"operation":   string(model.OpUploadInit),
-		"remote_path": "/upload",
-		"filename":    "test.bin",
-		"total_size":  11,
-		"chunk_size":  11,
+	writeWSEnvelope(t, conn, msgTypeUploadInit, sftpRequestData{
+		RemotePath: "/upload",
+		Filename:   "test.bin",
+		TotalSize:  11,
+		ChunkSize:  11,
 	})
 	msg = readWSJSON(t, conn)
 	require.Equal(t, "upload_init", msg["type"])
-	uploadID, ok := msg["upload_id"].(string)
+	initData := envelopeData(msg)
+	uploadID, ok := initData["upload_id"].(string)
 	require.True(t, ok)
 	assert.NotEmpty(t, uploadID)
-	offset, _ := msg["offset"].(float64)
+	offset, _ := initData["offset"].(float64)
 	assert.Equal(t, float64(0), offset)
 
 	// upload_chunk：发二进制帧（帧头协议，design-v3.md §6.4）
@@ -254,10 +271,7 @@ func TestSftpWSHandler_UploadFlow(t *testing.T) {
 	assert.Equal(t, "chunk_ack", msg["type"])
 
 	// upload_complete
-	writeWSJSON(t, conn, map[string]any{
-		"operation": string(model.OpUploadDone),
-		"upload_id": uploadID,
-	})
+	writeWSEnvelope(t, conn, msgTypeUploadDone, sftpRequestData{UploadID: uploadID})
 	msg = readWSJSON(t, conn)
 	assert.Equal(t, "ok", msg["type"])
 

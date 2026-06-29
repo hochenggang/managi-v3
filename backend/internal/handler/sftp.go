@@ -1,6 +1,25 @@
 // Package handler - WebSocket SFTP 端点 /ws/sftp 与 HTTP 下载端点。
-// 对应 v2 routers.py 的 sftp_websocket_endpoint。
-// 修复 v2 缺陷：上传/下载断点续传（design-v3.md §6.4 §6.5）。
+// v3 协议：统一 {type, data} envelope。登录成功后主动列根目录。
+//   客户端 → 服务端：
+//     - 首帧: {type:"login", data: Node}
+//     - {type:"list", data: {path}}
+//     - {type:"mkdir"|"delete", data: {path}}
+//     - {type:"rename", data: {old_path, new_path}}
+//     - {type:"download", data: {path, offset?}}
+//     - {type:"upload_init", data: {remote_path, filename, total_size, chunk_size}}
+//     - {type:"upload_complete", data: {upload_id}}
+//     - {type:"ping"}
+//     - 二进制分片帧（上传）
+//   服务端 → 客户端：
+//     - {type:"login", data: {success, message?}}（成功后立即推送 list /）
+//     - {type:"list", data: {files, path}}
+//     - {type:"ok"}
+//     - {type:"error", data: {message}}
+//     - {type:"download_start", data: {total}}
+//     - {type:"complete", data: {filename}}
+//     - {type:"chunk_ack", data: {chunk_index}}
+//     - {type:"upload_init", data: {upload_id, offset}}
+//     - {type:"pong"}
 package handler
 
 import (
@@ -26,160 +45,167 @@ var sftpUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
+// sftpRequestData SFTP 操作 data 负载（按 type 解释不同字段）。
+type sftpRequestData struct {
+	Path      string `json:"path,omitempty"`
+	OldPath   string `json:"old_path,omitempty"`
+	NewPath   string `json:"new_path,omitempty"`
+	Offset    int64  `json:"offset,omitempty"`
+	UploadID  string `json:"upload_id,omitempty"`
+	Filename  string `json:"filename,omitempty"`
+	TotalSize int64  `json:"total_size,omitempty"`
+	ChunkSize int    `json:"chunk_size,omitempty"`
+	// 兼容字段：upload_init 使用 remote_path 表示目标目录
+	RemotePath string `json:"remote_path,omitempty"`
+}
+
 // sftpWSHandler WS /ws/sftp
-// 协议（与 v2 兼容 + v3 扩展）：
-//   1. 首帧: Node JSON
-//   2. 服务端回 {type:"connected"}
-//   3. 客户端发 FileOperationRequest JSON（TextMessage）
-//      v2 操作: list/mkdir/delete/rename/move/upload/download
-//      v3 扩展: upload_init/upload_complete（断点续传）
-//   4. upload 分片数据通过 BinaryMessage 发送（二进制帧头协议，design-v3.md §6.4）
 func sftpWSHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		conn, err := sftpUpgrader.Upgrade(w, r, nil)
 		if err != nil {
-			return // Upgrade 已写错误响应
-		}
-		defer conn.Close()
-
-		// 首帧认证
-		_, msg, err := conn.ReadMessage()
-		if err != nil {
-			writeSftpError(conn, "read auth frame: "+err.Error())
 			return
 		}
-		var node model.Node
-		if err := json.Unmarshal(msg, &node); err != nil {
-			writeSftpError(conn, "invalid node json: "+err.Error())
+		defer conn.Close()
+		wc := newWSConn(conn)
+
+		deadline := wsReadDeadline(cfg)
+		_ = wc.setReadDeadline(time.Now().Add(deadline))
+
+		node, err := readLoginFrame(wc, deadline)
+		if err != nil {
+			_ = wc.writeError(err.Error())
 			return
 		}
 
 		sshConn, err := pool.Get(node)
 		if err != nil {
-			writeSftpError(conn, "ssh connect: "+err.Error())
+			_ = wc.writeLoginResult(false, err.Error())
 			return
 		}
 		defer pool.Release(node)
 
 		sc, err := sftp.New(node, sshConn.Client())
 		if err != nil {
-			writeSftpError(conn, "sftp init: "+err.Error())
+			_ = wc.writeLoginResult(false, err.Error())
 			return
 		}
 		defer sc.Close()
 
-		writeSftpMsg(conn, map[string]any{"type": "connected"})
+		// 登录成功
+		_ = wc.writeLoginResult(true, "")
 
-		// 心跳超时检测：收到任意消息即刷新 deadline（design-v3.md §6.3）
-		deadline := time.Duration(cfg.WSReadDeadline) * time.Second
-		if deadline <= 0 {
-			deadline = 60 * time.Second
-		}
-		_ = conn.SetReadDeadline(time.Now().Add(deadline))
+		// 主动列根目录（修复：原 connected 后前端空白需手动刷新）
+		listRoot(wc, sc, "/")
 
 		for {
-			msgType, data, err := conn.ReadMessage()
+			msgType, data, err := wc.readMessage()
 			if err != nil {
 				return
 			}
-			// 收到任意消息刷新读超时（前端 ping/业务帧均视为活跃）
-			_ = conn.SetReadDeadline(time.Now().Add(deadline))
+			_ = wc.setReadDeadline(time.Now().Add(deadline))
 			if msgType == websocket.BinaryMessage {
-				handleBinaryChunk(conn, sc, data)
+				handleBinaryChunk(wc, sc, data)
 				continue
 			}
 			if msgType != websocket.TextMessage {
-				continue // 忽略其他类型帧
-			}
-			// 先解析为 raw map 识别 ping 心跳帧（与 useWebSocket.ts startHeartbeat 对齐）
-			var raw map[string]any
-			if json.Unmarshal(data, &raw) == nil {
-				if t, _ := raw["type"].(string); t == "ping" {
-					writeSftpMsg(conn, map[string]any{"type": "pong"})
-					continue
-				}
-			}
-			var req model.FileOperationRequest
-			if err := json.Unmarshal(data, &req); err != nil {
-				writeSftpError(conn, "invalid request: "+err.Error())
 				continue
 			}
-			handleSftpOp(conn, sc, &req)
+			env, ok := parseEnvelope(data)
+			if !ok {
+				continue
+			}
+			if env.Type == msgTypePing {
+				_ = wc.writePong()
+				continue
+			}
+			handleSftpOp(wc, sc, env)
 		}
 	}
 }
 
+// listRoot 列目录并推送 list 消息。失败时推送 error。
+func listRoot(wc *wsConn, sc *sftp.Client, p string) {
+	items, err := sc.List(p)
+	if err != nil {
+		_ = wc.writeError("list " + p + ": " + err.Error())
+		return
+	}
+	_ = wc.writeEnvelope(msgTypeList, map[string]any{"files": items, "path": p})
+}
+
 // handleSftpOp 分发单个 SFTP 操作。
-func handleSftpOp(conn *websocket.Conn, sc *sftp.Client, req *model.FileOperationRequest) {
-	switch req.Operation {
-	case model.OpList:
-		items, err := sc.List(req.RemotePath)
+func handleSftpOp(wc *wsConn, sc *sftp.Client, env wsEnvelope) {
+	var req sftpRequestData
+	if len(env.Data) > 0 {
+		if err := json.Unmarshal(env.Data, &req); err != nil {
+			_ = wc.writeError("invalid request data: " + err.Error())
+			return
+		}
+	}
+	switch env.Type {
+	case msgTypeList:
+		items, err := sc.List(req.Path)
 		if err != nil {
-			writeSftpError(conn, err.Error())
+			_ = wc.writeError(err.Error())
 			return
 		}
-		writeSftpMsg(conn, map[string]any{"type": "list", "files": items})
+		_ = wc.writeEnvelope(msgTypeList, map[string]any{"files": items, "path": req.Path})
 
-	case model.OpMkdir:
-		if err := sc.Mkdir(req.RemotePath); err != nil {
-			writeSftpError(conn, err.Error())
+	case msgTypeMkdir:
+		if err := sc.Mkdir(req.Path); err != nil {
+			_ = wc.writeError(err.Error())
 			return
 		}
-		writeSftpMsg(conn, map[string]any{"type": "ok"})
+		_ = wc.writeEnvelope(msgTypeOk, nil)
 
-	case model.OpDelete:
-		if err := sc.Delete(req.RemotePath); err != nil {
-			writeSftpError(conn, err.Error())
+	case msgTypeDelete:
+		if err := sc.Delete(req.Path); err != nil {
+			_ = wc.writeError(err.Error())
 			return
 		}
-		writeSftpMsg(conn, map[string]any{"type": "ok"})
+		_ = wc.writeEnvelope(msgTypeOk, nil)
 
-	case model.OpRename:
-		if err := sc.Rename(req.RemotePath, req.NewPath); err != nil {
-			writeSftpError(conn, err.Error())
+	case msgTypeRename:
+		if err := sc.Rename(req.OldPath, req.NewPath); err != nil {
+			_ = wc.writeError(err.Error())
 			return
 		}
-		writeSftpMsg(conn, map[string]any{"type": "ok"})
+		_ = wc.writeEnvelope(msgTypeOk, nil)
 
-	case model.OpUploadInit:
-		uploadID, offset, err := sc.UploadInit(req.RemotePath, req.Filename, req.TotalSize, req.ChunkSize)
+	case msgTypeUploadInit:
+		// upload_init 用 remote_path 字段表示目标目录（与历史协议兼容）
+		targetDir := req.RemotePath
+		if targetDir == "" {
+			targetDir = req.Path
+		}
+		uploadID, offset, err := sc.UploadInit(targetDir, req.Filename, req.TotalSize, req.ChunkSize)
 		if err != nil {
-			writeSftpError(conn, err.Error())
+			_ = wc.writeError(err.Error())
 			return
 		}
-		writeSftpMsg(conn, map[string]any{
-			"type":      "upload_init",
-			"upload_id": uploadID,
-			"offset":    offset,
-		})
+		_ = wc.writeEnvelope(msgTypeUploadInit, map[string]any{"upload_id": uploadID, "offset": offset})
 
-	case model.OpUploadChunk:
-		// v3 协议：分片数据通过 BinaryMessage 二进制帧头发送，不再走 JSON。
-		// 保留此 case 仅作错误提示，避免客户端误用旧协议。
-		writeSftpError(conn, "upload_chunk must use binary frame protocol")
-
-	case model.OpUploadDone:
+	case msgTypeUploadDone:
 		if err := sc.UploadComplete(req.UploadID); err != nil {
-			writeSftpError(conn, err.Error())
+			_ = wc.writeError(err.Error())
 			return
 		}
-		writeSftpMsg(conn, map[string]any{"type": "ok"})
+		_ = wc.writeEnvelope(msgTypeOk, nil)
 
-	case model.OpDownload:
-		reader, total, err := sc.DownloadStream(req.RemotePath, req.Offset)
+	case msgTypeDownload:
+		reader, total, err := sc.DownloadStream(req.Path, req.Offset)
 		if err != nil {
-			writeSftpError(conn, err.Error())
+			_ = wc.writeError(err.Error())
 			return
 		}
 		defer reader.Close()
-		// 先发 download_start 含总大小，供前端计算进度
-		writeSftpMsg(conn, map[string]any{"type": "download_start", "total": total})
-		// 流式分块发送，避免大文件 OOM
+		_ = wc.writeEnvelope(msgTypeDownloadStart, map[string]any{"total": total})
 		buf := make([]byte, 32*1024)
 		for {
 			n, rerr := reader.Read(buf)
 			if n > 0 {
-				if werr := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); werr != nil {
+				if werr := wc.writeRaw(websocket.BinaryMessage, buf[:n]); werr != nil {
 					return
 				}
 			}
@@ -187,30 +213,30 @@ func handleSftpOp(conn *websocket.Conn, sc *sftp.Client, req *model.FileOperatio
 				break
 			}
 			if rerr != nil {
-				writeSftpError(conn, "read file: "+rerr.Error())
+				_ = wc.writeError("read file: " + rerr.Error())
 				return
 			}
 		}
-		writeSftpMsg(conn, map[string]any{"type": "complete", "filename": path.Base(req.RemotePath), "complete": true})
+		_ = wc.writeEnvelope(msgTypeComplete, map[string]any{"filename": path.Base(req.Path)})
 
 	default:
-		writeSftpError(conn, "unknown operation: "+string(req.Operation))
+		_ = wc.writeError("unknown operation: " + env.Type)
 	}
 }
 
 // handleBinaryChunk 解析二进制分片帧并写入远程 .part 文件，回 chunk_ack。
 // 帧格式（大端序）：[4字节 upload_id_len][upload_id][4字节 chunk_index][8字节 offset][8字节 data_len][data]
-func handleBinaryChunk(conn *websocket.Conn, sc *sftp.Client, data []byte) {
+func handleBinaryChunk(wc *wsConn, sc *sftp.Client, data []byte) {
 	uploadID, chunkIndex, offset, chunkData, err := parseChunkFrame(data)
 	if err != nil {
-		writeSftpError(conn, "parse binary frame: "+err.Error())
+		_ = wc.writeError("parse binary frame: " + err.Error())
 		return
 	}
 	if err := sc.UploadChunk(uploadID, chunkIndex, offset, chunkData); err != nil {
-		writeSftpError(conn, err.Error())
+		_ = wc.writeError(err.Error())
 		return
 	}
-	writeSftpMsg(conn, map[string]any{"type": "chunk_ack", "chunk_index": chunkIndex})
+	_ = wc.writeEnvelope(msgTypeChunkAck, map[string]any{"chunk_index": chunkIndex})
 }
 
 // parseChunkFrame 解析二进制分片帧头。
@@ -239,17 +265,8 @@ func parseChunkFrame(data []byte) (uploadID string, chunkIndex int, offset int64
 	return uploadID, chunkIndex, offset, chunkData, nil
 }
 
-func writeSftpMsg(conn *websocket.Conn, v any) {
-	_ = conn.WriteJSON(v)
-}
-
-func writeSftpError(conn *websocket.Conn, msg string) {
-	_ = conn.WriteJSON(map[string]any{"type": "error", "message": msg})
-}
-
 // sftpDownloadHandler GET /api/sftp/download?node=...&path=...
-// v3 新增：HTTP Range 下载，支持断点续传。
-// 设计见 design-v3.md §6.5。
+// v3 新增：HTTP Range 下载，支持断点续传。设计见 design-v3.md §6.5。
 func sftpDownloadHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		nodeStr := r.URL.Query().Get("node")
@@ -305,7 +322,6 @@ func parseRangeOffset(rangeHeader string) int64 {
 	if rangeHeader == "" {
 		return 0
 	}
-	// "bytes=10-" → 10
 	parts := strings.SplitN(rangeHeader, "=", 2)
 	if len(parts) != 2 || !strings.HasPrefix(parts[0], "bytes") {
 		return 0

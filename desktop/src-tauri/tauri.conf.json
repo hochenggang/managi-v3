@@ -1,8 +1,10 @@
 {
   "$schema": "https://schema.tauri.app/config/1",
-  "productName": "Managi",
-  "version": "3.0.0",
-  "identifier": "com.managi.desktop",
+  "package": {
+    "productName": "Managi",
+    "version": "3.0.0",
+    "identifier": "com.managi.desktop"
+  },
   "build": {
     "beforeDevCommand": "cd ../../frontend && npm run dev",
     "beforeBuildCommand": "cd ../../frontend && npm run build",

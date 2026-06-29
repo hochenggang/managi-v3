@@ -1,18 +1,8 @@
-// SFTP 协议：操作类型枚举 + 断点续传扩展消息。
-// 与后端 model.FileOperationType 对齐，v3 新增 upload_init/upload_chunk/upload_complete。
-// 设计见 ../../../design-v3.md §6.4。
+// SFTP 协议：基于统一 WS envelope。
+// 与后端 handler/sftp.go 对齐。
 
-export type FileOperation =
-  | 'list'
-  | 'mkdir'
-  | 'delete'
-  | 'rename'
-  | 'move'
-  | 'upload'
-  | 'download'
-  | 'upload_init'      // v3 新增：断点续传初始化
-  | 'upload_chunk'     // v3 新增：分片上传
-  | 'upload_complete'  // v3 新增：上传完成
+import type { ApiNode } from './types'
+import { wsMessage } from './ws'
 
 /** 目录项。 */
 export interface SFTPFile {
@@ -23,36 +13,47 @@ export interface SFTPFile {
   mtime: number
 }
 
-/** SFTP 请求（与后端 FileOperationRequest 对齐）。 */
-export interface SFTPRequest {
-  operation: FileOperation
-  remote_path: string
-  new_path?: string
-  // v3 断点续传扩展
-  upload_id?: string
-  filename?: string
-  total_size?: number
-  chunk_size?: number
-  chunk_index?: number
-  offset?: number
-}
+// ===== 请求构造 =====
 
-/** SFTP 响应。 */
-export interface SFTPResponse {
-  type?: string
-  success: boolean
-  message?: string
+export const sftpLogin = (node: ApiNode): string => wsMessage<ApiNode>('login', node)
+export const sftpList = (path: string): string => wsMessage('list', { path })
+export const sftpMkdir = (path: string): string => wsMessage('mkdir', { path })
+export const sftpDelete = (path: string): string => wsMessage('delete', { path })
+export const sftpRename = (oldPath: string, newPath: string): string =>
+  wsMessage('rename', { old_path: oldPath, new_path: newPath })
+export const sftpDownload = (path: string, offset = 0): string =>
+  wsMessage('download', { path, offset })
+export const sftpUploadInit = (
+  remotePath: string,
+  filename: string,
+  totalSize: number,
+  chunkSize: number,
+): string =>
+  wsMessage('upload_init', {
+    remote_path: remotePath,
+    filename,
+    total_size: totalSize,
+    chunk_size: chunkSize,
+  })
+export const sftpUploadComplete = (uploadId: string): string =>
+  wsMessage('upload_complete', { upload_id: uploadId })
+
+// ===== 响应 data 负载 =====
+
+export interface SFTPListData {
+  files: SFTPFile[]
   path?: string
-  size?: number
-  files?: SFTPFile[]
-  filename?: string
-  complete?: boolean
-  progress?: number
-  operation?: string
-  total?: number
-  // v3 断点续传扩展
-  upload_id?: string
-  uploaded_offset?: number
-  chunk_index?: number
-  received_offset?: number
+}
+export interface SFTPDownloadStartData {
+  total: number
+}
+export interface SFTPCompleteData {
+  filename: string
+}
+export interface SFTPChunkAckData {
+  chunk_index: number
+}
+export interface SFTPUploadInitData {
+  upload_id: string
+  offset: number
 }

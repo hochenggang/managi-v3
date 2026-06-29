@@ -125,7 +125,7 @@
 // SFTP 文件管理器：基于 useSFTP composable。
 // 修正 v2 缺陷 N3：上传改用分片协议（upload_init/upload_chunk/upload_complete），
 // 替代 v2 裸二进制 ws.send(data)（无分片、无断点续传、无进度）。
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Modal from '@/components/Modal.vue'
 import CirclePercent from '@/components/CirclePercent.vue'
@@ -272,9 +272,8 @@ const currentPathParts = computed(() => {
   return ['/'].concat(parts)
 })
 
-onMounted(() => {
-  list('/').catch((e) => handleError(String(e)))
-})
+// 服务端登录成功后主动推送 list /，无需前端 onMounted 主动请求。
+// 若首屏空白，用户可点击工具栏刷新按钮触发 list(currentPath)。
 
 onBeforeUnmount(() => {
   close()
