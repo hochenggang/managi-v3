@@ -28,6 +28,8 @@ type Config struct {
 
 	// 前端静态文件
 	IndexHTMLPath string
+	// IndexHTML 是内嵌的 index.html 内容；若设置则优先于 IndexHTMLPath
+	IndexHTML []byte
 }
 
 // Load 从环境变量加载配置，未设置则使用默认值。

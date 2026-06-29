@@ -1,0 +1,5 @@
+# 构建时从 frontend/dist 与 desktop/icon.ico 复制过来的内嵌资源
+index.html
+icon.ico
+# Windows 资源文件（由 rsrc 生成）
+rsrc_windows_amd64.syso

@@ -73,9 +73,9 @@ jobs:
       - name: Verify single HTML
         run: ls -lh dist/index.html
 
-  build-tauri:
-    name: Tauri Build (windows-latest)
-    runs-on: windows-latest
+  build-windows-app:
+    name: Windows App Build
+    runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v5
@@ -90,11 +90,23 @@ jobs:
           node-version: '22'
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-      # Tauri 的 build.rs（tauri_build::build()）在编译期校验 externalBin 路径，
-      # 需预先构建 Go sidecar 到 binaries/managi-x86_64-pc-windows-msvc.exe。
-      - name: Build Go sidecar binary
+      - name: Build frontend
+        working-directory: frontend
+        shell: bash
+        run: |
+          npm ci
+          npm run build
+      - name: Copy embedded assets
+        shell: bash
+        run: |
+          cp frontend/dist/index.html backend/cmd/windows-app/index.html
+          cp desktop/icon.ico backend/cmd/windows-app/icon.ico
+      - name: Generate Windows resource
+        working-directory: backend/cmd/windows-app
+        shell: bash
+        run: |
+          go run github.com/akavel/rsrc@latest -ico icon.ico -arch amd64 -o rsrc_windows_amd64.syso
+      - name: Build windows-app.exe
         working-directory: backend
         shell: bash
         env:
@@ -102,23 +114,7 @@ jobs:
           GOARCH: amd64
           CGO_ENABLED: 0
         run: |
-          mkdir -p ../desktop/src-tauri/binaries
-          go build -ldflags="-s -w" -o "../desktop/src-tauri/binaries/managi-x86_64-pc-windows-msvc.exe" ./cmd/managi
-      # generate_context! 宏在编译期嵌入 distDir（../../frontend/dist），需先构建前端。
-      - name: Build frontend
-        working-directory: frontend
-        shell: bash
-        run: |
-          npm ci
-          npm run build
-      - name: Verify build inputs
-        shell: bash
-        run: |
-          ls -lh desktop/src-tauri/binaries/managi-x86_64-pc-windows-msvc.exe
-          ls -lh frontend/dist/index.html
-      - name: Tauri build
-        working-directory: desktop/src-tauri
-        run: cargo build
+          go build -ldflags="-H=windowsgui -s -w" -o ../desktop/windows-app.exe ./cmd/windows-app
       - name: Verify build artifact
         shell: bash
-        run: ls -lh desktop/src-tauri/target/debug/managi-desktop.exe
+        run: ls -lh desktop/windows-app.exe

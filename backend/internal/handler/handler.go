@@ -4,8 +4,10 @@
 package handler
 
 import (
+	"bytes"
 	"net/http"
 	"path/filepath"
+	"time"
 
 	"managi/internal/config"
 	"managi/internal/sshpool"
@@ -41,6 +43,10 @@ func Register(mux *http.ServeMux, cfg *config.Config) {
 func indexHandler(cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if len(cfg.IndexHTML) > 0 {
+			http.ServeContent(w, r, "index.html", time.Time{}, bytes.NewReader(cfg.IndexHTML))
+			return
+		}
 		http.ServeFile(w, r, cfg.IndexHTMLPath)
 	}
 }

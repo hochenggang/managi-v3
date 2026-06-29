@@ -84,9 +84,48 @@ jobs:
           name: frontend-dist
           path: frontend/dist/
 
+  build-windows-app:
+    name: Windows App
+    needs: build-frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.22'
+          cache-dependency-path: backend/go.sum
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist/
+      - name: Copy embedded assets
+        shell: bash
+        run: |
+          cp frontend/dist/index.html backend/cmd/windows-app/index.html
+          cp desktop/icon.ico backend/cmd/windows-app/icon.ico
+      - name: Generate Windows resource
+        working-directory: backend/cmd/windows-app
+        shell: bash
+        run: |
+          go run github.com/akavel/rsrc@latest -ico icon.ico -arch amd64 -o rsrc_windows_amd64.syso
+      - name: Build windows-app.exe
+        working-directory: backend
+        shell: bash
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p ../artifacts
+          go build -ldflags="-H=windowsgui -s -w" -o "../artifacts/windows-app.exe" ./cmd/windows-app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-app
+          path: artifacts/windows-app.exe
+
   release:
     name: Publish Release
-    needs: [build-go-binaries, build-frontend]
+    needs: [build-go-binaries, build-frontend, build-windows-app]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -102,4 +141,5 @@ jobs:
           files: |
             release-assets/managi-*/*
             release-assets/frontend-dist/index.html
+            release-assets/windows-app/windows-app.exe
             deploy/install.sh
