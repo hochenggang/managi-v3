@@ -152,9 +152,10 @@ export function useSFTP(node: ApiNode) {
   }
 
   // v3 断点续传上传：upload_init 查询 offset → 二进制帧头发送分片 → upload_complete。
-  async function upload(remotePath: string, file: File): Promise<void> {
+  // remoteDir 为远程目标目录，文件名取自 file.name。
+  async function upload(remoteDir: string, file: File): Promise<void> {
     uploadProgress.value = 0
-    const init = await sendAndAwait(sftpUploadInit(remotePath, file.name, file.size, CHUNK_SIZE))
+    const init = await sendAndAwait(sftpUploadInit(remoteDir, file.name, file.size, CHUNK_SIZE))
     if (!init.success) throw new Error(init.message)
     const initData = init.data as SFTPUploadInitData
     const offset = initData?.offset ?? 0

@@ -214,8 +214,7 @@ const handleFileUpload = async (event: Event) => {
   isUploading.value = true
   try {
     for (const file of Array.from(input.files)) {
-      const path = getFullPath(file.name)
-      await upload(path, file)
+      await upload(currentPath.value, file)
     }
     handleMsg(t('finder.uploaded'))
     await refresh()

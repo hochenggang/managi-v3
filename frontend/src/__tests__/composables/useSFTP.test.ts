@@ -139,14 +139,14 @@ describe('useSFTP', () => {
     const s = withSetup(() => useSFTP(node))
     const buf = new Uint8Array(10)
     const file = new File([buf], 't.txt', { type: 'application/octet-stream' })
-    const p = s.upload('/remote/t.txt', file)
+    const p = s.upload('/remote', file)
 
-    // send 调用 0：upload_init JSON
+    // send 调用 0：upload_init JSON（remote_path 为目录，filename 为文件名）
     await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(1))
     expect(sentPayloadAt(0)).toMatchObject({
       type: 'upload_init',
       data: {
-        remote_path: '/remote/t.txt',
+        remote_path: '/remote',
         filename: 't.txt',
         total_size: 10,
         chunk_size: 1 << 20,
@@ -184,7 +184,7 @@ describe('useSFTP', () => {
     // 文件大小 1MB + 100 字节，offset=1MB → 仅剩 100 字节需上传（1 个 chunk）
     const buf = new Uint8Array((1 << 20) + 100)
     const file = new File([buf], 'big.bin', { type: 'application/octet-stream' })
-    const guard = s.upload('/r/big.bin', file).catch((e) => e)
+    const guard = s.upload('/r', file).catch((e) => e)
 
     await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(1))
     expect(sentPayloadAt(0).type).toBe('upload_init')
@@ -214,7 +214,7 @@ describe('useSFTP', () => {
     // 1 字节文件：旧公式 (0+1MB)/1*100 会爆表，新公式封顶 100
     const buf = new Uint8Array(1)
     const file = new File([buf], 'tiny.txt', { type: 'application/octet-stream' })
-    const p = s.upload('/r/tiny.txt', file)
+    const p = s.upload('/r', file)
 
     await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(1))
     respond({ type: 'upload_init', data: { upload_id: 'u3', offset: 0 } })

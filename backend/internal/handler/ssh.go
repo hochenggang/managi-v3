@@ -73,6 +73,13 @@ func executeSingle(pool *sshpool.Pool, node model.Node, cmds []string) model.Cmd
 	if err != nil {
 		allErrors = append([]string{err.Error()}, errs...)
 	}
+	// 确保 JSON 序列化为 [] 而非 null，避免前端 null.join() 崩溃
+	if output == nil {
+		output = []string{}
+	}
+	if allErrors == nil {
+		allErrors = []string{}
+	}
 	return model.CmdsTestResult{
 		TimeElapsed: time.Since(start).Seconds(),
 		Success:     success,

@@ -49,10 +49,10 @@
               </strong>
               <span class="execution-time">{{ result.time_elapsed }}s</span>
             </div>
-            <div class="output-block" v-show="result.output && result.output.length > 0">
+            <div class="output-block" v-if="result.output && result.output.length > 0">
               <pre><code>{{ result.output.join('\n') }}</code><button class="small-button copy-button" @click="copyCode(result.output.join(''))">Copy</button></pre>
             </div>
-            <div class="output-block error-block" v-show="result.error && result.error.length > 0">
+            <div class="output-block error-block" v-if="result.error && result.error.length > 0">
               <pre><code>{{ result.error.join('\n') }}</code><button class="small-button copy-button" @click="copyCode(result.error.join(''))">Copy</button></pre>
             </div>
           </li>
