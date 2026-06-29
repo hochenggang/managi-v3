@@ -11,7 +11,7 @@
 
 set -e
 
-INSTALL_DIR="/usr/local/bin"
+INSTALL_DIR="/opt/managi"
 CONFIG_DIR="/etc/managi"
 SERVICE_USER="managi"
 GITHUB_REPO="${MANAGI_REPO:-hochenggang/managi-v3}"
@@ -66,6 +66,7 @@ install_deps() {
 
 # ===== 下载二进制 =====
 download_binary() {
+    mkdir -p "$INSTALL_DIR"
     BINARY_NAME="managi-linux-${ARCH}${VARIANT}"
     info "下载 managi 二进制 (file=$BINARY_NAME)..."
     URL="https://github.com/${GITHUB_REPO}/releases/latest/download/${BINARY_NAME}"
@@ -76,11 +77,11 @@ download_binary() {
 
 # ===== 下载前端 =====
 download_frontend() {
-    mkdir -p "$CONFIG_DIR"
+    mkdir -p "$INSTALL_DIR"
     info "下载前端 index.html..."
     URL="https://github.com/${GITHUB_REPO}/releases/latest/download/index.html"
-    wget -qO "$CONFIG_DIR/index.html" "$URL" || error "下载前端失败: $URL"
-    info "前端已安装到 $CONFIG_DIR/index.html"
+    wget -qO "$INSTALL_DIR/index.html" "$URL" || error "下载前端失败: $URL"
+    info "前端已安装到 $INSTALL_DIR/index.html"
 }
 
 # ===== 配置初始化 =====
@@ -95,6 +96,7 @@ init_config() {
         cat > "$CONFIG_DIR/config.env" <<EOF
 MANAGI_HOST=0.0.0.0
 MANAGI_PORT=$PORT
+MANAGI_INDEX_HTML=$INSTALL_DIR/index.html
 MANAGI_BASICAUTH_ENABLED=$AUTH_ENABLED
 MANAGI_BASICAUTH_USERNAME=$AUTH_USER
 MANAGI_BASICAUTH_PASSWORD=$AUTH_PASS
@@ -122,12 +124,12 @@ install_service() {
     case "$OS_FAMILY" in
         alpine)
             # OpenRC service
-            cat > /etc/init.d/managi <<'EOF'
+            cat > /etc/init.d/managi <<EOF
 #!/sbin/openrc-run
 name="managi"
 description="Managi v3 SSH management"
-command="/usr/local/bin/managi"
-command_args="-port ${MANAGI_PORT:-18001}"
+command="$INSTALL_DIR/managi"
+command_args="-port \${MANAGI_PORT:-18001}"
 command_background=true
 pidfile="/run/managi.pid"
 output_log="/var/log/managi.log"
@@ -191,6 +193,7 @@ install() {
     install_deps
     create_user
     download_binary
+    download_frontend
     init_config
     install_service
     health_check
@@ -204,7 +207,8 @@ uninstall() {
         alpine) rc-service managi stop 2>/dev/null || true; rc-update del managi 2>/dev/null || true; rm -f /etc/init.d/managi ;;
         debian) systemctl stop managi 2>/dev/null || true; systemctl disable managi 2>/dev/null || true; rm -f /etc/systemd/system/managi.service; systemctl daemon-reload ;;
     esac
-    rm -f "$INSTALL_DIR/managi"
+    rm -f "$INSTALL_DIR/managi" "$INSTALL_DIR/index.html"
+    rmdir "$INSTALL_DIR" 2>/dev/null || true
     warn "配置目录 $CONFIG_DIR 已保留，手动删除: rm -rf $CONFIG_DIR"
     info "卸载完成"
 }

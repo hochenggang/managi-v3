@@ -16,6 +16,7 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
   const term = new Terminal({
     cursorBlink: true,
     fontSize: 14,
+    rightClickSelectsWord: false,
     theme: {
       background: '#002b36', // 保留 v2 solarized dark 配色
       foreground: '#cce4f5',
@@ -67,11 +68,30 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
 
   // 用户输入透传（封装为 {type:"msg"}），终端尺寸变化发 resize 消息。
   term.onData((data) => send(inputMessage(data)))
-  term.onSelectionChange(() => {
-    if (term.getSelection()) {
-      navigator.clipboard.writeText(term.getSelection())
+
+  // 右键菜单：有选区则复制，无选区则粘贴（屏蔽浏览器默认右键菜单）。
+  const handleContextMenu = async (ev: MouseEvent) => {
+    ev.preventDefault()
+    const selection = term.getSelection()
+    if (selection) {
+      try {
+        await navigator.clipboard.writeText(selection)
+        term.clearSelection()
+      } catch (e) {
+        handleError('复制失败')
+      }
+      return
     }
-  })
+    try {
+      const text = await navigator.clipboard.readText()
+      if (text) {
+        term.paste(text)
+      }
+    } catch (e) {
+      handleError('粘贴失败，请确认已授予剪贴板权限')
+    }
+  }
+  container.addEventListener('contextmenu', handleContextMenu)
 
   // 首次连接即发送当前尺寸，避免 v2 的 80×24 默认值导致换行错乱。
   const onResize = () => {
@@ -79,11 +99,18 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
     send(resizeMessage(term.cols, term.rows))
   }
   window.addEventListener('resize', onResize)
+
+  // 监听容器尺寸变化，比 window.resize 更可靠，避免面板缩放时行列数不同步。
+  const resizeObserver = new ResizeObserver(() => onResize())
+  resizeObserver.observe(container)
+
   connect()
   onResize() // 立即同步一次
 
   onUnmounted(() => {
     window.removeEventListener('resize', onResize)
+    container.removeEventListener('contextmenu', handleContextMenu)
+    resizeObserver.disconnect()
     close()
     term.dispose()
   })

@@ -23,6 +23,8 @@ import type { ApiNode } from '@/protocol/types'
 import { handleError } from '@/helper'
 
 const CHUNK_SIZE = 1 << 20 // 1MB
+const DEFAULT_TIMEOUT_MS = 30000
+const CHUNK_TIMEOUT_MS = 5 * 60 * 1000 // 分片写入可能跨慢网/慢盘，给 5 分钟
 
 interface SFTPOperationResult {
   success: boolean
@@ -121,15 +123,17 @@ export function useSFTP(node: ApiNode) {
 
   connect()
 
-  /** sendAndAwait 发送并等待服务端响应（resolve 时 clear 超时，避免泄漏）。 */
-  function sendAndAwait(sendData: string | ArrayBuffer): Promise<SFTPOperationResult> {
+  /** sendAndAwait 发送并等待服务端响应（resolve 时 clear 超时，避免泄漏）。
+   *  @param timeoutMs 等待响应的超时时间，分片上传等耗时操作可传入更大值。
+   */
+  function sendAndAwait(sendData: string | ArrayBuffer, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<SFTPOperationResult> {
     return new Promise((resolve, reject) => {
       pendingResolve = resolve
       pendingTimer = setTimeout(() => {
         pendingResolve = null
         pendingTimer = null
         reject(new Error('SFTP request timeout'))
-      }, 30000)
+      }, timeoutMs)
       if (!send(sendData)) {
         pendingResolve = null
         if (pendingTimer) {
@@ -164,7 +168,7 @@ export function useSFTP(node: ApiNode) {
       const chunk = file.slice(pos, pos + CHUNK_SIZE)
       const buf = await chunk.arrayBuffer()
       const frame = buildChunkFrame(initData!.upload_id, idx, pos, new Uint8Array(buf))
-      const ack = await sendAndAwait(frame)
+      const ack = await sendAndAwait(frame, CHUNK_TIMEOUT_MS)
       if (!ack.success) throw new Error(ack.message)
       // 进度用实际写入字节数，封顶 100%（修复 A7：小文件进度爆表）
       const written = Math.min(pos + buf.byteLength, file.size)

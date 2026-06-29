@@ -21,6 +21,12 @@ jobs:
         with:
           go-version: '1.22'
           cache-dependency-path: backend/go.sum
+      - name: Prepare embedded assets for vet/test
+        shell: bash
+        run: |
+          mkdir -p cmd/windows-app
+          cp ../desktop/icon.ico cmd/windows-app/icon.ico
+          echo '<!DOCTYPE html><html></html>' > cmd/windows-app/index.html
       - name: Go vet
         run: go vet ./...
       - name: golangci-lint

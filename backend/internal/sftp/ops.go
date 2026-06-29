@@ -21,9 +21,10 @@ import (
 
 // uploadState 进程内 upload 会话状态（断点续传）。
 type uploadState struct {
-	partPath string // .part 临时文件远程路径
-	finalPath string // 最终文件远程路径
-	offset   int64
+	partPath  string       // .part 临时文件远程路径
+	finalPath string       // 最终文件远程路径
+	offset    int64
+	file      *sftp.File   // 保持打开的 .part 文件句柄，避免每分片重复 open/close
 }
 
 // Client 封装一次 SFTP 会话。
@@ -132,6 +133,12 @@ func (c *Client) UploadInit(remotePath, filename string, totalSize int64, chunkS
 		offset = info.Size()
 	}
 
+	// 以写模式打开 .part 文件并保持句柄，减少每分片 open/close 的往返开销
+	f, err := c.sc.OpenFile(partPath, os.O_WRONLY|os.O_CREATE)
+	if err != nil {
+		return "", 0, fmt.Errorf("sftp open %s: %w", partPath, err)
+	}
+
 	uploadID = makeUploadID(finalPath, c.node.ConnectionKey())
 
 	c.mu.Lock()
@@ -139,6 +146,7 @@ func (c *Client) UploadInit(remotePath, filename string, totalSize int64, chunkS
 		partPath:  partPath,
 		finalPath: finalPath,
 		offset:    offset,
+		file:      f,
 	}
 	c.mu.Unlock()
 
@@ -154,16 +162,12 @@ func (c *Client) UploadChunk(uploadID string, chunkIndex int, offset int64, data
 		return fmt.Errorf("unknown upload_id: %s", uploadID)
 	}
 
-	f, err := c.sc.OpenFile(st.partPath, os.O_WRONLY|os.O_CREATE)
-	if err != nil {
-		return fmt.Errorf("sftp open %s: %w", st.partPath, err)
-	}
-	defer func() { _ = f.Close() }()
-
-	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+	if _, err := st.file.Seek(offset, io.SeekStart); err != nil {
+		c.closeUpload(uploadID)
 		return fmt.Errorf("seek: %w", err)
 	}
-	if _, err := f.Write(data); err != nil {
+	if _, err := st.file.Write(data); err != nil {
+		c.closeUpload(uploadID)
 		return fmt.Errorf("write: %w", err)
 	}
 
@@ -171,6 +175,19 @@ func (c *Client) UploadChunk(uploadID string, chunkIndex int, offset int64, data
 	st.offset = offset + int64(len(data))
 	c.mu.Unlock()
 	return nil
+}
+
+// closeUpload 关闭指定 upload_id 的文件句柄并清理状态。
+func (c *Client) closeUpload(uploadID string) {
+	c.mu.Lock()
+	st, ok := c.uploads[uploadID]
+	if ok {
+		delete(c.uploads, uploadID)
+		if st.file != nil {
+			_ = st.file.Close()
+		}
+	}
+	c.mu.Unlock()
 }
 
 // UploadComplete 完成上传：.part → final。
@@ -183,6 +200,11 @@ func (c *Client) UploadComplete(uploadID string) error {
 	c.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("unknown upload_id: %s", uploadID)
+	}
+
+	// 关闭句柄后再重命名，避免远程文件被占用
+	if st.file != nil {
+		_ = st.file.Close()
 	}
 
 	if err := c.sc.Rename(st.partPath, st.finalPath); err != nil {
@@ -215,6 +237,11 @@ func (c *Client) DownloadStream(remotePath string, offset int64) (io.ReadCloser,
 // Close 关闭 SFTP 客户端（不关底层 ssh.Client，由 sshpool 管）。
 func (c *Client) Close() error {
 	c.mu.Lock()
+	for _, st := range c.uploads {
+		if st.file != nil {
+			_ = st.file.Close()
+		}
+	}
 	c.uploads = make(map[string]*uploadState) // 清理未完成的 upload 会话，避免泄漏
 	c.mu.Unlock()
 	if c.sc != nil {
