@@ -4,7 +4,15 @@
 import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
 
-export type ThemeName = 'nord' | 'nord-light' | 'dracula' | 'tokyo-night'
+export type ThemeName =
+  | 'nord'
+  | 'one-dark-pro'
+  | 'catppuccin-mocha'
+  | 'gruvbox-dark'
+  | 'solarized-dark'
+  | 'monokai'
+  | 'github-dark'
+  | 'github-light'
 
 export interface Settings {
   theme: ThemeName
@@ -27,7 +35,11 @@ function loadSettings(): Settings {
   if (!raw) return { ...defaults }
   try {
     const parsed = JSON.parse(raw) as Partial<Settings>
-    return { ...defaults, ...parsed }
+    const merged = { ...defaults, ...parsed }
+    if (!isValidTheme(merged.theme)) {
+      merged.theme = defaults.theme
+    }
+    return merged
   } catch {
     return { ...defaults }
   }
@@ -95,16 +107,22 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 })
 
+const THEME_CLASSES: ThemeName[] = [
+  'nord',
+  'one-dark-pro',
+  'catppuccin-mocha',
+  'gruvbox-dark',
+  'solarized-dark',
+  'monokai',
+  'github-dark',
+  'github-light',
+]
+
 function applyTheme(theme: ThemeName): void {
-  document.documentElement.classList.remove('theme-nord', 'theme-nord-light', 'theme-dracula', 'theme-tokyo-night')
+  document.documentElement.classList.remove(...THEME_CLASSES.map((t) => `theme-${t}`))
   document.documentElement.classList.add(`theme-${theme}`)
 }
 
 function isValidTheme(theme: ThemeName | undefined): theme is ThemeName {
-  return (
-    theme === 'nord' ||
-    theme === 'nord-light' ||
-    theme === 'dracula' ||
-    theme === 'tokyo-night'
-  )
+  return theme !== undefined && THEME_CLASSES.includes(theme)
 }

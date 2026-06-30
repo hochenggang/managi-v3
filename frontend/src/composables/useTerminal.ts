@@ -17,10 +17,7 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
     cursorBlink: true,
     fontSize: 14,
     rightClickSelectsWord: false,
-    theme: {
-      background: '#002b36', // 保留 v2 solarized dark 配色
-      foreground: '#cce4f5',
-    },
+    theme: getTerminalTheme(),
   })
   const fitAddon = new FitAddon()
   term.loadAddon(fitAddon)
@@ -116,4 +113,12 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
   })
 
   return { term, connected }
+}
+
+export function getTerminalTheme(): { background: string; foreground: string } {
+  const root = getComputedStyle(document.documentElement)
+  return {
+    background: root.getPropertyValue('--color-terminal-bg').trim() || '#002b36',
+    foreground: root.getPropertyValue('--color-terminal-fg').trim() || '#cce4f5',
+  }
 }

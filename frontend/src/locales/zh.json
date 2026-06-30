@@ -135,12 +135,6 @@
     "quickCommand": {
         "searchPlaceholder": "搜索命令...",
         "noResult": "无匹配命令",
-        "categories": {
-            "system": "系统",
-            "network": "网络",
-            "text": "文本",
-            "custom": "自定义"
-        },
         "cmds": {
             "systemInfo": "系统信息",
             "cpu": "CPU",

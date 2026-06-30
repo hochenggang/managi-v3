@@ -5,7 +5,7 @@ import { ref, computed } from 'vue'
 
 const STORAGE_KEY = 'sidebar-collapsed'
 const EXPANDED_WIDTH = '20rem'
-const COLLAPSED_WIDTH = '10rem'
+const COLLAPSED_WIDTH = '12rem'
 
 const collapsed = ref(false)
 

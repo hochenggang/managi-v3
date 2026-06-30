@@ -268,6 +268,7 @@ function openContextMenu(event: MouseEvent, items: { label: string; action?: () 
   padding: 0.1rem 0.2rem;
   background-color: var(--color-input-bg);
   border: 1px solid var(--color-border);
+  border: none;
   border-radius: 6px;
 }
 
@@ -279,6 +280,7 @@ function openContextMenu(event: MouseEvent, items: { label: string; action?: () 
   color: var(--color-font-1);
   font-size: 0.8rem;
   outline: none;
+  text-align: left;
 }
 
 .search-box input::placeholder {
@@ -466,6 +468,7 @@ function openContextMenu(event: MouseEvent, items: { label: string; action?: () 
   justify-content: space-between;
   padding: 0.5rem 0.75rem;
   border-top: 1px solid var(--color-border);
+  height: 2rem;
 }
 
 .settings-btn .icon {

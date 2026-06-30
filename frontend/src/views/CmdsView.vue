@@ -21,7 +21,8 @@
             {{ isExecuting ? t("cmdPanel.executing") : t("cmdPanel.executeCommand") }}
           </ButtonWithSpinner>
           <button class="small-button save-button" @click="startAddShortcut" :disabled="command.length < 2">
-            {{ t("cmdPanel.saveShortCut") }}
+            <!-- {{ t("cmdPanel.saveShortCut") }} -->
+            <IconSave style="fill: var(--color-accent);" />
           </button>
         </div>
       </div>
@@ -70,6 +71,7 @@ import { generateNodeId } from '@/protocol/types';
 import { handleError, handleMsg } from "@/helper";
 import { batchSSH } from '@/api';
 import type { CmdsTestResult } from '@/protocol/types';
+import IconSave from '@/components/icons/IconSave.vue';
 
 const { t } = useI18n()
 const nodesStore = useNodesStore();

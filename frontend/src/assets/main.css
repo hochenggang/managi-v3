@@ -80,6 +80,9 @@ h2 {
   background: transparent;
   cursor: pointer;
   padding: 0.25rem 0.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .small-button:hover {

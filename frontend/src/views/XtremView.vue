@@ -17,7 +17,7 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
-import { useTerminal } from '@/composables/useTerminal'
+import { useTerminal, getTerminalTheme } from '@/composables/useTerminal'
 import { useNodesStore } from '@/stores/nodesStore'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
@@ -46,7 +46,7 @@ onMounted(() => {
     standaloneTerm = new Terminal({
       cursorBlink: true,
       fontSize: 14,
-      theme: { background: '#002b36', foreground: '#cce4f5' },
+      theme: getTerminalTheme(),
     })
     standaloneTerm.open(terminalContainer.value)
     standaloneTerm.writeln(generateGreenText(t('xtermPanel.hello')))
@@ -67,15 +67,15 @@ onUnmounted(() => {
 
 <style scoped>
 .panel {
-  background-color: #002b36;
-  color: #cce4f5;
+  background-color: var(--color-terminal-bg, #002b36);
+  color: var(--color-terminal-fg, #cce4f5);
   height: 100%;
   display: flex;
   flex-direction: column;
 }
 
 .bar {
-  border-bottom: 1px solid #073642;
+  border-bottom: 1px solid var(--color-border, #073642);
   padding: 0.5rem;
   flex-shrink: 0;
 }
@@ -84,6 +84,7 @@ onUnmounted(() => {
   flex: 1;
   position: relative;
   min-height: 0;
+  background-color: var(--color-terminal-bg, #002b36);
 }
 
 .terminal-container {
@@ -100,9 +101,9 @@ onUnmounted(() => {
 }
 
 .small-button {
-  color: #cce4f5;
+  color: var(--color-terminal-fg, #cce4f5);
   background-color: transparent;
-  border: 1px solid #cce4f5;
+  border: 1px solid var(--color-terminal-fg, #cce4f5);
   border-radius: 4px;
   padding: 0.25rem 0.5rem;
   cursor: pointer;
@@ -110,6 +111,6 @@ onUnmounted(() => {
 }
 
 .small-button:hover {
-  background-color: rgba(204, 228, 245, 0.1);
+  background-color: var(--color-hover-bg);
 }
 </style>

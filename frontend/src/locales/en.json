@@ -135,12 +135,6 @@
     "quickCommand": {
         "searchPlaceholder": "Search commands...",
         "noResult": "No matching commands",
-        "categories": {
-            "system": "System",
-            "network": "Network",
-            "text": "Text",
-            "custom": "Custom"
-        },
         "cmds": {
             "systemInfo": "System Info",
             "cpu": "CPU",
