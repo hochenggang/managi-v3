@@ -4,15 +4,7 @@
 import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
 
-export type ThemeName =
-  | 'nord'
-  | 'one-dark-pro'
-  | 'catppuccin-mocha'
-  | 'gruvbox-dark'
-  | 'solarized-dark'
-  | 'monokai'
-  | 'github-dark'
-  | 'github-light'
+export type ThemeName = 'nord' | 'nord-light' | 'github-dark' | 'github-light'
 
 export interface Settings {
   theme: ThemeName
@@ -107,16 +99,7 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 })
 
-const THEME_CLASSES: ThemeName[] = [
-  'nord',
-  'one-dark-pro',
-  'catppuccin-mocha',
-  'gruvbox-dark',
-  'solarized-dark',
-  'monokai',
-  'github-dark',
-  'github-light',
-]
+const THEME_CLASSES: ThemeName[] = ['nord', 'nord-light', 'github-dark', 'github-light']
 
 function applyTheme(theme: ThemeName): void {
   document.documentElement.classList.remove(...THEME_CLASSES.map((t) => `theme-${t}`))

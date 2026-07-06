@@ -84,6 +84,16 @@ download_frontend() {
     info "前端已安装到 $INSTALL_DIR/index.html"
 }
 
+# ===== 交互式读取 =====
+read_yes_no() {
+    printf "%s [y/N]: " "$1"
+    read -r answer
+    case "$answer" in
+        [Yy]|[Yy][Ee][Ss]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # ===== 配置初始化 =====
 init_config() {
     mkdir -p "$CONFIG_DIR"
@@ -93,6 +103,40 @@ init_config() {
         AUTH_ENABLED="${MANAGI_BASICAUTH_ENABLED:-false}"
         AUTH_USER="${MANAGI_BASICAUTH_USERNAME:-admin}"
         AUTH_PASS="${MANAGI_BASICAUTH_PASSWORD:-$(head -c 12 /dev/urandom | base64)}"
+
+        # 交互式 BASICAUTH：仅在终端且未通过环境变量指定时询问
+        if [ -t 0 ] && [ -z "${MANAGI_BASICAUTH_ENABLED+x}" ]; then
+            if read_yes_no "是否启用 BASICAUTH（HTTP 基本认证）"; then
+                AUTH_ENABLED="true"
+                printf "请输入用户名: "
+                read -r AUTH_USER
+                while [ -z "$AUTH_USER" ]; do
+                    warn "用户名不能为空"
+                    printf "请输入用户名: "
+                    read -r AUTH_USER
+                done
+
+                restore_echo() { stty echo 2>/dev/null || true; }
+                trap restore_echo INT TERM EXIT
+                printf "请输入密码: "
+                stty -echo
+                read -r AUTH_PASS
+                restore_echo
+                trap - INT TERM EXIT
+                printf "\n"
+                while [ -z "$AUTH_PASS" ]; do
+                    warn "密码不能为空"
+                    printf "请输入密码: "
+                    stty -echo
+                    read -r AUTH_PASS
+                    stty echo
+                    printf "\n"
+                done
+            else
+                AUTH_ENABLED="false"
+            fi
+        fi
+
         cat > "$CONFIG_DIR/config.env" <<EOF
 MANAGI_HOST=0.0.0.0
 MANAGI_PORT=$PORT

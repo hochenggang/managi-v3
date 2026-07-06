@@ -3,7 +3,7 @@
 // 设计见 ../../../design-v3.md §6.1。
 
 import { ref, onUnmounted } from 'vue'
-import { Terminal } from '@xterm/xterm'
+import { Terminal, type ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { useWebSocket } from './useWebSocket'
@@ -115,10 +115,32 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
   return { term, connected }
 }
 
-export function getTerminalTheme(): { background: string; foreground: string } {
+export function getTerminalTheme(): ITheme {
   const root = getComputedStyle(document.documentElement)
+  const get = (name: string, fallback: string): string =>
+    root.getPropertyValue(name).trim() || fallback
+
   return {
-    background: root.getPropertyValue('--color-terminal-bg').trim() || '#002b36',
-    foreground: root.getPropertyValue('--color-terminal-fg').trim() || '#cce4f5',
+    background: get('--color-terminal-bg', '#2E3440'),
+    foreground: get('--color-terminal-fg', '#D8DEE9'),
+    cursor: get('--color-terminal-cursor', '#D8DEE9'),
+    cursorAccent: get('--color-terminal-cursor-accent', '#2E3440'),
+    selectionBackground: get('--color-terminal-selection', 'rgba(136, 192, 208, 0.3)'),
+    black: get('--color-terminal-black', '#3B4252'),
+    red: get('--color-terminal-red', '#BF616A'),
+    green: get('--color-terminal-green', '#A3BE8C'),
+    yellow: get('--color-terminal-yellow', '#EBCB8B'),
+    blue: get('--color-terminal-blue', '#81A1C1'),
+    magenta: get('--color-terminal-magenta', '#B48EAD'),
+    cyan: get('--color-terminal-cyan', '#88C0D0'),
+    white: get('--color-terminal-white', '#E5E9F0'),
+    brightBlack: get('--color-terminal-brightBlack', '#4C566A'),
+    brightRed: get('--color-terminal-brightRed', '#BF616A'),
+    brightGreen: get('--color-terminal-brightGreen', '#A3BE8C'),
+    brightYellow: get('--color-terminal-brightYellow', '#EBCB8B'),
+    brightBlue: get('--color-terminal-brightBlue', '#81A1C1'),
+    brightMagenta: get('--color-terminal-brightMagenta', '#B48EAD'),
+    brightCyan: get('--color-terminal-brightCyan', '#8FBCBB'),
+    brightWhite: get('--color-terminal-brightWhite', '#ECEFF4'),
   }
 }

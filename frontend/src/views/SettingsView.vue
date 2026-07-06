@@ -104,12 +104,8 @@ const sections = computed(() => {
 })
 
 const themes = [
-  { key: 'nord', label: 'Nord', preview: '#2E3440' },
-  { key: 'one-dark-pro', label: 'One Dark Pro', preview: '#282C34' },
-  { key: 'catppuccin-mocha', label: 'Catppuccin Mocha', preview: '#1E1E2E' },
-  { key: 'gruvbox-dark', label: 'Gruvbox Dark', preview: '#282828' },
-  { key: 'solarized-dark', label: 'Solarized Dark', preview: '#002B36' },
-  { key: 'monokai', label: 'Monokai', preview: '#272822' },
+  { key: 'nord', label: 'Nord Dark', preview: '#2E3440' },
+  { key: 'nord-light', label: 'Nord Light', preview: '#ECEFF4' },
   { key: 'github-dark', label: 'GitHub Dark', preview: '#0D1117' },
   { key: 'github-light', label: 'GitHub Light', preview: '#FFFFFF' },
 ]

@@ -44,7 +44,7 @@ onBeforeMount(() => {
 </script>
 
 <template>
-  <notifications position="top right" />
+  <notifications position="bottom center"  />
   <div class="app-root" :style="{ '--sidebar-width': width }">
     <NodeList />
     <main class="workspace">
@@ -110,4 +110,6 @@ onBeforeMount(() => {
   height: 100%;
   color: var(--color-font-3);
 }
+
+
 </style>
