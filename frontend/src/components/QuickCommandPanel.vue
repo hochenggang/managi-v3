@@ -4,14 +4,8 @@
       <input v-model="search" type="text" :placeholder="t('quickCommand.searchPlaceholder')" />
     </div>
     <div class="command-list">
-      <div
-        v-for="cmd in filteredCommands"
-        :key="cmd.label"
-        class="command-item"
-        @click="emit('select', cmd.cmd)"
-        @contextmenu.prevent="handleCommandContextMenu($event, cmd)"
-        :title="cmd.cmd"
-      >
+      <div v-for="cmd in filteredCommands" :key="cmd.label" class="command-item" @click="emit('select', cmd.cmd)"
+        @contextmenu.prevent="handleCommandContextMenu($event, cmd)" :title="cmd.cmd">
         <div class="command-meta">
           <div class="command-label">{{ cmd.label }}</div>
           <div class="command-preview">{{ cmd.cmd }}</div>
@@ -115,7 +109,7 @@ function handleCommandContextMenu(event: MouseEvent, cmd: CommandItem): void {
   flex-direction: column;
   width: 12rem;
   border-right: 1px solid var(--color-border);
-  background-color: var(--color-panel-bg);
+  background: transparent;
   flex-shrink: 0;
 }
 
@@ -128,9 +122,9 @@ function handleCommandContextMenu(event: MouseEvent, cmd: CommandItem): void {
   width: 100%;
   padding: 0.25rem 0.4rem;
   font-size: 0.8rem;
-  background-color: var(--color-input-bg);
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
+  /* background-color: var(--color-input-bg); */
+  /* border: 1px solid var(--color-border); */
+  border-radius: 0;
   color: var(--color-font-1);
 }
 
@@ -144,7 +138,7 @@ function handleCommandContextMenu(event: MouseEvent, cmd: CommandItem): void {
   display: flex;
   align-items: center;
   padding: 0.3rem 0.4rem;
-  border-radius: 4px;
+  border-radius: 0;
   cursor: pointer;
   transition: background-color 0.15s;
   opacity: 0.6;

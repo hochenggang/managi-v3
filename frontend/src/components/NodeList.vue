@@ -255,7 +255,7 @@ function openContextMenu(event: MouseEvent, items: { label: string; action?: () 
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  height: 2.5rem;
+  height: 2rem;
   padding: 0 0.75rem;
   border-bottom: 1px solid var(--color-border);
 }
@@ -269,7 +269,7 @@ function openContextMenu(event: MouseEvent, items: { label: string; action?: () 
   background-color: var(--color-input-bg);
   border: 1px solid var(--color-border);
   border: none;
-  border-radius: 6px;
+  border-radius: 0;
 }
 
 .search-box input {
@@ -281,6 +281,7 @@ function openContextMenu(event: MouseEvent, items: { label: string; action?: () 
   font-size: 0.8rem;
   outline: none;
   text-align: left;
+  padding-bottom: 0;
 }
 
 .search-box input::placeholder {
@@ -309,7 +310,7 @@ function openContextMenu(event: MouseEvent, items: { label: string; action?: () 
   height: 1.75rem;
   padding: 0;
   border: none;
-  border-radius: 6px;
+  border-radius: 0;
   background: transparent;
   color: var(--color-font-2);
   cursor: pointer;
@@ -340,7 +341,7 @@ function openContextMenu(event: MouseEvent, items: { label: string; action?: () 
   align-items: center;
   gap: 0.35rem;
   padding: 0.45rem 0.5rem;
-  border-radius: 6px;
+  border-radius: 0;
   cursor: pointer;
   user-select: none;
   color: var(--color-font-2);
@@ -409,7 +410,7 @@ function openContextMenu(event: MouseEvent, items: { label: string; action?: () 
   gap: 0.35rem;
   padding: 0.35rem 0.5rem;
   margin: 2px;
-  border-radius: 6px;
+  border-radius: 0;
   cursor: pointer;
   font-size: 0.8rem;
   color: var(--color-font-2);
@@ -417,20 +418,26 @@ function openContextMenu(event: MouseEvent, items: { label: string; action?: () 
 }
 
 .node:hover {
-  background-color: var(--color-hover-bg);
-  color: var(--color-font-1);
+  /* background-color: var(--color-hover-bg);
+  color: var(--color-font-1); */
 }
 
-.node:hover .node-status {
-  display: none;
-}
 
 .node.selected {
-  background-color: var(--color-selected-bg);
+  /* background-color: var(--color-selected-bg); */
   color: var(--color-accent);
 }
 
-.node-status {
+.node-status{
+  display: none;
+}
+
+.node.selected .node-status {
+  display: block;
+  position: absolute;
+  top: 50%;
+  left: -10px;
+  transform: translateY(-50%);
   width: 0.4rem;
   height: 0.4rem;
   border-radius: 50%;

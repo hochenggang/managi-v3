@@ -307,7 +307,7 @@ onBeforeUnmount(() => {
   margin-right: 1rem;
   align-items: center;
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: 0;
   white-space: nowrap;
   overflow-x: auto;
   min-width: 10rem;
@@ -318,7 +318,7 @@ onBeforeUnmount(() => {
   flex-shrink: 0;
   cursor: pointer;
   padding: 2px 4px;
-  border-radius: 2px;
+  border-radius: 0;
   margin-right: 2px;
   font-size: 0.85rem;
 }
@@ -472,7 +472,7 @@ onBeforeUnmount(() => {
 
 .dialog {
   background-color: var(--color-surface);
-  border-radius: 6px;
+  border-radius: 0;
   width: 26rem;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
   border: 1px solid var(--color-border);
@@ -504,7 +504,7 @@ onBeforeUnmount(() => {
   width: 100%;
   padding: 0.5rem;
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: 0;
   background-color: var(--color-input-bg);
   color: var(--color-font-1);
 }
@@ -519,7 +519,7 @@ onBeforeUnmount(() => {
 
 .dialog-footer button {
   padding: 0.35rem 0.75rem;
-  border-radius: 4px;
+  border-radius: 0;
   cursor: pointer;
 }
 </style>

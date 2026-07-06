@@ -104,7 +104,7 @@ onUnmounted(() => {
   color: var(--color-terminal-fg, #cce4f5);
   background-color: transparent;
   border: 1px solid var(--color-terminal-fg, #cce4f5);
-  border-radius: 4px;
+  border-radius: 0;
   padding: 0.25rem 0.5rem;
   cursor: pointer;
   font-size: 0.85rem;

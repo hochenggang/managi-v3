@@ -76,7 +76,7 @@ function closeAll(): void {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 2.5rem;
+  height: 2rem;
   background-color: var(--color-tab-bar-bg);
   border-bottom: 1px solid var(--color-border);
   flex-shrink: 0;
@@ -172,7 +172,7 @@ function closeAll(): void {
   color: var(--color-font-2);
   font-size: 1.1rem;
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: 0;
 }
 
 .tab-add:hover {
@@ -191,7 +191,7 @@ function closeAll(): void {
   position: fixed;
   background-color: var(--color-menu-bg);
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: 0;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
   z-index: 2000;
   min-width: 8rem;

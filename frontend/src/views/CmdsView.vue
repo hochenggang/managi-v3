@@ -22,7 +22,7 @@
           </ButtonWithSpinner>
           <button class="small-button save-button" @click="startAddShortcut" :disabled="command.length < 2">
             <!-- {{ t("cmdPanel.saveShortCut") }} -->
-            <IconSave style="fill: var(--color-accent);" />
+            <IconSave style="fill: currentColor;" />
           </button>
         </div>
       </div>
@@ -166,7 +166,7 @@ const copyCode = (text: string) => {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  padding: 0.75rem;
+  padding: 0.35rem;
   gap: 0.75rem;
   overflow: hidden;
 }
@@ -182,9 +182,9 @@ const copyCode = (text: string) => {
   width: 100%;
   height: 7rem;
   padding: 0.5rem;
-  background-color: var(--color-input-bg);
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
+  /* background-color: var(--color-input-bg);
+  border: 1px solid var(--color-border); */
+  border-radius: 0;
   font-size: 0.85rem;
   color: var(--color-font-1);
   resize: none;
@@ -216,7 +216,7 @@ const copyCode = (text: string) => {
 .result {
   padding: 0.5rem;
   background-color: var(--color-panel-bg);
-  border-radius: 6px;
+  border-radius: 0;
   border: 1px solid var(--color-border);
   margin-bottom: 0.5rem;
   font-size: 0.85rem;
@@ -248,7 +248,7 @@ const copyCode = (text: string) => {
   margin: 0.5rem 0;
   position: relative;
   background-color: var(--color-input-bg);
-  border-radius: 4px;
+  border-radius: 0;
   overflow-x: auto;
 }
 

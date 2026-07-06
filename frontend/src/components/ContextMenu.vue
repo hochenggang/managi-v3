@@ -55,7 +55,7 @@ function handleClick(item: MenuItem): void {
   padding: 0.35rem 0;
   background-color: var(--color-menu-bg);
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: 0;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
   z-index: 2000;
 }

@@ -97,7 +97,7 @@ const sections = computed(() => {
   return [
     { key: 'appearance', label: t('settings.appearance.title') },
     { key: 'terminal', label: t('settings.terminal.title') },
-    { key: 'security', label: t('settings.security.title') },
+    // { key: 'security', label: t('settings.security.title') },
     { key: 'data', label: t('settings.data.title') },
     { key: 'about', label: t('settings.about.title') },
   ]
@@ -240,7 +240,7 @@ watch(
   padding: 0.5rem 0.75rem;
   margin-bottom: 0.25rem;
   border: none;
-  border-radius: 4px;
+  border-radius: 0; 
   background: transparent;
   color: var(--color-font-2);
   font-size: 0.9rem;
@@ -288,7 +288,7 @@ watch(
   padding: 0.4rem 0.5rem;
   background-color: var(--color-input-bg);
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: 0; 
   color: var(--color-font-1);
   font-size: 0.9rem;
   text-align: left;
@@ -308,7 +308,7 @@ watch(
   width: 5rem;
   padding: 0.5rem;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: 0;
   background-color: var(--color-panel-bg);
   color: var(--color-font-1);
   font-size: 0.8rem;
@@ -323,7 +323,7 @@ watch(
 .theme-preview {
   width: 100%;
   height: 2.5rem;
-  border-radius: 4px;
+  border-radius: 0;
   border: 1px solid var(--color-border);
 }
 
