@@ -14,10 +14,12 @@
 ### 跳板机方式（部署到服务器）
 
 ```bash
-curl -fsSL https://github.com/hochenggang/managi-v3/releases/latest/download/install.sh | bash
+curl -fsSL -o ./install.sh https://github.com/hochenggang/managi-v3/releases/latest/download/install.sh
+chmod +x ./install.sh
+sudo ./install.sh
 ```
 
-安装完成后访问 `http://<服务器IP>:18001`。
+根据交互式提示进行安装，安装完成后，访问 `http://<服务器IP>:18001`。
 
 支持的系统：Alpine、Debian、Ubuntu（amd64/arm64）。
 
@@ -65,11 +67,6 @@ rc-service managi status
 rc-service managi restart
 ```
 
-## 卸载
-
-```bash
-curl -fsSL https://github.com/hochenggang/managi-v3/releases/latest/download/install.sh | bash -s uninstall
-```
 
 ## 技术栈
 
