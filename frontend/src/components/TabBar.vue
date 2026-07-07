@@ -1,14 +1,8 @@
 <template>
   <div class="tab-bar">
     <div class="tabs">
-      <div
-        v-for="tab in tabsStore.tabs"
-        :key="tab.id"
-        class="tab"
-        :class="{ active: tab.id === tabsStore.activeTabId }"
-        @click="tabsStore.activate(tab.id)"
-        @contextmenu.prevent="showContextMenu($event, tab.id)"
-      >
+      <div v-for="tab in tabsStore.tabs" :key="tab.id" class="tab" :class="{ active: tab.id === tabsStore.activeTabId }"
+        @click="tabsStore.activate(tab.id)" @contextmenu.prevent="showContextMenu($event, tab.id)">
         <span class="tab-icon">
           <IconTerm v-if="tab.type === 'terminal'" />
           <IconFinder v-else-if="tab.type === 'sftp'" />
@@ -19,13 +13,18 @@
         <span class="tab-title">{{ tab.title }}</span>
         <button class="tab-close" @click.stop="tabsStore.close(tab.id)">×</button>
       </div>
-      <button class="tab-add" @click="tabsStore.openBatch()" :title="t('tabs.newBatch')">+</button>
+      <button class="tab-add" @click="tabsStore.openBatch()" :title="t('tabs.newBatch')">
+        <svg viewBox="0 0 24 24" width="16" height="16">
+          <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z" />
+        </svg>
+      </button>
     </div>
     <div class="tab-actions">
       <slot></slot>
     </div>
 
-    <div v-if="contextMenu.visible" class="context-menu" :style="{ top: contextMenu.y + 'px', left: contextMenu.x + 'px' }">
+    <div v-if="contextMenu.visible" class="context-menu"
+      :style="{ top: contextMenu.y + 'px', left: contextMenu.x + 'px' }">
       <div class="context-menu-item" @click="closeCurrent">{{ t('tabs.close') }}</div>
       <div class="context-menu-item" @click="closeOthers">{{ t('tabs.closeOthers') }}</div>
       <div class="context-menu-item" @click="closeAll">{{ t('tabs.closeAll') }}</div>
@@ -137,7 +136,7 @@ function closeAll(): void {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.85rem;
+  font-size: 0.7rem;
 }
 
 .tab-close {
@@ -173,6 +172,10 @@ function closeAll(): void {
   font-size: 1.1rem;
   cursor: pointer;
   border-radius: 0;
+}
+
+.tab-add svg {
+  flex-shrink: 0;
 }
 
 .tab-add:hover {

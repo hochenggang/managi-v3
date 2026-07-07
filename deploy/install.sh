@@ -3,11 +3,9 @@
 # 设计见 ../design-v3.md §8.3
 #
 # 用法:
-#   ./install.sh              # 安装/升级
-#   ./install.sh uninstall    # 卸载
-#   ./install.sh upgrade      # 升级二进制并重启
+#   ./install.sh              # 启动交互式菜单
 #
-# 特性: 幂等、自动检测 OS、自动安装依赖、systemd/OpenRC 服务、自启动
+# 特性: 强制交互、sudo 权限检查、旧配置检测、BASICAUTH 配置、systemd/OpenRC 服务
 
 set -e
 
@@ -22,13 +20,111 @@ info()  { printf "${GREEN}[INFO]${NC} %s\n" "$1"; }
 warn()  { printf "${YELLOW}[WARN]${NC} %s\n" "$1"; }
 error() { printf "${RED}[ERROR]${NC} %s\n" "$1"; exit 1; }
 
+# ===== 交互式输入辅助函数 =====
+read_yes_no() {
+    printf "%s [y/N]: " "$1"
+    read -r _ry_answer
+    case "$_ry_answer" in
+        [Yy]|[Yy][Ee][Ss]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+read_choice() {
+    _rc_prompt="$1"
+    while true; do
+        printf "%s: " "$_rc_prompt" >&2
+        read -r _rc_value
+        case "$_rc_value" in
+            1|2|3) break ;;
+            *) warn "无效选择，请重新输入" ;;
+        esac
+    done
+}
+
+read_value() {
+    _rv_prompt="$1"
+    _rv_value=""
+    while [ -z "$_rv_value" ]; do
+        printf "%s: " "$_rv_prompt" >&2
+        read -r _rv_value
+        if [ -z "$_rv_value" ]; then
+            warn "输入不能为空"
+        fi
+    done
+    printf "%s" "$_rv_value"
+}
+
+read_password() {
+    _rp_prompt="$1"
+    _rp_value=""
+    _rp_restore() { stty echo 2>/dev/null || true; }
+    while [ -z "$_rp_value" ]; do
+        printf "%s: " "$_rp_prompt" >&2
+        _rp_restore
+        trap _rp_restore INT TERM EXIT
+        stty -echo
+        read -r _rp_value
+        _rp_restore
+        trap - INT TERM EXIT
+        printf "\n" >&2
+        if [ -z "$_rp_value" ]; then
+            warn "输入不能为空"
+        fi
+    done
+    printf "%s" "$_rp_value"
+}
+
+# ===== 运行环境校验 =====
+ensure_tty() {
+    if [ ! -t 0 ]; then
+        error "本脚本需要在交互式终端中运行"
+    fi
+}
+
+require_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        error "请使用 sudo 或以 root 身份运行本脚本"
+    fi
+}
+
+# ===== 安装状态检测 =====
+is_installed() {
+    [ -f "$INSTALL_DIR/managi" ] || [ -f "$CONFIG_DIR/config.env" ]
+}
+
+# ===== 加载旧配置（不覆盖环境变量） =====
+load_config_env() {
+    if [ -f "$CONFIG_DIR/config.env" ]; then
+        PORT="$(grep '^MANAGI_PORT=' "$CONFIG_DIR/config.env" | cut -d= -f2- | tail -n1)"
+        AUTH_ENABLED="$(grep '^MANAGI_BASICAUTH_ENABLED=' "$CONFIG_DIR/config.env" | cut -d= -f2- | tail -n1)"
+        AUTH_USER="$(grep '^MANAGI_BASICAUTH_USERNAME=' "$CONFIG_DIR/config.env" | cut -d= -f2- | tail -n1)"
+        AUTH_PASS="$(grep '^MANAGI_BASICAUTH_PASSWORD=' "$CONFIG_DIR/config.env" | cut -d= -f2- | tail -n1)"
+    fi
+}
+
+# ===== 写入配置 =====
+write_config_env() {
+    mkdir -p "$CONFIG_DIR"
+    cat > "$CONFIG_DIR/config.env" <<EOF
+MANAGI_HOST=0.0.0.0
+MANAGI_PORT=${PORT:-18001}
+MANAGI_INDEX_HTML=$INSTALL_DIR/index.html
+MANAGI_BASICAUTH_ENABLED=${AUTH_ENABLED:-false}
+MANAGI_BASICAUTH_USERNAME=${AUTH_USER:-admin}
+MANAGI_BASICAUTH_PASSWORD=${AUTH_PASS:-admin123}
+MANAGI_SSH_TIMEOUT=15
+MANAGI_KEEPALIVE=30
+EOF
+    chmod 600 "$CONFIG_DIR/config.env"
+    info "配置已写入 $CONFIG_DIR/config.env"
+}
+
 # ===== OS 检测 =====
 detect_os() {
     if [ ! -f /etc/os-release ]; then
         error "无法检测操作系统：/etc/os-release 不存在"
     fi
-    # 注意：. /etc/os-release 会设置 ID/VERSION_ID/PRETTY_NAME 等变量，
-    # 但不会覆盖上方已定义的 MANAGI_VER（变量名不同）。
     . /etc/os-release
     OS_ID="$ID"
     case "$ID" in
@@ -84,90 +180,24 @@ download_frontend() {
     info "前端已安装到 $INSTALL_DIR/index.html"
 }
 
-# ===== 交互式读取 =====
-read_yes_no() {
-    printf "%s [y/N]: " "$1"
-    read -r answer
-    case "$answer" in
-        [Yy]|[Yy][Ee][Ss]) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-# ===== 配置初始化 =====
-init_config() {
-    mkdir -p "$CONFIG_DIR"
-    if [ ! -f "$CONFIG_DIR/config.env" ]; then
-        info "初始化配置（交互式）..."
-        PORT="${MANAGI_PORT:-18001}"
-        AUTH_ENABLED="${MANAGI_BASICAUTH_ENABLED:-false}"
-        AUTH_USER="${MANAGI_BASICAUTH_USERNAME:-admin}"
-        AUTH_PASS="${MANAGI_BASICAUTH_PASSWORD:-$(head -c 12 /dev/urandom | base64)}"
-
-        # 交互式 BASICAUTH：仅在终端且未通过环境变量指定时询问
-        if [ -t 0 ] && [ -z "${MANAGI_BASICAUTH_ENABLED+x}" ]; then
-            if read_yes_no "是否启用 BASICAUTH（HTTP 基本认证）"; then
-                AUTH_ENABLED="true"
-                printf "请输入用户名: "
-                read -r AUTH_USER
-                while [ -z "$AUTH_USER" ]; do
-                    warn "用户名不能为空"
-                    printf "请输入用户名: "
-                    read -r AUTH_USER
-                done
-
-                restore_echo() { stty echo 2>/dev/null || true; }
-                trap restore_echo INT TERM EXIT
-                printf "请输入密码: "
-                stty -echo
-                read -r AUTH_PASS
-                restore_echo
-                trap - INT TERM EXIT
-                printf "\n"
-                while [ -z "$AUTH_PASS" ]; do
-                    warn "密码不能为空"
-                    printf "请输入密码: "
-                    stty -echo
-                    read -r AUTH_PASS
-                    stty echo
-                    printf "\n"
-                done
-            else
-                AUTH_ENABLED="false"
-            fi
-        fi
-
-        cat > "$CONFIG_DIR/config.env" <<EOF
-MANAGI_HOST=0.0.0.0
-MANAGI_PORT=$PORT
-MANAGI_INDEX_HTML=$INSTALL_DIR/index.html
-MANAGI_BASICAUTH_ENABLED=$AUTH_ENABLED
-MANAGI_BASICAUTH_USERNAME=$AUTH_USER
-MANAGI_BASICAUTH_PASSWORD=$AUTH_PASS
-MANAGI_SSH_TIMEOUT=15
-MANAGI_KEEPALIVE=30
-EOF
-        chmod 600 "$CONFIG_DIR/config.env"
-        info "配置已写入 $CONFIG_DIR/config.env"
-    else
-        info "配置已存在，保留 $CONFIG_DIR/config.env"
-    fi
-}
-
 # ===== 创建用户 =====
 create_user() {
-    if [ "$OS_FAMILY" = "alpine" ]; then
-        id "$SERVICE_USER" 2>/dev/null || addgroup -S "$SERVICE_USER" && adduser -S -G "$SERVICE_USER" "$SERVICE_USER"
-    else
-        id "$SERVICE_USER" 2>/dev/null || useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
+    if id "$SERVICE_USER" >/dev/null 2>&1; then
+        return 0
     fi
+    if [ "$OS_FAMILY" = "alpine" ]; then
+        addgroup -S "$SERVICE_USER"
+        adduser -S -G "$SERVICE_USER" "$SERVICE_USER"
+    else
+        useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
+    fi
+    info "服务用户 $SERVICE_USER 已创建"
 }
 
 # ===== 服务安装 =====
 install_service() {
     case "$OS_FAMILY" in
         alpine)
-            # OpenRC service
             cat > /etc/init.d/managi <<EOF
 #!/sbin/openrc-run
 name="managi"
@@ -189,7 +219,6 @@ EOF
             rc-service managi start || true
             ;;
         debian)
-            # systemd unit
             cat > /etc/systemd/system/managi.service <<EOF
 [Unit]
 Description=Managi v3 SSH Management
@@ -229,37 +258,87 @@ health_check() {
     warn "健康检查未通过，请检查日志: journalctl -u managi 或 /var/log/managi.log"
 }
 
+# ===== 清理旧服务（不删除配置） =====
+stop_and_remove_service() {
+    case "$OS_FAMILY" in
+        alpine)
+            rc-service managi stop 2>/dev/null || true
+            rc-update del managi 2>/dev/null || true
+            rm -f /etc/init.d/managi
+            ;;
+        debian)
+            systemctl stop managi 2>/dev/null || true
+            systemctl disable managi 2>/dev/null || true
+            rm -f /etc/systemd/system/managi.service
+            systemctl daemon-reload
+            ;;
+    esac
+}
+
 # ===== 安装 =====
-install() {
+do_install() {
     info "开始安装 Managi v3..."
     detect_os
     detect_arch
+
+    if is_installed; then
+        info "检测到已存在的 Managi 安装/配置"
+        if read_yes_no "是否使用旧配置继续"; then
+            KEEP_OLD_CONFIG=1
+            load_config_env
+        else
+            KEEP_OLD_CONFIG=0
+            info "清理旧配置与服务..."
+            stop_and_remove_service
+            rm -rf "$CONFIG_DIR"
+        fi
+    else
+        KEEP_OLD_CONFIG=0
+    fi
+
+    PORT="${MANAGI_PORT:-${PORT:-18001}}"
+    AUTH_ENABLED="${MANAGI_BASICAUTH_ENABLED:-${AUTH_ENABLED:-false}}"
+    AUTH_USER="${MANAGI_BASICAUTH_USERNAME:-${AUTH_USER:-admin}}"
+    AUTH_PASS="${MANAGI_BASICAUTH_PASSWORD:-${AUTH_PASS:-$(head -c 12 /dev/urandom | base64)}}"
+
+    if read_yes_no "是否启用 BASICAUTH（HTTP 基本认证）"; then
+        AUTH_ENABLED="true"
+        AUTH_USER="$(read_value "请输入用户名")"
+        AUTH_PASS="$(read_password "请输入密码")"
+    else
+        AUTH_ENABLED="false"
+    fi
+
     install_deps
     create_user
     download_binary
     download_frontend
-    init_config
+    write_config_env
     install_service
     health_check
     info "安装完成。访问 http://<本机IP>:${PORT:-18001}"
 }
 
 # ===== 卸载 =====
-uninstall() {
-    info "卸载 Managi v3..."
-    case "$OS_FAMILY" in
-        alpine) rc-service managi stop 2>/dev/null || true; rc-update del managi 2>/dev/null || true; rm -f /etc/init.d/managi ;;
-        debian) systemctl stop managi 2>/dev/null || true; systemctl disable managi 2>/dev/null || true; rm -f /etc/systemd/system/managi.service; systemctl daemon-reload ;;
-    esac
-    rm -f "$INSTALL_DIR/managi" "$INSTALL_DIR/index.html"
-    rmdir "$INSTALL_DIR" 2>/dev/null || true
-    warn "配置目录 $CONFIG_DIR 已保留，手动删除: rm -rf $CONFIG_DIR"
-    info "卸载完成"
+do_uninstall() {
+    detect_os
+    if read_yes_no "确定要卸载 Managi 吗？（将删除二进制、前端和服务，但保留配置目录）"; then
+        stop_and_remove_service
+        rm -f "$INSTALL_DIR/managi" "$INSTALL_DIR/index.html"
+        rmdir "$INSTALL_DIR" 2>/dev/null || true
+        warn "配置目录 $CONFIG_DIR 已保留，手动删除: rm -rf $CONFIG_DIR"
+        info "卸载完成"
+    else
+        info "已取消卸载"
+    fi
 }
 
 # ===== 升级 =====
-upgrade() {
-    info "升级 Managi v3..."
+do_upgrade() {
+    if ! is_installed; then
+        error "尚未检测到 Managi 安装，请先选择“安装”"
+    fi
+    info "开始升级 Managi v3..."
     detect_os
     detect_arch
     download_binary
@@ -269,12 +348,27 @@ upgrade() {
         debian) systemctl restart managi ;;
     esac
     health_check
+    info "升级完成"
+}
+
+# ===== 主菜单 =====
+main_menu() {
+    while true; do
+        echo ""
+        info "请选择操作："
+        echo "  1) 安装"
+        echo "  2) 卸载"
+        echo "  3) 升级"
+        read_choice "请输入选项 [1-3]"
+        case "$_rc_value" in
+            1) do_install; break ;;
+            2) do_uninstall; break ;;
+            3) do_upgrade; break ;;
+        esac
+    done
 }
 
 # ===== 入口 =====
-case "${1:-install}" in
-    install)   install ;;
-    uninstall) detect_os; uninstall ;;
-    upgrade)   upgrade ;;
-    *) echo "用法: $0 [install|uninstall|upgrade]"; exit 1 ;;
-esac
+ensure_tty
+require_root
+main_menu

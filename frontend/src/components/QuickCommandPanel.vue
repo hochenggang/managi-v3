@@ -121,7 +121,7 @@ function handleCommandContextMenu(event: MouseEvent, cmd: CommandItem): void {
 .command-search input {
   width: 100%;
   padding: 0.25rem 0.4rem;
-  font-size: 0.8rem;
+  font-size: 0.7rem;
   /* background-color: var(--color-input-bg); */
   /* border: 1px solid var(--color-border); */
   border-radius: 0;
@@ -142,6 +142,7 @@ function handleCommandContextMenu(event: MouseEvent, cmd: CommandItem): void {
   cursor: pointer;
   transition: background-color 0.15s;
   opacity: 0.6;
+  user-select: none;
 }
 
 .command-item:hover {
@@ -159,7 +160,7 @@ function handleCommandContextMenu(event: MouseEvent, cmd: CommandItem): void {
 }
 
 .command-label {
-  font-size: 0.8rem;
+  font-size: 0.7rem;
   color: var(--color-font-1);
   white-space: nowrap;
   overflow: hidden;
@@ -178,6 +179,6 @@ function handleCommandContextMenu(event: MouseEvent, cmd: CommandItem): void {
   padding: 1rem;
   text-align: center;
   color: var(--color-font-3);
-  font-size: 0.85rem;
+  font-size: 0.7rem;
 }
 </style>

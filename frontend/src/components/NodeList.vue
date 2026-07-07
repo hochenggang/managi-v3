@@ -5,12 +5,6 @@
     <div class="node-list">
       <div class="sidebar-header">
         <div class="search-box">
-          <svg class="search-icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg">
-            <path
-              d="M644.096 251.904a277.312 277.312 0 1 0-392.192 392.192 277.312 277.312 0 0 0 392.192-392.192z m-452.544-60.352a362.688 362.688 0 0 1 541.312 480.96l228.032 228.032-60.352 60.352-228.032-228.032a362.752 362.752 0 0 1-480.96-541.312z">
-            </path>
-          </svg>
-
           <input v-model="search" type="text" :placeholder="t('sidebar.search')" />
         </div>
         <button class="icon-btn add-node-btn" :title="t('header.actions.add')" @click="startAddNode()">
@@ -28,10 +22,7 @@
             partial: isGroupPartiallySelected(group.name),
           }" @click="handleGroupClick(group.name)" @contextmenu.prevent="showGroupMenu($event, group.name)">
             <span class="chevron" @click.stop="nodesStore.toggleGroupCollapsed(group.name)">
-              <svg v-if="!isGroupCollapsed(group.name)" viewBox="0 0 24 24" width="12" height="12">
-                <path d="M7 10l5 5 5-5z" />
-              </svg>
-              <svg v-else viewBox="0 0 24 24" width="12" height="12">
+              <svg :class="{ 'expand': !isGroupCollapsed(group.name) }" viewBox="0 0 24 24" width="12" height="12">
                 <path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.41z" />
               </svg>
             </span>
@@ -256,7 +247,7 @@ function openContextMenu(event: MouseEvent, items: { label: string; action?: () 
   align-items: center;
   gap: 0.5rem;
   height: 2rem;
-  padding: 0 0.75rem;
+  padding: 0 0.35rem;
   border-bottom: 1px solid var(--color-border);
 }
 
@@ -278,7 +269,7 @@ function openContextMenu(event: MouseEvent, items: { label: string; action?: () 
   background: transparent;
   border: none;
   color: var(--color-font-1);
-  font-size: 0.8rem;
+  font-size: 0.7rem;
   outline: none;
   text-align: left;
   padding-bottom: 0;
@@ -286,16 +277,6 @@ function openContextMenu(event: MouseEvent, items: { label: string; action?: () 
 
 .search-box input::placeholder {
   color: var(--color-font-3);
-}
-
-.search-icon {
-  width: 1rem;
-  height: 1rem;
-  margin-left: 0.5rem;
-}
-
-.search-icon {
-  fill: var(--color-font-3);
 }
 
 .add-node-btn {
@@ -339,13 +320,13 @@ function openContextMenu(event: MouseEvent, items: { label: string; action?: () 
 .group-header {
   display: flex;
   align-items: center;
-  gap: 0.35rem;
+  gap: 0;
   padding: 0.45rem 0.5rem;
   border-radius: 0;
   cursor: pointer;
   user-select: none;
   color: var(--color-font-2);
-  font-size: 0.85rem;
+  font-size: 0.7rem;
   transition: background-color 0.15s, color 0.15s;
 }
 
@@ -381,6 +362,14 @@ function openContextMenu(event: MouseEvent, items: { label: string; action?: () 
   flex-shrink: 0;
 }
 
+.chevron svg.expand {
+  transform: rotate(90deg);
+}
+
+.chevron svg {
+  transition: all 0.2s ease-in-out;
+}
+
 .chevron svg {
   fill: currentColor;
 }
@@ -396,7 +385,7 @@ function openContextMenu(event: MouseEvent, items: { label: string; action?: () 
   margin-left: auto;
   padding-left: 0.5rem;
   color: var(--color-font-3);
-  font-size: 0.75rem;
+  font-size: 0.7rem;
 }
 
 .group-nodes {
@@ -408,13 +397,14 @@ function openContextMenu(event: MouseEvent, items: { label: string; action?: () 
   display: flex;
   align-items: center;
   gap: 0.35rem;
-  padding: 0.35rem 0.5rem;
+  padding: 0.35rem 0;
   margin: 2px;
   border-radius: 0;
   cursor: pointer;
-  font-size: 0.8rem;
+  font-size: 0.7rem;
   color: var(--color-font-2);
   transition: background-color 0.15s, color 0.15s;
+  user-select: none;
 }
 
 .node:hover {
@@ -428,7 +418,7 @@ function openContextMenu(event: MouseEvent, items: { label: string; action?: () 
   color: var(--color-accent);
 }
 
-.node-status{
+.node-status {
   display: none;
 }
 
@@ -436,10 +426,10 @@ function openContextMenu(event: MouseEvent, items: { label: string; action?: () 
   display: block;
   position: absolute;
   top: 50%;
-  left: -10px;
+  left: -12px;
   transform: translateY(-50%);
-  width: 0.4rem;
-  height: 0.4rem;
+  width: 0.3rem;
+  height: 0.3rem;
   border-radius: 50%;
   background-color: var(--color-green);
   flex-shrink: 0;

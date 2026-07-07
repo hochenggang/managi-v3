@@ -185,7 +185,7 @@ const copyCode = (text: string) => {
   /* background-color: var(--color-input-bg);
   border: 1px solid var(--color-border); */
   border-radius: 0;
-  font-size: 0.85rem;
+  font-size: 0.7rem;
   color: var(--color-font-1);
   resize: none;
 }
@@ -196,11 +196,11 @@ const copyCode = (text: string) => {
 }
 
 .execute-button {
-  font-size: 0.85rem;
+  font-size: 0.7rem;
 }
 
 .save-button {
-  font-size: 0.85rem;
+  font-size: 0.7rem;
   flex-shrink: 0;
 }
 
@@ -219,7 +219,7 @@ const copyCode = (text: string) => {
   border-radius: 0;
   border: 1px solid var(--color-border);
   margin-bottom: 0.5rem;
-  font-size: 0.85rem;
+  font-size: 0.7rem;
 }
 
 .result-header {

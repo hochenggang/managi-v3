@@ -75,7 +75,7 @@ onUnmounted(() => {
   padding: 0 0.75rem;
   height: 2rem;
   background-color: var(--color-panel-bg);
-  font-size: 0.8rem;
+  font-size: 0.7rem;
   color: var(--color-font-2);
   flex-shrink: 0;
   border-top: 1px solid var(--color-border);
