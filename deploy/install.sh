@@ -213,6 +213,14 @@ depend() {
     need net
     after firewall
 }
+
+start_pre() {
+    if [ -f "$CONFIG_DIR/config.env" ]; then
+        set -a
+        . "$CONFIG_DIR/config.env"
+        set +a
+    fi
+}
 EOF
             chmod +x /etc/init.d/managi
             rc-update add managi default 2>/dev/null || true
@@ -247,7 +255,7 @@ EOF
 # ===== 健康检查 =====
 health_check() {
     info "健康检查..."
-    PORT="$(grep MANAGI_PORT "$CONFIG_DIR/config.env" 2>/dev/null | cut -d= -f2 || echo 18001)"
+    PORT="$(grep MANAGI_PORT "$CONFIG_DIR/config.env" 2>/dev/null | cut -d= -f2- || echo 18001)"
     for i in 1 2 3 4 5; do
         if curl -sf "http://localhost:${PORT}/health" >/dev/null 2>&1; then
             info "服务就绪: http://localhost:${PORT}"
@@ -299,7 +307,8 @@ do_install() {
     PORT="${MANAGI_PORT:-${PORT:-18001}}"
     AUTH_ENABLED="${MANAGI_BASICAUTH_ENABLED:-${AUTH_ENABLED:-false}}"
     AUTH_USER="${MANAGI_BASICAUTH_USERNAME:-${AUTH_USER:-admin}}"
-    AUTH_PASS="${MANAGI_BASICAUTH_PASSWORD:-${AUTH_PASS:-$(head -c 12 /dev/urandom | base64)}}"
+    # D3：16 字节 hex（32 字符），纯字母数字，比 base64 更安全且易复制
+    AUTH_PASS="${MANAGI_BASICAUTH_PASSWORD:-${AUTH_PASS:-$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')}}"
 
     if read_yes_no "是否启用 BASICAUTH（HTTP 基本认证）"; then
         AUTH_ENABLED="true"

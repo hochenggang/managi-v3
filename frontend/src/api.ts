@@ -10,7 +10,10 @@ const API_URI = {
   sftpDownload: '/api/sftp/download',
 } as const
 
-function getApiUrl(): string {
+/** getApiBase 推导当前部署的 HTTP API 基址（含协议+主机+端口）。
+ *  修复 R5：与 useWebSocket.getWsHost 共享同一推导逻辑，避免两处重复实现漂移。
+ */
+export function getApiBase(): string {
   const stored = localStorage.getItem('managi-api-host')
   if (stored) return `${location.protocol}//${stored}`
   // https 保留非默认端口（修复 A8：部署在 8443 时丢端口）
@@ -22,6 +25,10 @@ function getApiUrl(): string {
     host = port ? `${location.hostname}:${port}` : location.hostname
   }
   return `${location.protocol}//${host}`
+}
+
+function getApiUrl(): string {
+  return getApiBase()
 }
 
 const { withRetry } = useRetry()
@@ -70,8 +77,10 @@ export async function downloadWithRange(
     headers: { Range: `bytes=${offset}-` },
   })
   if (!resp.ok && resp.status !== 206) throw new Error(`Error code ${resp.status}`)
+  // T4：body 可能为 null（服务端错误/网络中断），显式检查避免后续 getReader() 崩溃
+  if (!resp.body) throw new Error('download: response body is null')
   const total = parseTotalFromRange(resp.headers.get('Content-Range') ?? '')
-  return { total, stream: resp.body! }
+  return { total, stream: resp.body }
 }
 
 export function parseTotalFromRange(range: string): number {

@@ -14,6 +14,7 @@ services:
     environment:
       - MANAGI_HOST=0.0.0.0
       - MANAGI_PORT=18001
+      - MANAGI_INDEX_HTML=/app/index.html
       - MANAGI_BASICAUTH_ENABLED=false
       # - MANAGI_BASICAUTH_USERNAME=admin
       # - MANAGI_BASICAUTH_PASSWORD=changeme

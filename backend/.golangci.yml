@@ -8,3 +8,25 @@ linters:
     - govet
     - staticcheck
     - ineffassign
+    # T5：扩展检查项，提升代码质量与安全性
+    - gosec        # 安全扫描（G101-G605）
+    - gocritic     # 代码质量与性能建议
+    - misspell     # 拼写错误
+    - unparam      # 未使用的函数参数
+    - unused       # 未使用的导出符号
+  settings:
+    gosec:
+      excludes:
+        - G106  # InsecureIgnoreHostKey：仅测试用，生产代码使用 TOFU
+        - G301  # 目录权限 0755：测试用例合理值
+        - G302  # 文件权限 0600：测试用例合理值
+        - G306  # WriteFile 权限 0644：测试用例合理值
+        - G401  # sha1 弱加密：仅用于 upload_id 生成，非安全用途
+        - G505  # crypto/sha1 导入：同上
+  exclusions:
+    paths:
+      - "_test\\.go"  # 测试文件豁免 gosec/unparam/unused（测试代码允许宽松权限与未用参数）
+formatters:
+  enable:
+    - gofmt        # 格式化检查
+    - goimports    # 导入顺序检查

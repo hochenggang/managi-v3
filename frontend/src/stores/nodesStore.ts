@@ -6,6 +6,7 @@ import { ref, computed, watch } from 'vue'
 import type { ApiNode } from '@/protocol/types'
 import { generateNodeId } from '@/protocol/types'
 import { getCachedNodes, setCachedNodes, getCachedGroups, setCachedGroups } from '@/api'
+import { clearSessionId } from '@/composables/useTerminal'
 
 export const ALL_HOSTS_GROUP = ''
 
@@ -117,8 +118,11 @@ export const useNodesStore = defineStore('nodes', () => {
   }
 
   function removeNode(id: string): void {
+    const node = nodes.value[id]
     delete nodes.value[id]
     removeFromSelectedNodes(id)
+    // 修复 E2：节点删除时清理其终端会话 ID 缓存，避免残留复用到已失效的后端会话
+    if (node) clearSessionId(node)
   }
 
   function clearNodes(): void {
@@ -178,11 +182,11 @@ export const useNodesStore = defineStore('nodes', () => {
     return !!collapsedGroups.value[group]
   }
 
-  function setXtermNode(node: ApiNode): void {
+  function setXtremNode(node: ApiNode): void {
     currentXtremNode.value = node
   }
 
-  function removeXtermNode(): void {
+  function removeXtremNode(): void {
     currentXtremNode.value = null
   }
 
@@ -196,6 +200,6 @@ export const useNodesStore = defineStore('nodes', () => {
     setNode, getNodeById, removeNode, clearNodes, setAllNodes, moveNodeToGroup,
     addToSelectedNodes, removeFromSelectedNodes, clearSelectedNodes, selectAllNodes, toggleNodeSelection,
     toggleGroupCollapsed, isGroupCollapsed,
-    setXtermNode, removeXtermNode,
+    setXtremNode, removeXtremNode,
   }
 })

@@ -113,12 +113,12 @@ describe('useNodesStore', () => {
   })
 
   describe('xterm node', () => {
-    it('setXtermNode + removeXtermNode', () => {
+    it('setXtremNode + removeXtremNode', () => {
       const store = useNodesStore()
       expect(store.currentXtremNode).toBeNull()
-      store.setXtermNode(testNode)
+      store.setXtremNode(testNode)
       expect(store.currentXtremNode).toEqual(testNode)
-      store.removeXtermNode()
+      store.removeXtremNode()
       expect(store.currentXtremNode).toBeNull()
     })
   })

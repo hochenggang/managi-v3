@@ -9,14 +9,15 @@ import (
 // TestConfig 返回默认测试配置。
 func TestConfig() *config.Config {
 	return &config.Config{
-		Host:              "127.0.0.1",
-		Port:              18001,
-		SSHTimeout:        15,
-		KeepaliveInterval: 30,
-		WSReadDeadline:    60,
-		ChunkSize:         1 << 20,
-		DownloadChunkSize: 1 << 16,
-		IndexHTMLPath:     "index.html",
+		Host:               "127.0.0.1",
+		Port:               18001,
+		SSHTimeout:         15,
+		KeepaliveInterval:  30,
+		WSReadDeadline:     60,
+		ChunkSize:          1 << 20,
+		DownloadChunkSize:  1 << 16,
+		IndexHTMLPath:      "index.html",
+		SessionIdleTimeout: 60,
 	}
 }
 

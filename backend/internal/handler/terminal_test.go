@@ -20,7 +20,7 @@ func TestTerminalWSHandler_Basic(t *testing.T) {
 
 	pool := sshpool.New(testutil.TestConfig())
 	defer pool.CloseAll()
-	h := terminalWSHandler(pool, testutil.TestConfig())
+	h := terminalWSHandler(newSessionManager(pool, testutil.TestConfig()), testutil.TestConfig())
 	httpSrv := httptest.NewServer(h)
 	defer httpSrv.Close()
 
@@ -63,7 +63,7 @@ func TestTerminalWSHandler_BadAuthFrame(t *testing.T) {
 
 	pool := sshpool.New(testutil.TestConfig())
 	defer pool.CloseAll()
-	h := terminalWSHandler(pool, testutil.TestConfig())
+	h := terminalWSHandler(newSessionManager(pool, testutil.TestConfig()), testutil.TestConfig())
 	httpSrv := httptest.NewServer(h)
 	defer httpSrv.Close()
 
@@ -86,7 +86,7 @@ func TestTerminalWSHandler_AuthFailure(t *testing.T) {
 
 	pool := sshpool.New(testutil.TestConfig())
 	defer pool.CloseAll()
-	h := terminalWSHandler(pool, testutil.TestConfig())
+	h := terminalWSHandler(newSessionManager(pool, testutil.TestConfig()), testutil.TestConfig())
 	httpSrv := httptest.NewServer(h)
 	defer httpSrv.Close()
 
@@ -112,7 +112,7 @@ func TestTerminalWSHandler_Ping(t *testing.T) {
 
 	pool := sshpool.New(testutil.TestConfig())
 	defer pool.CloseAll()
-	h := terminalWSHandler(pool, testutil.TestConfig())
+	h := terminalWSHandler(newSessionManager(pool, testutil.TestConfig()), testutil.TestConfig())
 	httpSrv := httptest.NewServer(h)
 	defer httpSrv.Close()
 
@@ -135,5 +135,60 @@ func TestTerminalWSHandler_Ping(t *testing.T) {
 			return
 		}
 		// 跳过其他消息（如 shell 提示符输出）
+	}
+}
+
+// TestTerminalWSHandler_Reattach 验证前端断线重连后复用同一 shell 会话。
+func TestTerminalWSHandler_Reattach(t *testing.T) {
+	srv := testutil.Start(t)
+	defer srv.Close()
+
+	pool := sshpool.New(testutil.TestConfig())
+	defer pool.CloseAll()
+	cfg := testutil.TestConfig()
+	h := terminalWSHandler(newSessionManager(pool, cfg), cfg)
+	httpSrv := httptest.NewServer(h)
+	defer httpSrv.Close()
+
+	node := testutil.TestNode(srv.Host(), srv.Port())
+	sessionID := "test-reattach-id"
+
+	// 第一次连接：建立会话
+	conn1, _, err := websocket.DefaultDialer.Dial(wsURL(t, httpSrv.URL, "/ws"), nil)
+	require.NoError(t, err)
+	writeWSEnvelope(t, conn1, msgTypeLogin, loginFrame{
+		Node: node, SessionID: sessionID, Cols: 80, Rows: 24,
+	})
+	// 读登录结果（成功，非复用）
+	loginResp := readUntilType(t, conn1, "login")
+	assert.True(t, envelopeData(loginResp)["success"].(bool))
+	assert.Nil(t, envelopeData(loginResp)["reattached"], "first connection should not be reattach")
+	_ = conn1.Close()
+
+	// 等待后端处理 detach（defer 执行）
+	time.Sleep(200 * time.Millisecond)
+
+	// 第二次连接：相同 session_id → 应复用
+	conn2, _, err := websocket.DefaultDialer.Dial(wsURL(t, httpSrv.URL, "/ws"), nil)
+	require.NoError(t, err)
+	defer func() { _ = conn2.Close() }()
+	writeWSEnvelope(t, conn2, msgTypeLogin, loginFrame{
+		Node: node, SessionID: sessionID, Cols: 80, Rows: 24,
+	})
+	loginResp2 := readUntilType(t, conn2, "login")
+	d := envelopeData(loginResp2)
+	assert.True(t, d["success"].(bool))
+	assert.True(t, d["reattached"] == true, "second connection should reattach to existing session")
+}
+
+// readUntilType 读取消息直到匹配指定 type（跳过 scrollback 等中间消息）。
+func readUntilType(t *testing.T, conn *websocket.Conn, typ string) map[string]any {
+	t.Helper()
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(10*time.Second)))
+	for {
+		msg := readWSJSON(t, conn)
+		if msg["type"] == typ {
+			return msg
+		}
 	}
 }

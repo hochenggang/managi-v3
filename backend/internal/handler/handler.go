@@ -33,7 +33,8 @@ func Register(mux *http.ServeMux, cfg *config.Config) {
 	mux.HandleFunc("/api/ssh/batch", batchHandler(pool, cfg))
 
 	// WebSocket 端点
-	mux.HandleFunc("/ws", terminalWSHandler(pool, cfg))
+	mgr := newSessionManager(pool, cfg)
+	mux.HandleFunc("/ws", terminalWSHandler(mgr, cfg))
 	mux.HandleFunc("/ws/sftp", sftpWSHandler(pool, cfg))
 
 	// v3 新增：SFTP 下载（HTTP Range，断点续传）

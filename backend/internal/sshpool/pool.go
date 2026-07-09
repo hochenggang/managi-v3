@@ -7,7 +7,9 @@ import (
 	"bytes"
 	"fmt"
 	"log/slog"
+	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +20,8 @@ import (
 )
 
 // Connection 包装一条 SSH 连接及其引用计数。
+// 仅由 Pool 内部构造与生命周期管理，外部仅通过 Client() 获取底层 *ssh.Client，
+// 不应直接创建或关闭本类型（修复 E3：明确封装边界）。
 type Connection struct {
 	key      string
 	refs     int
@@ -36,8 +40,15 @@ type Pool struct {
 	perKeyLock  sync.Mutex // 保护 perKeyLocks 字典
 	cfg         *config.Config
 	maxSize     int
+	// hardCap 兜底上限，防止 evictOldestLocked 在「全部 refs>0」时无法淘汰导致池无限增长。
+	// 触达 hardCap 时 Get 返回 errPoolFull，由调用方降级。
+	hardCap     int
 	idleTimeout time.Duration
+	hostKeys    map[string]ssh.PublicKey // TOFU: addr → 首次记录的主机公钥
 }
+
+// errPoolFull 连接池触达硬上限且无空闲连接可淘汰。
+var errPoolFull = fmt.Errorf("ssh pool full: no idle connection to evict")
 
 // New 创建连接池。
 func New(cfg *config.Config) *Pool {
@@ -50,7 +61,9 @@ func New(cfg *config.Config) *Pool {
 		perKeyLocks: make(map[string]*sync.Mutex),
 		cfg:         cfg,
 		maxSize:     20,
+		hardCap:     40, // 修复 B3：硬上限为 maxSize 2 倍，防止全部占用时无限增长
 		idleTimeout: idleTimeout,
+		hostKeys:    make(map[string]ssh.PublicKey),
 	}
 }
 
@@ -58,6 +71,7 @@ func New(cfg *config.Config) *Pool {
 func NewWithSize(cfg *config.Config, maxSize int) *Pool {
 	p := New(cfg)
 	p.maxSize = maxSize
+	p.hardCap = maxSize * 2
 	return p
 }
 
@@ -109,6 +123,12 @@ func (p *Pool) Get(node model.Node) (*Connection, error) {
 	if len(p.conns) >= p.maxSize {
 		p.evictOldestLocked()
 	}
+	// 修复 B3：evictOldestLocked 在全部 refs>0 时无法淘汰，池可能超 maxSize。
+	// 触达 hardCap 时拒绝新连接，防止无限增长。
+	if len(p.conns) >= p.hardCap {
+		p.mu.Unlock()
+		return nil, errPoolFull
+	}
 	p.mu.Unlock()
 
 	client, err := p.dial(node)
@@ -116,7 +136,17 @@ func (p *Pool) Get(node model.Node) (*Connection, error) {
 		return nil, err
 	}
 	cNew := &Connection{key: key, refs: 1, lastUsed: time.Now(), client: client}
+	// 修复 B2：dial 在锁外，并发同 key 可能他人已先入池。
+	// 此时复用既有连接（持锁 refs++），关闭新建连接避免泄漏。
 	p.mu.Lock()
+	if exist, ok := p.conns[key]; ok && exist.client != nil {
+		exist.refs++
+		exist.lastUsed = time.Now()
+		p.mu.Unlock()
+		_ = client.Close()
+		slog.Debug("ssh pool concurrent dial race, reuse existing", "key", key)
+		return exist, nil
+	}
 	p.conns[key] = cNew
 	p.mu.Unlock()
 	return cNew, nil
@@ -142,6 +172,9 @@ func (p *Pool) CloseAll() {
 			_ = c.client.Close()
 		}
 		delete(p.conns, k)
+	}
+	for k := range p.hostKeys {
+		delete(p.hostKeys, k)
 	}
 }
 
@@ -200,7 +233,7 @@ func (p *Pool) dial(node model.Node) (*ssh.Client, error) {
 	cfg := &ssh.ClientConfig{
 		User:            node.Username,
 		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // 对应 v2 AutoAddPolicy
+		HostKeyCallback: p.hostKeyCallback(node),
 		Timeout:         timeout,
 	}
 	addr := node.Host + ":" + strconv.Itoa(node.Port)
@@ -209,12 +242,35 @@ func (p *Pool) dial(node model.Node) (*ssh.Client, error) {
 		return nil, fmt.Errorf("ssh dial %s: %w", addr, err)
 	}
 	// keepalive
-	go p.keepalive(client)
+	go p.keepalive(node.ConnectionKey(), client)
 	return client, nil
 }
 
+// hostKeyCallback 返回 TOFU（Trust On First Use）主机密钥校验回调。
+// 首次连接：记录公钥并接受；后续连接：比对公钥，不匹配则拒绝（防 MITM）。
+// 进程内有效，重启后重新信任（简约优先；持久化可后续迭代）。
+func (p *Pool) hostKeyCallback(node model.Node) ssh.HostKeyCallback {
+	addr := node.Host + ":" + strconv.Itoa(node.Port)
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		known, ok := p.hostKeys[addr]
+		if !ok {
+			p.hostKeys[addr] = key
+			slog.Info("ssh host key recorded (TOFU)", "addr", addr, "fingerprint", ssh.FingerprintSHA256(key))
+			return nil
+		}
+		if known.Type() != key.Type() || !bytes.Equal(known.Marshal(), key.Marshal()) {
+			return fmt.Errorf("ssh host key mismatch for %s: expected %s, got %s",
+				addr, ssh.FingerprintSHA256(known), ssh.FingerprintSHA256(key))
+		}
+		return nil
+	}
+}
+
 // keepalive 周期发送 keepalive 请求。
-func (p *Pool) keepalive(client *ssh.Client) {
+// 修复 B4：探测失败时主动从池中清理死连接（仅当指针匹配且 refs==0），避免滞留至 cleanIdle。
+func (p *Pool) keepalive(key string, client *ssh.Client) {
 	interval := time.Duration(p.cfg.KeepaliveInterval) * time.Second
 	if interval <= 0 {
 		interval = 30 * time.Second
@@ -223,6 +279,13 @@ func (p *Pool) keepalive(client *ssh.Client) {
 	defer ticker.Stop()
 	for range ticker.C {
 		if !isAlive(client) {
+			p.mu.Lock()
+			if c, ok := p.conns[key]; ok && c.client == client && c.refs == 0 {
+				_ = c.client.Close()
+				delete(p.conns, key)
+				slog.Debug("ssh pool keepalive detected dead conn, removed", "key", key)
+			}
+			p.mu.Unlock()
 			return
 		}
 		_, _, _ = client.SendRequest("keepalive@openssh.com", true, nil)
@@ -300,42 +363,21 @@ func (p *Pool) keyLock(key string) *sync.Mutex {
 }
 
 // joinLines 将多条命令用换行拼接（对应 v2 "\n".join）。
+// 修复 R3：复用 strings.Join，删除手写循环。
 func joinLines(cmds []string) string {
-	out := ""
-	for i, c := range cmds {
-		if i > 0 {
-			out += "\n"
-		}
-		out += c
-	}
-	return out
+	return strings.Join(cmds, "\n")
 }
 
 // splitLines 按行拆分，去掉空行。
+// 修复 R4：复用 strings.Split + TrimRight，删除手写 trimCR。
 func splitLines(s string) []string {
-	var out []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			line := s[start:i]
-			if len(line) > 0 {
-				out = append(out, trimCR(line))
-			}
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		line := s[start:]
-		if len(line) > 0 {
-			out = append(out, trimCR(line))
+	parts := strings.Split(s, "\n")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		line := strings.TrimRight(p, "\r")
+		if line != "" {
+			out = append(out, line)
 		}
 	}
 	return out
-}
-
-func trimCR(s string) string {
-	if len(s) > 0 && s[len(s)-1] == '\r' {
-		return s[:len(s)-1]
-	}
-	return s
 }

@@ -180,4 +180,25 @@ describe('useWebSocket', () => {
     expect(MockWebSocket.LAST!.closed).toBe(true)
     expect(result.connected.value).toBe(false)
   })
+
+  it('fires onReconnectFailed before onClose when reconnects exhausted (T3 fix)', async () => {
+    const onReconnectFailed = vi.fn()
+    const onClose = vi.fn()
+    const { result } = withSetup(() => useWebSocket('/ws', { maxReconnect: 1, onReconnectFailed, onClose }))
+    result.connect()
+    MockWebSocket.LAST!.fireOpen()
+    // 第 1 次关闭：reconnectAttempts=0 → 安排 1000ms 后重连，reconnectAttempts=1
+    MockWebSocket.LAST!.fireClose()
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(MockWebSocket.instances).toHaveLength(2)
+    // 第 2 次关闭：reconnectAttempts=1 已达 maxReconnect → 先调 onReconnectFailed 再调 onClose
+    MockWebSocket.LAST!.fireClose()
+    expect(onReconnectFailed).toHaveBeenCalledTimes(1)
+    expect(onClose).toHaveBeenCalledTimes(1)
+    // 验证调用顺序：onReconnectFailed 在 onClose 之前
+    expect(onReconnectFailed.mock.invocationCallOrder[0]).toBeLessThan(onClose.mock.invocationCallOrder[0])
+    // 不再重连
+    await vi.advanceTimersByTimeAsync(30000)
+    expect(MockWebSocket.instances).toHaveLength(2)
+  })
 })

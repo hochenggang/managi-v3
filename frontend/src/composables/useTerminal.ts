@@ -12,6 +12,27 @@ import { parseWSMessage, type WSLoginResult, type WSError } from '@/protocol/ws'
 import type { ApiNode } from '@/protocol/types'
 import { handleError } from '@/helper'
 
+// 会话 ID 缓存：按 host:port:username 索引，同节点复用同一 sessionId。
+// 前端断线重连时携带相同 sessionId，后端即可复用已维护的 shell 会话。
+// 修复 E2：模块级 Map 永不清理会导致长期使用后内存泄漏。提供 clearSessionId 供节点删除场景调用。
+const sessionIds = new Map<string, string>()
+function getSessionId(node: ApiNode): string {
+  const key = `${node.host}:${node.port}:${node.username}`
+  let id = sessionIds.get(key)
+  if (!id) {
+    id = crypto.randomUUID?.() ?? Math.random().toString(36).slice(2) + Date.now().toString(36)
+    sessionIds.set(key, id)
+  }
+  return id
+}
+
+/** clearSessionId 清除指定节点的会话 ID 缓存。
+ *  在节点被删除时调用，避免 sessionId 残留导致复用到已失效的后端会话。
+ */
+export function clearSessionId(node: ApiNode): void {
+  sessionIds.delete(`${node.host}:${node.port}:${node.username}`)
+}
+
 export function useTerminal(container: HTMLElement, node: ApiNode) {
   const term = new Terminal({
     cursorBlink: true,
@@ -25,9 +46,10 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
   fitAddon.fit()
   term.focus()
 
+  const sessionId = getSessionId(node)
   const { connected, connect, send, close } = useWebSocket('/ws', {
-    authPayload: loginMessage(node),
-    maxReconnect: 3,
+    authPayload: loginMessage(node, sessionId, term.cols, term.rows),
+    maxReconnect: 10, // 后端维持会话，前端应积极重连
     onText: (data) => {
       const msg = parseWSMessage(data)
       if (!msg) return // 非协议消息忽略，避免渲染垃圾
@@ -44,6 +66,8 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
             term.writeln(`\x1b[31m登录失败：${m}\x1b[0m`)
             handleError(`登录失败：${m}`)
             close() // 抑制重连，避免无限重试加剧账号锁定
+          } else if (r && r.reattached) {
+            term.writeln(`\x1b[32m[已恢复之前的会话]\x1b[0m`)
           }
           break
         }

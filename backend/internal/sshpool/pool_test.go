@@ -212,9 +212,30 @@ func TestSplitLines(t *testing.T) {
 	assert.Empty(t, splitLines("\n\n"))
 }
 
-// TestTrimCR 验证去尾 \r。
-func TestTrimCR(t *testing.T) {
-	assert.Equal(t, "abc", trimCR("abc\r"))
-	assert.Equal(t, "abc", trimCR("abc"))
-	assert.Equal(t, "", trimCR(""))
+// TestPool_HardCap 验证触达 hardCap 且无空闲连接可淘汰时返回 errPoolFull（B3 修复）。
+func TestPool_HardCap(t *testing.T) {
+	srv1 := testutil.Start(t)
+	defer srv1.Close()
+	srv2 := testutil.Start(t)
+	defer srv2.Close()
+	srv3 := testutil.Start(t)
+	defer srv3.Close()
+
+	// maxSize=1, hardCap=2
+	pool := NewWithSize(testutil.TestConfig(), 1)
+	defer pool.CloseAll()
+
+	node1 := testutil.TestNode(srv1.Host(), srv1.Port())
+	node2 := testutil.TestNode(srv2.Host(), srv2.Port())
+	node3 := testutil.TestNode(srv3.Host(), srv3.Port())
+
+	// 获取 node1 连接但不 release（refs=1，无法驱逐）
+	_, err := pool.Get(node1)
+	require.NoError(t, err)
+	// 获取 node2 连接（超 maxSize 但未超 hardCap，允许新建）
+	_, err = pool.Get(node2)
+	require.NoError(t, err)
+	// 第 3 个连接触达 hardCap，应返回 errPoolFull
+	_, err = pool.Get(node3)
+	assert.ErrorIs(t, err, errPoolFull)
 }

@@ -91,8 +91,9 @@ func runServer() {
 	})
 
 	srv = &http.Server{
-		Addr:    net.JoinHostPort(host, itoa(port)),
-		Handler: mux,
+		Addr:              net.JoinHostPort(host, itoa(port)),
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second, // G112: 防 Slowloris 攻击
 	}
 
 	slog.Info("managi windows app starting", "addr", srv.Addr)

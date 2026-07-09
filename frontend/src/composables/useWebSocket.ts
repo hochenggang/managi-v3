@@ -4,6 +4,7 @@
 
 import { ref, onUnmounted } from 'vue'
 import { wsMessage } from '@/protocol/ws'
+import { getApiBase } from '@/api'
 
 export interface WSOptions {
   /** 首包认证消息（已序列化字符串，建立后立即发送）。 */
@@ -20,6 +21,8 @@ export interface WSOptions {
   onOpen?: () => void
   /** 连接关闭回调（重连耗尽后触发）。 */
   onClose?: () => void
+  /** 重连耗尽回调（修复 T3：供调用方做可视化提示，避免用户体感「卡住」）。 */
+  onReconnectFailed?: () => void
 }
 
 export function useWebSocket(path: string, opts: WSOptions = {}) {
@@ -82,6 +85,8 @@ export function useWebSocket(path: string, opts: WSOptions = {}) {
         reconnectAttempts++
         reconnectTimer = setTimeout(doConnect, delay)
       } else {
+        // 修复 T3：重连耗尽时通知调用方做可视化提示，避免用户体感「卡住」
+        opts.onReconnectFailed?.()
         opts.onClose?.()
       }
     }
@@ -144,13 +149,9 @@ export function useWebSocket(path: string, opts: WSOptions = {}) {
   return { connected, connect, send, close }
 }
 
-/** 获取 WS host，https 保留非默认端口（修复 A8：wss 部署在 8443 丢端口）。 */
+/** 获取 WS host，https 保留非默认端口（修复 A8：wss 部署在 8443 丢端口）。
+ *  修复 R5：复用 api.ts 的 getApiBase，去除重复 host/port 推导逻辑。
+ */
 function getWsHost(): string {
-  const stored = localStorage.getItem('managi-api-host')
-  if (stored) return stored
-  const port = location.port
-  if (location.protocol === 'https:') {
-    return port && port !== '443' ? `${location.hostname}:${port}` : location.hostname
-  }
-  return port ? `${location.hostname}:${port}` : location.hostname
+  return getApiBase().replace(/^https?:\/\//, '')
 }

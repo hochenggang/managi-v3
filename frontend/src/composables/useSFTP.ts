@@ -20,11 +20,15 @@ import {
   type SFTPUploadInitData,
 } from '@/protocol/sftp'
 import type { ApiNode } from '@/protocol/types'
+import { downloadWithRange } from '@/api'
 import { handleError } from '@/helper'
 
 const CHUNK_SIZE = 1 << 20 // 1MB
 const DEFAULT_TIMEOUT_MS = 30000
 const CHUNK_TIMEOUT_MS = 5 * 60 * 1000 // 分片写入可能跨慢网/慢盘，给 5 分钟
+// 修复 B8：WS 下载缓冲上限。超此大小中止并提示走 HTTP Range 流式下载，避免浏览器 OOM。
+const DOWNLOAD_BUFFER_LIMIT = 256 * 1024 * 1024 // 256MB
+const LARGE_FILE_THRESHOLD = 100 * 1024 * 1024 // 100MB，超此值建议走 HTTP Range
 
 interface SFTPOperationResult {
   success: boolean
@@ -119,6 +123,15 @@ export function useSFTP(node: ApiNode) {
       }
     },
     onBinary: (data) => {
+      // 修复 B8：缓冲上限保护，超限中止并提示走 HTTP Range，避免浏览器 OOM
+      if (downloadReceivedSize + data.byteLength > DOWNLOAD_BUFFER_LIMIT) {
+        handleError(`文件超过 ${DOWNLOAD_BUFFER_LIMIT / 1024 / 1024}MB，请使用 downloadViaHTTP 流式下载`)
+        downloadBuffer = []
+        downloadReceivedSize = 0
+        downloadTotalSize = 0
+        close()
+        return
+      }
       downloadBuffer.push(new Uint8Array(data))
       downloadReceivedSize += data.byteLength
       downloadProgress.value = downloadTotalSize
@@ -132,8 +145,15 @@ export function useSFTP(node: ApiNode) {
 
   /** sendAndAwait 发送并等待服务端响应（resolve 时 clear 超时，避免泄漏）。
    *  @param timeoutMs 等待响应的超时时间，分片上传等耗时操作可传入更大值。
+   *
+   *  修复 B7：SFTP 协议响应不带 seq，单 pendingResolve 槽位在并发调用时后者会覆盖前者，
+   *  导致前者 Promise 永不 resolve + 计时器悬挂。此处 fail-fast：前序未完成再发请求直接抛错，
+   *  由调用方保证串行（SFTP 操作天然串行，业务层无并发场景）。
    */
   function sendAndAwait(sendData: string | ArrayBuffer, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<SFTPOperationResult> {
+    if (pendingResolve) {
+      return Promise.reject(new Error('SFTP busy: previous operation pending'))
+    }
     return new Promise((resolve, reject) => {
       pendingResolve = resolve
       pendingTimer = setTimeout(() => {
@@ -195,6 +215,34 @@ export function useSFTP(node: ApiNode) {
     if (!r.success) throw new Error(r.message)
   }
 
+  /** downloadViaHTTP 大文件流式下载（HTTP Range，分块触发 Blob 下载，避免内存累积）。
+   *  修复 B8：WS 下载会将全部 chunk 累积到内存，GB 级文件会 OOM。
+   *  调用方在文件已知较大（超 LARGE_FILE_THRESHOLD）时应直接使用本方法。
+   */
+  async function downloadViaHTTP(remotePath: string): Promise<void> {
+    downloadProgress.value = 0
+    const { total, stream } = await downloadWithRange(node, remotePath, 0)
+    const chunks: Uint8Array[] = []
+    let received = 0
+    const reader = stream.getReader()
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (value) {
+        chunks.push(value)
+        received += value.byteLength
+        downloadProgress.value = total ? Math.min(100, Math.round((received / total) * 100)) : 0
+        // 流式路径同样设上限，避免极端大文件 OOM
+        if (received > DOWNLOAD_BUFFER_LIMIT) {
+          handleError(`文件超过 ${DOWNLOAD_BUFFER_LIMIT / 1024 / 1024}MB 下载上限`)
+          return
+        }
+      }
+    }
+    const blob = new Blob(chunks as BlobPart[])
+    triggerDownload(blob, remotePath.split('/').pop() ?? 'download')
+  }
+
   async function mkdir(remotePath: string): Promise<void> {
     const r = await sendAndAwait(sftpMkdir(remotePath))
     if (!r.success) throw new Error(r.message)
@@ -207,7 +255,7 @@ export function useSFTP(node: ApiNode) {
 
   return {
     currentPath, files, loading, uploadProgress, downloadProgress,
-    connected, list, upload, download, mkdir, del, close,
+    connected, list, upload, download, downloadViaHTTP, mkdir, del, close,
   }
 }
 

@@ -3,6 +3,8 @@
 // 设计见 ../design-v3.md §4.1。
 package model
 
+import "strconv"
+
 // AuthType SSH 认证方式。
 type AuthType string
 
@@ -24,7 +26,7 @@ type Node struct {
 // ConnectionKey 返回连接池键：host:port:username。
 // 注意：不含凭据，与 v2 行为一致。
 func (n Node) ConnectionKey() string {
-	return n.Host + ":" + itoa(n.Port) + ":" + n.Username
+	return n.Host + ":" + strconv.Itoa(n.Port) + ":" + n.Username
 }
 
 // CmdsTestResult 单节点命令执行结果。
@@ -87,18 +89,4 @@ type FileOperationRequest struct {
 	ChunkSize  int    `json:"chunk_size,omitempty"`
 	ChunkIndex int    `json:"chunk_index,omitempty"`
 	Offset     int64  `json:"offset,omitempty"`
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	buf := [16]byte{}
-	pos := len(buf)
-	for n > 0 {
-		pos--
-		buf[pos] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[pos:])
 }

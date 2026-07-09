@@ -154,39 +154,42 @@ func (c *Client) UploadInit(remotePath, filename string, totalSize int64, chunkS
 }
 
 // UploadChunk 写入一个分片到指定 offset。
+// 修复 B5：全程持锁访问 st.file，避免与 closeUpload/UploadComplete 竞态写已关闭句柄。
 func (c *Client) UploadChunk(uploadID string, chunkIndex int, offset int64, data []byte) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	st, ok := c.uploads[uploadID]
-	c.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("unknown upload_id: %s", uploadID)
 	}
 
 	if _, err := st.file.Seek(offset, io.SeekStart); err != nil {
-		c.closeUpload(uploadID)
+		c.closeUploadLocked(uploadID)
 		return fmt.Errorf("seek: %w", err)
 	}
 	if _, err := st.file.Write(data); err != nil {
-		c.closeUpload(uploadID)
+		c.closeUploadLocked(uploadID)
 		return fmt.Errorf("write: %w", err)
 	}
 
-	c.mu.Lock()
 	st.offset = offset + int64(len(data))
-	c.mu.Unlock()
 	return nil
 }
 
-// closeUpload 关闭指定 upload_id 的文件句柄并清理状态。
-func (c *Client) closeUpload(uploadID string) {
-	c.mu.Lock()
-	st, ok := c.uploads[uploadID]
-	if ok {
+// closeUploadLocked 关闭指定 upload_id 的文件句柄并清理状态。调用方需持 c.mu。
+func (c *Client) closeUploadLocked(uploadID string) {
+	if st, ok := c.uploads[uploadID]; ok {
 		delete(c.uploads, uploadID)
 		if st.file != nil {
 			_ = st.file.Close()
 		}
 	}
+}
+
+// closeUpload 关闭指定 upload_id 的文件句柄并清理状态（加锁包装，保留供旧调用方使用）。
+func (c *Client) closeUpload(uploadID string) {
+	c.mu.Lock()
+	c.closeUploadLocked(uploadID)
 	c.mu.Unlock()
 }
 

@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"managi/internal/model"
 )
 
 // WS 消息类型常量。
@@ -41,8 +43,9 @@ type wsEnvelope struct {
 
 // wsLoginResult 登录结果 data 负载。
 type wsLoginResult struct {
-	Success bool   `json:"success"`
-	Message string `json:"message,omitempty"`
+	Success    bool   `json:"success"`
+	Message    string `json:"message,omitempty"`
+	Reattached bool   `json:"reattached,omitempty"` // true=复用了已存在的终端会话
 }
 
 // wsErrorData 错误 data 负载。
@@ -54,6 +57,15 @@ type wsErrorData struct {
 type wsResizeData struct {
 	Cols int `json:"cols"`
 	Rows int `json:"rows"`
+}
+
+// loginFrame 新版 login 首帧 data 负载：{node, session_id, cols, rows}。
+// 兼容旧格式（data 直接为 Node）：readLoginFrame 检测后回退。
+type loginFrame struct {
+	Node      model.Node `json:"node"`
+	SessionID string     `json:"session_id"`
+	Cols      int        `json:"cols"`
+	Rows      int        `json:"rows"`
 }
 
 // wsConn 封装 *websocket.Conn，加互斥锁保护并发写。
@@ -117,6 +129,10 @@ func (w *wsConn) writePong() error {
 }
 
 func (w *wsConn) writePing() error {
+	// 修复 B1：WriteControl 亦属写操作，gorilla/websocket 要求所有写（含控制帧）串行，
+	// 必须复用 w.mu 与 writeJSON/writeRaw 互斥，否则并发写会破坏连接。
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	return w.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(10*time.Second))
 }
 

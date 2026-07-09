@@ -2,6 +2,9 @@
   <div class="terminal-tab">
     <div class="terminal-wrapper">
       <div ref="terminalContainer" class="terminal-container"></div>
+      <div v-if="node && !connected" class="terminal-overlay">
+        <span class="overlay-text">{{ t('xtermPanel.reconnecting') }}</span>
+      </div>
     </div>
     <div class="terminal-toolbar">
       <span class="terminal-info">{{ node ? `${node.name} (${node.host}:${node.port})` : t('xtermPanel.idle') }}</span>
@@ -109,6 +112,25 @@ onUnmounted(() => {
 .terminal-container {
   position: absolute;
   inset: 8px;
+}
+
+.terminal-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(46, 52, 64, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.overlay-text {
+  color: var(--color-font-2, #D8DEE9);
+  font-size: 0.9rem;
+  padding: 0.5rem 1rem;
+  background: rgba(0, 0, 0, 0.4);
+  border-radius: 4px;
 }
 
 .terminal-container :deep(.xterm) {

@@ -257,4 +257,15 @@ describe('useSFTP', () => {
     expect(mockHandleError).toHaveBeenCalledWith('登录失败：auth failed')
     expect(mockClose).toHaveBeenCalledTimes(1)
   })
+
+  it('sendAndAwait rejects when previous operation pending (B7 fix)', async () => {
+    const s = withSetup(() => useSFTP(node))
+    // 发起 list 但不响应 → pendingResolve 占用
+    const p1 = s.list('/a')
+    // 立即发起第二个请求，应被 reject
+    await expect(s.list('/b')).rejects.toThrow('SFTP busy')
+    // 清理：响应第一个请求
+    respond({ type: 'list', data: { files: [], path: '/a' } })
+    await p1
+  })
 })

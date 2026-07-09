@@ -8,22 +8,35 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
+	"time"
 
 	"managi/internal/config"
 	"managi/internal/handler"
 )
 
+// 默认监听参数（修复 S4：提取常量，避免字面量重复）。
+const (
+	defaultPort = 18001
+	defaultHost = "0.0.0.0"
+)
+
 func main() {
-	port := flag.Int("port", 18001, "服务监听端口")
-	host := flag.String("host", "0.0.0.0", "服务监听地址")
+	port := flag.Int("port", defaultPort, "服务监听端口")
+	host := flag.String("host", defaultHost, "服务监听地址")
 	flag.Parse()
 
 	cfg := config.Load()
-	if *port != 18001 {
+	if *port != defaultPort {
 		cfg.Port = *port
 	}
-	if *host != "0.0.0.0" {
+	if *host != defaultHost {
 		cfg.Host = *host
+	}
+
+	// 启用 BasicAuth 且使用默认弱口令时告警
+	if cfg.BasicAuthEnabled && cfg.BasicAuthUser == "admin" && cfg.BasicAuthPassword == "admin123" {
+		slog.Warn("BasicAuth 启用但使用默认弱口令 admin/admin123，请通过 MANAGI_BASICAUTH_USERNAME/PASSWORD 修改")
 	}
 
 	mux := http.NewServeMux()
@@ -35,33 +48,27 @@ func main() {
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	addr := cfg.Host + ":" + itoa(cfg.Port)
-	slog.Info("managi v3 starting", "addr", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	// BasicAuth 中间件包裹全部路由（内部对 /health 放行）
+	finalHandler := basicAuthWrap(cfg, mux)
+
+	addr := cfg.Host + ":" + strconv.Itoa(cfg.Port)
+	slog.Info("managi v3 starting", "addr", addr, "basicAuth", cfg.BasicAuthEnabled)
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           finalHandler,
+		ReadHeaderTimeout: 10 * time.Second, // 防 Slowloris 慢速头攻击
+		ReadTimeout:       60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		// WriteTimeout 不设：WS / SFTP 下载为长连接，设写超时会误杀
+	}
+	if err := server.ListenAndServe(); err != nil {
 		slog.Error("server failed", "err", err)
 		os.Exit(1)
 	}
 }
 
-// itoa 简易整数转字符串，避免引入 strconv 占行。
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	buf := [16]byte{}
-	pos := len(buf)
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	for n > 0 {
-		pos--
-		buf[pos] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		pos--
-		buf[pos] = '-'
-	}
-	return string(buf[pos:])
+// basicAuthWrap 引入 handler 包的 BasicAuth 中间件。
+// 独立函数避免 main 包直接依赖中间件实现细节。
+func basicAuthWrap(cfg *config.Config, h http.Handler) http.Handler {
+	return handler.BasicAuthMiddleware(cfg)(h)
 }

@@ -43,7 +43,7 @@ import (
 )
 
 var sftpUpgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+	CheckOrigin: checkOrigin,
 }
 
 // sftpRequestData SFTP 操作 data 负载（按 type 解释不同字段）。
@@ -73,11 +73,12 @@ func sftpWSHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 		deadline := wsReadDeadline(cfg)
 		_ = wc.setReadDeadline(time.Now().Add(deadline))
 
-		node, err := readLoginFrame(wc, deadline)
+		lf, err := readLoginFrame(wc, deadline)
 		if err != nil {
 			_ = wc.writeError(err.Error())
 			return
 		}
+		node := lf.Node
 
 		sshConn, err := pool.Get(node)
 		if err != nil {
@@ -201,34 +202,41 @@ func handleSftpOp(wc *wsConn, sc *sftp.Client, env wsEnvelope) {
 		_ = wc.writeEnvelope(msgTypeOk, nil)
 
 	case msgTypeDownload:
-		reader, total, err := sc.DownloadStream(req.Path, req.Offset)
-		if err != nil {
-			_ = wc.writeError(err.Error())
-			return
-		}
-		defer func() { _ = reader.Close() }()
-		_ = wc.writeEnvelope(msgTypeDownloadStart, map[string]any{"total": total})
-		buf := make([]byte, 32*1024)
-		for {
-			n, rerr := reader.Read(buf)
-			if n > 0 {
-				if werr := wc.writeRaw(websocket.BinaryMessage, buf[:n]); werr != nil {
-					return
-				}
-			}
-			if rerr == io.EOF {
-				break
-			}
-			if rerr != nil {
-				_ = wc.writeError("read file: " + rerr.Error())
-				return
-			}
-		}
-		_ = wc.writeEnvelope(msgTypeComplete, map[string]any{"filename": path.Base(req.Path)})
+		// T2：异步下载，避免大文件阻塞 WS 读循环（心跳/其他操作）
+		go handleDownload(wc, sc, req)
 
 	default:
 		_ = wc.writeError("unknown operation: " + env.Type)
 	}
+}
+
+// handleDownload 异步处理下载：推送 download_start → 二进制流 → complete。
+// wc 写操作有互斥锁保护，可与主循环并发安全写入。
+func handleDownload(wc *wsConn, sc *sftp.Client, req sftpRequestData) {
+	reader, total, err := sc.DownloadStream(req.Path, req.Offset)
+	if err != nil {
+		_ = wc.writeError(err.Error())
+		return
+	}
+	defer func() { _ = reader.Close() }()
+	_ = wc.writeEnvelope(msgTypeDownloadStart, map[string]any{"total": total})
+	buf := make([]byte, 32*1024)
+	for {
+		n, rerr := reader.Read(buf)
+		if n > 0 {
+			if werr := wc.writeRaw(websocket.BinaryMessage, buf[:n]); werr != nil {
+				return
+			}
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			_ = wc.writeError("read file: " + rerr.Error())
+			return
+		}
+	}
+	_ = wc.writeEnvelope(msgTypeComplete, map[string]any{"filename": path.Base(req.Path)})
 }
 
 // handleBinaryChunk 解析二进制分片帧并写入远程 .part 文件，回 chunk_ack。

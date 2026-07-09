@@ -139,6 +139,14 @@ describe('useTerminal', () => {
     expect(mockClose).toHaveBeenCalledTimes(1)
   })
 
+  it('onText login success with reattached writes restore message', () => {
+    const container = document.createElement('div')
+    withSetup(() => useTerminal(container, node))
+    mockTerminal.writeln.mockClear()
+    onTextCb!(wsMessage('login', { success: true, reattached: true }))
+    expect(mockTerminal.writeln).toHaveBeenCalledWith(expect.stringContaining('已恢复之前的会话'))
+  })
+
   it('onText error type writes formatted error to terminal', () => {
     const container = document.createElement('div')
     withSetup(() => useTerminal(container, node))

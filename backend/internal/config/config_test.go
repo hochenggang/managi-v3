@@ -27,7 +27,7 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, 120, cfg.SSHIdleTimeout)
 	assert.Equal(t, 90, cfg.WSReadDeadline)
 	assert.Equal(t, 30, cfg.WSPingInterval)
-	assert.Equal(t, 1<<20, cfg.ChunkSize)      // 1MB
+	assert.Equal(t, 1<<20, cfg.ChunkSize) // 1MB
 	assert.Equal(t, 1<<16, cfg.DownloadChunkSize)
 	assert.False(t, cfg.BasicAuthEnabled)
 	assert.Equal(t, "admin", cfg.BasicAuthUser)
@@ -73,8 +73,8 @@ func TestEnvInt_Invalid(t *testing.T) {
 	t.Setenv("MANAGI_SSH_TIMEOUT", "12.5")
 
 	cfg := Load()
-	assert.Equal(t, 18001, cfg.Port)       // 非数字 → 默认
-	assert.Equal(t, 15, cfg.SSHTimeout)     // 含小数点 → 默认
+	assert.Equal(t, 18001, cfg.Port)    // 非数字 → 默认
+	assert.Equal(t, 15, cfg.SSHTimeout) // 含小数点 → 默认
 }
 
 // TestEnvBool_Variants 验证 envBool 的各种输入。

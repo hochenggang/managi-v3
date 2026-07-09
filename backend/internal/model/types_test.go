@@ -82,36 +82,6 @@ func TestNode_Masked_KeyAuth(t *testing.T) {
 	assert.Equal(t, AuthKey, masked.AuthType)
 }
 
-// TestItoa 验证本地 itoa 函数。
-func TestItoa(t *testing.T) {
-	cases := []struct {
-		input    int
-		expected string
-	}{
-		{0, "0"},
-		{1, "1"},
-		{9, "9"},
-		{10, "10"},
-		{22, "22"},
-		{100, "100"},
-		{18001, "18001"},
-		{65535, "65535"},
-	}
-	for _, c := range cases {
-		t.Run(c.expected, func(t *testing.T) {
-			assert.Equal(t, c.expected, itoa(c.input))
-		})
-	}
-}
-
-// TestItoa_Negative 验证 itoa 对负数的行为（当前实现只处理非负数）。
-func TestItoa_Negative(t *testing.T) {
-	// 当前实现：n <= 0 时循环不执行，返回空字符串（0 除外已特判）
-	// 负数会返回空字符串，这是已知边界行为
-	result := itoa(-1)
-	assert.Equal(t, "", result)
-}
-
 // TestAuthType_Constants 验证认证类型常量值。
 func TestAuthType_Constants(t *testing.T) {
 	assert.Equal(t, AuthType("password"), AuthPassword)

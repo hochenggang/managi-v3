@@ -3,7 +3,10 @@
 // 设计见 ../design-v3.md §4.1。
 package config
 
-import "os"
+import (
+	"os"
+	"strconv"
+)
 
 // Config 聚合所有后端配置。
 type Config struct {
@@ -18,6 +21,9 @@ type Config struct {
 	// WebSocket
 	WSReadDeadline int // 秒，读超时
 	WSPingInterval int // 秒，服务端 WS Ping 间隔
+
+	// 终端会话复用：最后一个前端断开后保留 shell 的时长（秒）
+	SessionIdleTimeout int
 
 	// SFTP
 	ChunkSize         int // 上传分片
@@ -40,19 +46,20 @@ type Config struct {
 // MANAGI_BASICAUTH_PASSWORD。
 func Load() *Config {
 	return &Config{
-		Host:              envStr("MANAGI_HOST", "0.0.0.0"),
-		Port:              envInt("MANAGI_PORT", 18001),
-		SSHTimeout:        envInt("MANAGI_SSH_TIMEOUT", 15),
-		KeepaliveInterval: envInt("MANAGI_KEEPALIVE", 30),
-		SSHIdleTimeout:    envInt("MANAGI_SSH_IDLE_TIMEOUT", 120),
-		WSReadDeadline:    envInt("MANAGI_WS_READ_DEADLINE", 90),
-		WSPingInterval:    envInt("MANAGI_WS_PING_INTERVAL", 30),
-		ChunkSize:         envInt("MANAGI_SFTP_CHUNK_SIZE", 1<<20), // 1MB
-		DownloadChunkSize: envInt("MANAGI_SFTP_DOWNLOAD_CHUNK", 1 << 16),
-		BasicAuthEnabled:  envBool("MANAGI_BASICAUTH_ENABLED", false),
-		BasicAuthUser:     envStr("MANAGI_BASICAUTH_USERNAME", "admin"),
-		BasicAuthPassword: envStr("MANAGI_BASICAUTH_PASSWORD", "admin123"),
-		IndexHTMLPath:     envStr("MANAGI_INDEX_HTML", "index.html"),
+		Host:               envStr("MANAGI_HOST", "0.0.0.0"),
+		Port:               envInt("MANAGI_PORT", 18001),
+		SSHTimeout:         envInt("MANAGI_SSH_TIMEOUT", 15),
+		KeepaliveInterval:  envInt("MANAGI_KEEPALIVE", 30),
+		SSHIdleTimeout:     envInt("MANAGI_SSH_IDLE_TIMEOUT", 120),
+		WSReadDeadline:     envInt("MANAGI_WS_READ_DEADLINE", 90),
+		WSPingInterval:     envInt("MANAGI_WS_PING_INTERVAL", 30),
+		SessionIdleTimeout: envInt("MANAGI_SESSION_IDLE_TIMEOUT", 60),
+		ChunkSize:          envInt("MANAGI_SFTP_CHUNK_SIZE", 1<<20), // 1MB
+		DownloadChunkSize:  envInt("MANAGI_SFTP_DOWNLOAD_CHUNK", 1<<16),
+		BasicAuthEnabled:   envBool("MANAGI_BASICAUTH_ENABLED", false),
+		BasicAuthUser:      envStr("MANAGI_BASICAUTH_USERNAME", "admin"),
+		BasicAuthPassword:  envStr("MANAGI_BASICAUTH_PASSWORD", "admin123"),
+		IndexHTMLPath:      envStr("MANAGI_INDEX_HTML", "index.html"),
 	}
 }
 
@@ -64,17 +71,15 @@ func envStr(key, def string) string {
 }
 
 func envInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		n := 0
-		for _, c := range v {
-			if c < '0' || c > '9' {
-				return def
-			}
-			n = n*10 + int(c-'0')
-		}
-		return n
+	v := os.Getenv(key)
+	if v == "" {
+		return def
 	}
-	return def
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return n
 }
 
 func envBool(key string, def bool) bool {

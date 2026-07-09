@@ -31,6 +31,7 @@ export interface WSMessage<T = unknown> {
 export interface WSLoginResult {
   success: boolean
   message?: string
+  reattached?: boolean // true=后端复用了已存在的终端会话
 }
 
 /** 错误 data 负载。 */

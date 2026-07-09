@@ -24,6 +24,8 @@ RUN apk add --no-cache ca-certificates tzdata wget
 COPY --from=backend /managi /app/managi
 COPY --from=frontend /fe/dist/index.html /app/index.html
 WORKDIR /app
+# D1：确保 nobody 用户可读写 /app 目录（默认 root 所有）
+RUN chown -R nobody:nobody /app
 EXPOSE 18001
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
   CMD wget -qO- http://localhost:18001/health || exit 1
