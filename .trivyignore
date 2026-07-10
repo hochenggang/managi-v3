@@ -1,0 +1,7 @@
+# .trivyignore - 忽略无法修复且代码未调用的漏洞
+#
+# GO-2026-5932: golang.org/x/crypto/openpgp 包未维护，设计上不安全
+# 原因：managi 仅使用 golang.org/x/crypto/ssh，未调用 openpgp 子包
+# 状态：Fixed in: N/A（openpgp 已弃用，官方建议迁移到替代品）
+# 验证：govulncheck 确认代码未调用此包
+GO-2026-5932

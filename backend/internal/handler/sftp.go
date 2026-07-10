@@ -255,6 +255,7 @@ func handleBinaryChunk(wc *wsConn, sc *sftp.Client, data []byte) {
 }
 
 // parseChunkFrame 解析二进制分片帧头。
+//nolint:gosec // G115: 帧长度已通过 headerLen 校验，转换值远小于 int 上限
 func parseChunkFrame(data []byte) (uploadID string, chunkIndex int, offset int64, chunkData []byte, err error) {
 	if len(data) < 4 {
 		return "", 0, 0, nil, fmt.Errorf("frame too short: need header")
@@ -282,6 +283,7 @@ func parseChunkFrame(data []byte) (uploadID string, chunkIndex int, offset int64
 
 // sftpDownloadHandler GET /api/sftp/download?node=...&path=...
 // v3 新增：HTTP Range 下载，支持断点续传。设计见 design-v3.md §6.5。
+//nolint:unparam // cfg 保留供未来扩展（下载限速/权限校验），并与同包 handler 签名一致
 func sftpDownloadHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		nodeStr := r.URL.Query().Get("node")

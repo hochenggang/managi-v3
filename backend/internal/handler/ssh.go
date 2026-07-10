@@ -17,6 +17,7 @@ import (
 
 // testHandler POST /api/ssh/test
 // 请求体: {node, cmds}  响应: CmdsTestResult
+//nolint:unparam // cfg 保留供未来扩展，并与同包 handler 签名一致
 func testHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -36,6 +37,7 @@ func testHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 // batchHandler POST /api/ssh/batch
 // 请求体: {nodes, cmds}  响应: []CmdsTestResult
 // v3：errgroup 并发执行，SetLimit 控制并发数。
+//nolint:unparam // cfg 保留供未来扩展，并与同包 handler 签名一致
 func batchHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req model.BatchCmdRequest

@@ -11,7 +11,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # ===== 阶段2: 后端构建 =====
-FROM golang:1.22-alpine AS backend
+FROM golang:1.26-alpine AS backend
 WORKDIR /be
 COPY backend/go.mod backend/go.sum* ./
 RUN go mod download

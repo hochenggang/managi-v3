@@ -186,7 +186,8 @@ func (c *Client) closeUploadLocked(uploadID string) {
 	}
 }
 
-// closeUpload 关闭指定 upload_id 的文件句柄并清理状态（加锁包装，保留供旧调用方使用）。
+// closeUpload 关闭指定 upload_id 的文件句柄并清理状态（加锁包装，保留供外部调用方使用）。
+//nolint:unused // 保留为公开 API，供未来外部调用方手动取消上传会话
 func (c *Client) closeUpload(uploadID string) {
 	c.mu.Lock()
 	c.closeUploadLocked(uploadID)

@@ -1,6 +1,8 @@
 module managi
 
-go 1.22
+go 1.25.0
+
+toolchain go1.26.5
 
 require (
 	github.com/getlantern/systray v1.2.2
@@ -8,8 +10,8 @@ require (
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
 	github.com/pkg/sftp v1.13.6
 	github.com/stretchr/testify v1.9.0
-	golang.org/x/crypto v0.24.0
-	golang.org/x/sync v0.7.0
+	golang.org/x/crypto v0.52.0
+	golang.org/x/sync v0.22.0
 )
 
 require (
@@ -24,7 +26,7 @@ require (
 	github.com/kr/fs v0.1.0 // indirect
 	github.com/oxtoacart/bpool v0.0.0-20190530202638-03653db5a59c // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
-	golang.org/x/sys v0.21.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
