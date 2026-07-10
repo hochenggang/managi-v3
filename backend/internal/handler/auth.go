@@ -22,7 +22,7 @@ const (
 
 // authFailLimiter 每 IP 滑动窗口失败计数器。
 type authFailLimiter struct {
-	mu      sync.Mutex
+	mu       sync.Mutex
 	attempts map[string][]time.Time // ip → 失败时间戳列表
 }
 

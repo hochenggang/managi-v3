@@ -48,7 +48,7 @@ func (n Node) Masked() Node {
 
 // BatchCmdRequest 批量命令请求。
 type BatchCmdRequest struct {
-	Nodes []Node `json:"nodes"`
+	Nodes []Node   `json:"nodes"`
 	Cmds  []string `json:"cmds"`
 }
 
@@ -56,16 +56,16 @@ type BatchCmdRequest struct {
 type FileOperationType string
 
 const (
-	OpUpload       FileOperationType = "upload"
-	OpUploadInit   FileOperationType = "upload_init"   // v3 新增：断点续传
-	OpUploadChunk  FileOperationType = "upload_chunk"  // v3 新增
-	OpUploadDone   FileOperationType = "upload_complete" // v3 新增
-	OpDownload     FileOperationType = "download"
-	OpDelete       FileOperationType = "delete"
-	OpList         FileOperationType = "list"
-	OpMkdir        FileOperationType = "mkdir"
-	OpRename       FileOperationType = "rename"
-	OpMove         FileOperationType = "move"
+	OpUpload      FileOperationType = "upload"
+	OpUploadInit  FileOperationType = "upload_init"     // v3 新增：断点续传
+	OpUploadChunk FileOperationType = "upload_chunk"    // v3 新增
+	OpUploadDone  FileOperationType = "upload_complete" // v3 新增
+	OpDownload    FileOperationType = "download"
+	OpDelete      FileOperationType = "delete"
+	OpList        FileOperationType = "list"
+	OpMkdir       FileOperationType = "mkdir"
+	OpRename      FileOperationType = "rename"
+	OpMove        FileOperationType = "move"
 )
 
 // FileItem 目录项。

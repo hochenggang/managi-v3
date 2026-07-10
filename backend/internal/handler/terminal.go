@@ -1,15 +1,16 @@
 // Package handler - WebSocket SSH 终端端点 /ws。
 // v3 协议：统一 {type, data} envelope。
-//   客户端 → 服务端：
-//     - 首帧: {type:"login", data:{node, session_id, cols, rows}}（兼容旧格式 data:Node）
-//     - 输入: {type:"msg", data: "按键字符串"}
-//     - 调整: {type:"resize", data: {cols, rows}}
-//     - 心跳: {type:"ping"}
-//   服务端 → 客户端：
-//     - 登录结果: {type:"login", data: {success, message?, reattached?}}
-//     - 终端输出: {type:"msg", data: "输出字符串"}
-//     - 错误: {type:"error", data: {message}}
-//     - 心跳响应: {type:"pong"}
+//
+//	客户端 → 服务端：
+//	  - 首帧: {type:"login", data:{node, session_id, cols, rows}}（兼容旧格式 data:Node）
+//	  - 输入: {type:"msg", data: "按键字符串"}
+//	  - 调整: {type:"resize", data: {cols, rows}}
+//	  - 心跳: {type:"ping"}
+//	服务端 → 客户端：
+//	  - 登录结果: {type:"login", data: {success, message?, reattached?}}
+//	  - 终端输出: {type:"msg", data: "输出字符串"}
+//	  - 错误: {type:"error", data: {message}}
+//	  - 心跳响应: {type:"pong"}
 package handler
 
 import (

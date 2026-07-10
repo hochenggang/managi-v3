@@ -16,18 +16,18 @@ import (
 
 // WS 消息类型常量。
 const (
-	msgTypeLogin         = "login"          // 登录（首帧）/ 登录结果
-	msgTypeMsg           = "msg"            // 终端输入/输出
-	msgTypeResize        = "resize"         // 终端尺寸调整
-	msgTypePing          = "ping"           // 心跳请求
-	msgTypePong          = "pong"           // 心跳响应
-	msgTypeError         = "error"          // 错误
-	msgTypeList          = "list"           // SFTP 列目录
-	msgTypeOk            = "ok"             // SFTP 操作成功
-	msgTypeDownloadStart = "download_start" // SFTP 下载开始
-	msgTypeComplete      = "complete"       // SFTP 下载完成
-	msgTypeChunkAck      = "chunk_ack"      // SFTP 分片确认
-	msgTypeUploadInit    = "upload_init"    // SFTP 上传初始化
+	msgTypeLogin         = "login"           // 登录（首帧）/ 登录结果
+	msgTypeMsg           = "msg"             // 终端输入/输出
+	msgTypeResize        = "resize"          // 终端尺寸调整
+	msgTypePing          = "ping"            // 心跳请求
+	msgTypePong          = "pong"            // 心跳响应
+	msgTypeError         = "error"           // 错误
+	msgTypeList          = "list"            // SFTP 列目录
+	msgTypeOk            = "ok"              // SFTP 操作成功
+	msgTypeDownloadStart = "download_start"  // SFTP 下载开始
+	msgTypeComplete      = "complete"        // SFTP 下载完成
+	msgTypeChunkAck      = "chunk_ack"       // SFTP 分片确认
+	msgTypeUploadInit    = "upload_init"     // SFTP 上传初始化
 	msgTypeUploadDone    = "upload_complete" // SFTP 上传完成
 	msgTypeMkdir         = "mkdir"
 	msgTypeDelete        = "delete"

@@ -127,7 +127,7 @@ func TestBatchHandler_PartialFailure(t *testing.T) {
 
 	req := model.BatchCmdRequest{
 		Nodes: []model.Node{
-			testutil.TestNode(srv.Host(), srv.Port()),       // 成功
+			testutil.TestNode(srv.Host(), srv.Port()),        // 成功
 			testutil.BadPasswordNode(srv.Host(), srv.Port()), // 失败
 		},
 		Cmds: []string{"echo ok"},
@@ -192,10 +192,10 @@ func TestParseRangeOffset(t *testing.T) {
 		{"bytes=0-", 0},
 		{"bytes=10-", 10},
 		{"bytes=1024-", 1024},
-		{"bytes=-50", 0},      // 不支持 suffix range
-		{"items=0-", 0},       // 非 bytes 前缀
+		{"bytes=-50", 0}, // 不支持 suffix range
+		{"items=0-", 0},  // 非 bytes 前缀
 		{"invalid", 0},
-		{"bytes=abc-", 0},     // 非法数字
+		{"bytes=abc-", 0}, // 非法数字
 	}
 	for _, c := range cases {
 		assert.Equal(t, c.want, parseRangeOffset(c.input), "input=%q", c.input)

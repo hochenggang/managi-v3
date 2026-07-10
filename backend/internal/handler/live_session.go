@@ -47,7 +47,7 @@ type liveSession struct {
 	node       model.Node
 	sess       *terminal.Session
 	sshConn    *sshpool.Connection
-	buf        []byte // scrollback，超 scrollbackMax 截断头部
+	buf        []byte  // scrollback，超 scrollbackMax 截断头部
 	cur        *wsConn // 当前挂载的 WS 客户端（nil 表示空挂）
 	mu         sync.Mutex
 	closeTimer *time.Timer // 最后一个客户端断开后启动，到期关闭会话

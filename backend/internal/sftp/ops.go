@@ -21,17 +21,17 @@ import (
 
 // uploadState 进程内 upload 会话状态（断点续传）。
 type uploadState struct {
-	partPath  string       // .part 临时文件远程路径
-	finalPath string       // 最终文件远程路径
+	partPath  string // .part 临时文件远程路径
+	finalPath string // 最终文件远程路径
 	offset    int64
-	file      *sftp.File   // 保持打开的 .part 文件句柄，避免每分片重复 open/close
+	file      *sftp.File // 保持打开的 .part 文件句柄，避免每分片重复 open/close
 }
 
 // Client 封装一次 SFTP 会话。
 type Client struct {
-	node   model.Node
-	sshc   *ssh.Client
-	sc     *sftp.Client
+	node model.Node
+	sshc *ssh.Client
+	sc   *sftp.Client
 
 	mu      sync.Mutex
 	uploads map[string]*uploadState
@@ -187,6 +187,7 @@ func (c *Client) closeUploadLocked(uploadID string) {
 }
 
 // closeUpload 关闭指定 upload_id 的文件句柄并清理状态（加锁包装，保留供外部调用方使用）。
+//
 //nolint:unused // 保留为公开 API，供未来外部调用方手动取消上传会话
 func (c *Client) closeUpload(uploadID string) {
 	c.mu.Lock()

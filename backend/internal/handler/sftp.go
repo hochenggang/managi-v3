@@ -1,25 +1,26 @@
 // Package handler - WebSocket SFTP 端点 /ws/sftp 与 HTTP 下载端点。
 // v3 协议：统一 {type, data} envelope。登录成功后主动列根目录。
-//   客户端 → 服务端：
-//     - 首帧: {type:"login", data: Node}
-//     - {type:"list", data: {path}}
-//     - {type:"mkdir"|"delete", data: {path}}
-//     - {type:"rename", data: {old_path, new_path}}
-//     - {type:"download", data: {path, offset?}}
-//     - {type:"upload_init", data: {remote_path, filename, total_size, chunk_size}}
-//     - {type:"upload_complete", data: {upload_id}}
-//     - {type:"ping"}
-//     - 二进制分片帧（上传）
-//   服务端 → 客户端：
-//     - {type:"login", data: {success, message?}}（成功后立即推送 list /）
-//     - {type:"list", data: {files, path}}
-//     - {type:"ok"}
-//     - {type:"error", data: {message}}
-//     - {type:"download_start", data: {total}}
-//     - {type:"complete", data: {filename}}
-//     - {type:"chunk_ack", data: {chunk_index}}
-//     - {type:"upload_init", data: {upload_id, offset}}
-//     - {type:"pong"}
+//
+//	客户端 → 服务端：
+//	  - 首帧: {type:"login", data: Node}
+//	  - {type:"list", data: {path}}
+//	  - {type:"mkdir"|"delete", data: {path}}
+//	  - {type:"rename", data: {old_path, new_path}}
+//	  - {type:"download", data: {path, offset?}}
+//	  - {type:"upload_init", data: {remote_path, filename, total_size, chunk_size}}
+//	  - {type:"upload_complete", data: {upload_id}}
+//	  - {type:"ping"}
+//	  - 二进制分片帧（上传）
+//	服务端 → 客户端：
+//	  - {type:"login", data: {success, message?}}（成功后立即推送 list /）
+//	  - {type:"list", data: {files, path}}
+//	  - {type:"ok"}
+//	  - {type:"error", data: {message}}
+//	  - {type:"download_start", data: {total}}
+//	  - {type:"complete", data: {filename}}
+//	  - {type:"chunk_ack", data: {chunk_index}}
+//	  - {type:"upload_init", data: {upload_id, offset}}
+//	  - {type:"pong"}
 package handler
 
 import (
@@ -38,8 +39,8 @@ import (
 
 	"managi/internal/config"
 	"managi/internal/model"
-	"managi/internal/sshpool"
 	"managi/internal/sftp"
+	"managi/internal/sshpool"
 )
 
 var sftpUpgrader = websocket.Upgrader{
@@ -255,6 +256,7 @@ func handleBinaryChunk(wc *wsConn, sc *sftp.Client, data []byte) {
 }
 
 // parseChunkFrame 解析二进制分片帧头。
+//
 //nolint:gosec // G115: 帧长度已通过 headerLen 校验，转换值远小于 int 上限
 func parseChunkFrame(data []byte) (uploadID string, chunkIndex int, offset int64, chunkData []byte, err error) {
 	if len(data) < 4 {
@@ -283,6 +285,7 @@ func parseChunkFrame(data []byte) (uploadID string, chunkIndex int, offset int64
 
 // sftpDownloadHandler GET /api/sftp/download?node=...&path=...
 // v3 新增：HTTP Range 下载，支持断点续传。设计见 design-v3.md §6.5。
+//
 //nolint:unparam // cfg 保留供未来扩展（下载限速/权限校验），并与同包 handler 签名一致
 func sftpDownloadHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
