@@ -6,6 +6,7 @@ package main
 import (
 	"flag"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -51,7 +52,7 @@ func main() {
 	// BasicAuth 中间件包裹全部路由（内部对 /health 放行）
 	finalHandler := basicAuthWrap(cfg, mux)
 
-	addr := cfg.Host + ":" + strconv.Itoa(cfg.Port)
+	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
 	slog.Info("managi v3 starting", "addr", addr, "basicAuth", cfg.BasicAuthEnabled)
 	server := &http.Server{
 		Addr:              addr,

@@ -236,7 +236,7 @@ func (p *Pool) dial(node model.Node) (*ssh.Client, error) {
 		HostKeyCallback: p.hostKeyCallback(node),
 		Timeout:         timeout,
 	}
-	addr := node.Host + ":" + strconv.Itoa(node.Port)
+	addr := net.JoinHostPort(node.Host, strconv.Itoa(node.Port))
 	client, err := ssh.Dial("tcp", addr, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("ssh dial %s: %w", addr, err)
@@ -250,7 +250,7 @@ func (p *Pool) dial(node model.Node) (*ssh.Client, error) {
 // 首次连接：记录公钥并接受；后续连接：比对公钥，不匹配则拒绝（防 MITM）。
 // 进程内有效，重启后重新信任（简约优先；持久化可后续迭代）。
 func (p *Pool) hostKeyCallback(node model.Node) ssh.HostKeyCallback {
-	addr := node.Host + ":" + strconv.Itoa(node.Port)
+	addr := net.JoinHostPort(node.Host, strconv.Itoa(node.Port))
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		p.mu.Lock()
 		defer p.mu.Unlock()

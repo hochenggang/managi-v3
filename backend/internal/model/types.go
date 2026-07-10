@@ -3,7 +3,10 @@
 // 设计见 ../design-v3.md §4.1。
 package model
 
-import "strconv"
+import (
+	"net"
+	"strconv"
+)
 
 // AuthType SSH 认证方式。
 type AuthType string
@@ -23,10 +26,10 @@ type Node struct {
 	AuthValue string   `json:"auth_value"`
 }
 
-// ConnectionKey 返回连接池键：host:port:username。
+// ConnectionKey 返回连接池键：[host]:port:username（IPv6 地址自动加方括号）。
 // 注意：不含凭据，与 v2 行为一致。
 func (n Node) ConnectionKey() string {
-	return n.Host + ":" + strconv.Itoa(n.Port) + ":" + n.Username
+	return net.JoinHostPort(n.Host, strconv.Itoa(n.Port)) + ":" + n.Username
 }
 
 // CmdsTestResult 单节点命令执行结果。

@@ -26,7 +26,7 @@ func TestNode_ConnectionKey(t *testing.T) {
 		{
 			name:     "ipv6_like",
 			node:     Node{Host: "fe80::1", Port: 22, Username: "ubuntu"},
-			expected: "fe80::1:22:ubuntu",
+			expected: "[fe80::1]:22:ubuntu",
 		},
 		{
 			name:     "empty_username",
