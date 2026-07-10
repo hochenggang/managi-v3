@@ -33,6 +33,14 @@ export function clearSessionId(node: ApiNode): void {
   sessionIds.delete(`${node.host}:${node.port}:${node.username}`)
 }
 
+/** clearAllSessionIds 清空全部会话 ID 缓存。
+ *  M1：在 clearNodes/setAllNodes（导入配置覆盖全部节点）时调用，
+ *  避免旧节点的 sessionId 残留导致复用到已失效的后端会话。
+ */
+export function clearAllSessionIds(): void {
+  sessionIds.clear()
+}
+
 export function useTerminal(container: HTMLElement, node: ApiNode) {
   const term = new Terminal({
     cursorBlink: true,

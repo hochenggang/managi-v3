@@ -21,6 +21,11 @@ import (
 //nolint:unparam // cfg 保留供未来扩展，并与同包 handler 签名一致
 func testHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// M5：仅允许 POST，其他方法返回 405
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		var req struct {
 			Node model.Node `json:"node"`
 			Cmds []string   `json:"cmds"`
@@ -42,6 +47,11 @@ func testHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 //nolint:unparam // cfg 保留供未来扩展，并与同包 handler 签名一致
 func batchHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// M5：仅允许 POST，其他方法返回 405
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		var req model.BatchCmdRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)

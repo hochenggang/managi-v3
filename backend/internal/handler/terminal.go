@@ -43,6 +43,8 @@ func terminalWSHandler(mgr *sessionManager, cfg *config.Config) http.HandlerFunc
 			return
 		}
 		defer func() { _ = conn.Close() }()
+		// H3：限制 WS 消息大小，防止恶意客户端发送超大消息导致 OOM
+		conn.SetReadLimit(64 * 1024) // 64KB，终端消息足够
 		wc := newWSConn(conn)
 
 		deadline := wsReadDeadline(cfg)

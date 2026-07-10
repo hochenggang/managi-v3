@@ -27,10 +27,21 @@ type Connection struct {
 	refs     int
 	lastUsed time.Time
 	client   *ssh.Client
+	done     chan struct{} // M2：close 时通知 keepalive goroutine 退出，避免短暂泄漏
 }
 
 // Client 返回底层 SSH 客户端（供 sftp/terminal 复用）。
 func (c *Connection) Client() *ssh.Client { return c.client }
+
+// hostKeyEntry TOFU 主机密钥记录条目。
+// H5：lastSeen 用于 cleanIdle 清理长期未使用的主机密钥，防止 map 无限增长。
+type hostKeyEntry struct {
+	key      ssh.PublicKey
+	lastSeen time.Time
+}
+
+// hostKeyTTL 主机密钥保留时长：超过此时长未连接的主机条目将被清理。
+const hostKeyTTL = 24 * time.Hour
 
 // Pool SSH 连接池，进程内单例。
 type Pool struct {
@@ -44,7 +55,7 @@ type Pool struct {
 	// 触达 hardCap 时 Get 返回 errPoolFull，由调用方降级。
 	hardCap     int
 	idleTimeout time.Duration
-	hostKeys    map[string]ssh.PublicKey // TOFU: addr → 首次记录的主机公钥
+	hostKeys    map[string]hostKeyEntry // TOFU: addr → 首次记录的主机公钥（含 lastSeen）
 }
 
 // errPoolFull 连接池触达硬上限且无空闲连接可淘汰。
@@ -63,7 +74,7 @@ func New(cfg *config.Config) *Pool {
 		maxSize:     20,
 		hardCap:     40, // 修复 B3：硬上限为 maxSize 2 倍，防止全部占用时无限增长
 		idleTimeout: idleTimeout,
-		hostKeys:    make(map[string]ssh.PublicKey),
+		hostKeys:    make(map[string]hostKeyEntry),
 	}
 }
 
@@ -110,6 +121,7 @@ func (p *Pool) Get(node model.Node) (*Connection, error) {
 				if cStill.client != nil {
 					_ = cStill.client.Close()
 				}
+				close(cStill.done) // M2：通知 keepalive goroutine 退出
 				delete(p.conns, key)
 			}
 			p.mu.Unlock()
@@ -135,7 +147,8 @@ func (p *Pool) Get(node model.Node) (*Connection, error) {
 	if err != nil {
 		return nil, err
 	}
-	cNew := &Connection{key: key, refs: 1, lastUsed: time.Now(), client: client}
+	done := make(chan struct{})
+	cNew := &Connection{key: key, refs: 1, lastUsed: time.Now(), client: client, done: done}
 	// 修复 B2：dial 在锁外，并发同 key 可能他人已先入池。
 	// 此时复用既有连接（持锁 refs++），关闭新建连接避免泄漏。
 	p.mu.Lock()
@@ -144,11 +157,14 @@ func (p *Pool) Get(node model.Node) (*Connection, error) {
 		exist.lastUsed = time.Now()
 		p.mu.Unlock()
 		_ = client.Close()
+		// done 未启动 keepalive，无需 close，GC 回收即可
 		slog.Debug("ssh pool concurrent dial race, reuse existing", "key", key)
 		return exist, nil
 	}
 	p.conns[key] = cNew
 	p.mu.Unlock()
+	// M2：keepalive 在连接提交到 map 后启动，接收 done 以便连接被清理时及时退出
+	go p.keepalive(key, client, done)
 	return cNew, nil
 }
 
@@ -171,6 +187,7 @@ func (p *Pool) CloseAll() {
 		if c.client != nil {
 			_ = c.client.Close()
 		}
+		close(c.done) // M2：通知 keepalive goroutine 退出
 		delete(p.conns, k)
 	}
 	for k := range p.hostKeys {
@@ -220,7 +237,7 @@ func (p *Pool) Execute(node model.Node, cmds []string) (output []string, errs []
 	return output, errs, nil
 }
 
-// dial 建立一条新 SSH 连接。
+// dial 建立一条新 SSH 连接（不含 keepalive 启动，由 Get 统一管理生命周期）。
 func (p *Pool) dial(node model.Node) (*ssh.Client, error) {
 	authMethods, err := authMethods(node)
 	if err != nil {
@@ -241,47 +258,57 @@ func (p *Pool) dial(node model.Node) (*ssh.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ssh dial %s: %w", addr, err)
 	}
-	// keepalive
-	go p.keepalive(node.ConnectionKey(), client)
 	return client, nil
 }
 
 // hostKeyCallback 返回 TOFU（Trust On First Use）主机密钥校验回调。
 // 首次连接：记录公钥并接受；后续连接：比对公钥，不匹配则拒绝（防 MITM）。
 // 进程内有效，重启后重新信任（简约优先；持久化可后续迭代）。
+// H5：每次连接更新 lastSeen，供 cleanIdle 清理长期未使用的主机密钥。
 func (p *Pool) hostKeyCallback(node model.Node) ssh.HostKeyCallback {
 	addr := net.JoinHostPort(node.Host, strconv.Itoa(node.Port))
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		known, ok := p.hostKeys[addr]
+		entry, ok := p.hostKeys[addr]
 		if !ok {
-			p.hostKeys[addr] = key
+			p.hostKeys[addr] = hostKeyEntry{key: key, lastSeen: time.Now()}
 			slog.Info("ssh host key recorded (TOFU)", "addr", addr, "fingerprint", ssh.FingerprintSHA256(key))
 			return nil
 		}
+		known := entry.key
 		if known.Type() != key.Type() || !bytes.Equal(known.Marshal(), key.Marshal()) {
 			return fmt.Errorf("ssh host key mismatch for %s: expected %s, got %s",
 				addr, ssh.FingerprintSHA256(known), ssh.FingerprintSHA256(key))
 		}
+		// H5：更新 lastSeen，标记该主机近期活跃
+		entry.lastSeen = time.Now()
+		p.hostKeys[addr] = entry
 		return nil
 	}
 }
 
 // keepalive 周期发送 keepalive 请求。
 // 修复 B4：探测失败时主动从池中清理死连接（仅当指针匹配且 refs==0），避免滞留至 cleanIdle。
-func (p *Pool) keepalive(key string, client *ssh.Client) {
+// M2：接收 done channel，连接被 cleanIdle/evict/CloseAll 清理时及时退出，避免短暂泄漏。
+func (p *Pool) keepalive(key string, client *ssh.Client, done <-chan struct{}) {
 	interval := time.Duration(p.cfg.KeepaliveInterval) * time.Second
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	for range ticker.C {
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+		}
 		if !isAlive(client) {
 			p.mu.Lock()
 			if c, ok := p.conns[key]; ok && c.client == client && c.refs == 0 {
 				_ = c.client.Close()
+				close(c.done) // 通知自身退出（安全：仅当连接仍在 map 中时执行）
 				delete(p.conns, key)
 				slog.Debug("ssh pool keepalive detected dead conn, removed", "key", key)
 			}
@@ -329,7 +356,17 @@ func (p *Pool) cleanIdle() {
 			if c.client != nil {
 				_ = c.client.Close()
 			}
+			close(c.done) // M2：通知 keepalive 退出
 			delete(p.conns, k)
+		}
+	}
+	// H5：清理长期未使用的主机密钥条目，防止 map 无限增长。
+	// 仅删除超过 hostKeyTTL 且当前无活跃连接的条目。
+	for addr, entry := range p.hostKeys {
+		if now.Sub(entry.lastSeen) > hostKeyTTL {
+			if _, inUse := p.conns[addr]; !inUse {
+				delete(p.hostKeys, addr)
+			}
 		}
 	}
 }
@@ -344,10 +381,13 @@ func (p *Pool) evictOldestLocked() {
 		}
 	}
 	if oldestKey != "" {
-		if c := p.conns[oldestKey]; c != nil && c.client != nil {
-			_ = c.client.Close()
+		if c := p.conns[oldestKey]; c != nil {
+			if c.client != nil {
+				_ = c.client.Close()
+			}
+			close(c.done) // M2：通知 keepalive 退出
+			delete(p.conns, oldestKey)
 		}
-		delete(p.conns, oldestKey)
 	}
 }
 

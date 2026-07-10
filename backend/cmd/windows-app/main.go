@@ -90,9 +90,12 @@ func runServer() {
 		_, _ = w.Write([]byte("ok"))
 	})
 
+	// H9：与服务器端入口一致，应用 BasicAuth 中间件（cfg.BasicAuthEnabled=false 时透传）
+	finalHandler := handler.BasicAuthMiddleware(cfg)(mux)
+
 	srv = &http.Server{
 		Addr:              net.JoinHostPort(host, itoa(port)),
-		Handler:           mux,
+		Handler:           finalHandler,
 		ReadHeaderTimeout: 10 * time.Second, // G112: 防 Slowloris 攻击
 	}
 

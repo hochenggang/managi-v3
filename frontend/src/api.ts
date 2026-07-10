@@ -33,24 +33,23 @@ function getApiUrl(): string {
 
 const { withRetry } = useRetry()
 
-/** 带重试与超时的 fetch 封装。 */
+/** 带重试与超时的 fetch 封装。
+ *  C3：AbortController 在每次重试的 fn 回调内创建，避免首次超时 abort 后重试复用已 aborted 的 signal。
+ */
 async function fetchWithRetry(url: string, body: unknown, timeoutMs = 30000): Promise<Response> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-  try {
-    return await withRetry(
-      () =>
-        fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-          signal: controller.signal,
-        }),
-      { maxRetries: 3, baseDelay: 1000 },
-    )
-  } finally {
-    clearTimeout(timer)
-  }
+  return withRetry(
+    () => {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), timeoutMs)
+      return fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      }).finally(() => clearTimeout(timer))
+    },
+    { maxRetries: 3, baseDelay: 1000 },
+  )
 }
 
 export async function testSSH(node: ApiNode, cmds: string[]): Promise<CmdsTestResult> {
@@ -73,14 +72,22 @@ export async function downloadWithRange(
   offset = 0,
 ): Promise<{ total: number; stream: ReadableStream<Uint8Array> }> {
   const params = new URLSearchParams({ node: JSON.stringify(node), path })
-  const resp = await fetch(`${getApiUrl()}${API_URI.sftpDownload}?${params}`, {
-    headers: { Range: `bytes=${offset}-` },
-  })
-  if (!resp.ok && resp.status !== 206) throw new Error(`Error code ${resp.status}`)
-  // T4：body 可能为 null（服务端错误/网络中断），显式检查避免后续 getReader() 崩溃
-  if (!resp.body) throw new Error('download: response body is null')
-  const total = parseTotalFromRange(resp.headers.get('Content-Range') ?? '')
-  return { total, stream: resp.body }
+  // M6：加 AbortController 超时，防止连接挂起时无限等待（仅控制首字节响应）
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 60000)
+  try {
+    const resp = await fetch(`${getApiUrl()}${API_URI.sftpDownload}?${params}`, {
+      headers: { Range: `bytes=${offset}-` },
+      signal: controller.signal,
+    })
+    if (!resp.ok && resp.status !== 206) throw new Error(`Error code ${resp.status}`)
+    // T4：body 可能为 null（服务端错误/网络中断），显式检查避免后续 getReader() 崩溃
+    if (!resp.body) throw new Error('download: response body is null')
+    const total = parseTotalFromRange(resp.headers.get('Content-Range') ?? '')
+    return { total, stream: resp.body }
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 export function parseTotalFromRange(range: string): number {

@@ -44,15 +44,29 @@ export function useSFTP(node: ApiNode) {
   const downloadProgress = ref(0)
 
   let pendingResolve: ((r: SFTPOperationResult) => void) | null = null
+  let pendingReject: ((e: Error) => void) | null = null
   let pendingTimer: ReturnType<typeof setTimeout> | null = null
+  // C4：超时后标记丢弃下一个响应（延迟到达的旧响应），防止其错误 resolve 新请求
+  let discardNextResponse = false
+  let discardTimer: ReturnType<typeof setTimeout> | null = null
   let downloadBuffer: Uint8Array[] = []
   let downloadTotalSize = 0
   let downloadReceivedSize = 0
 
   function resolvePending(msg: WSMessage): void {
+    // C4：丢弃超时后延迟到达的旧响应
+    if (discardNextResponse) {
+      discardNextResponse = false
+      if (discardTimer) {
+        clearTimeout(discardTimer)
+        discardTimer = null
+      }
+      return
+    }
     if (!pendingResolve) return
     const fn = pendingResolve
     pendingResolve = null
+    pendingReject = null
     if (pendingTimer) {
       clearTimeout(pendingTimer)
       pendingTimer = null
@@ -69,6 +83,14 @@ export function useSFTP(node: ApiNode) {
     maxReconnect: 3,
     onClose: () => {
       loading.value = false
+      // H2：WS 断开时 reject pending Promise，避免用户卡住等待超时
+      if (pendingReject) {
+        if (pendingTimer) clearTimeout(pendingTimer)
+        pendingResolve = null
+        pendingReject(new Error('WebSocket closed'))
+        pendingReject = null
+        pendingTimer = null
+      }
     },
     onText: (data) => {
       const msg = parseWSMessage(data)
@@ -156,13 +178,24 @@ export function useSFTP(node: ApiNode) {
     }
     return new Promise((resolve, reject) => {
       pendingResolve = resolve
+      pendingReject = reject // C4+H2：记录 reject 供 onClose/超时使用
       pendingTimer = setTimeout(() => {
         pendingResolve = null
+        pendingReject = null
         pendingTimer = null
+        // C4：标记丢弃下一个延迟到达的旧响应，防止其错误 resolve 新请求
+        discardNextResponse = true
+        if (discardTimer) clearTimeout(discardTimer)
+        // 安全兜底：5s 后自动清 flag，避免延迟响应永远不到导致后续请求被误丢
+        discardTimer = setTimeout(() => {
+          discardNextResponse = false
+          discardTimer = null
+        }, 5000)
         reject(new Error('SFTP request timeout'))
       }, timeoutMs)
       if (!send(sendData)) {
         pendingResolve = null
+        pendingReject = null
         if (pendingTimer) {
           clearTimeout(pendingTimer)
           pendingTimer = null

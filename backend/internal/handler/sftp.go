@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"path"
 	"strconv"
+	"sync"
 	"strings"
 	"time"
 
@@ -69,6 +70,8 @@ func sftpWSHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 			return
 		}
 		defer func() { _ = conn.Close() }()
+		// H3：限制 WS 消息大小，防止恶意客户端发送超大消息导致 OOM
+		conn.SetReadLimit(2 * 1024 * 1024) // 2MB，覆盖 1MB chunk + 帧头
 		wc := newWSConn(conn)
 
 		deadline := wsReadDeadline(cfg)
@@ -104,6 +107,10 @@ func sftpWSHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 		// 服务端 WS 心跳：控制帧 Ping
 		go startPingLoop(ctx, wc, deadline, cfg.WSPingInterval)
 
+		// C1：下载串行化锁，确保同一 WS 连接同一时刻只有一个下载 goroutine，
+		// 避免多个并发下载的二进制帧交错导致文件内容损坏。
+		var downloadMu sync.Mutex
+
 		// 主动列根目录（修复：原 connected 后前端空白需手动刷新）
 		listRoot(wc, sc, "/")
 
@@ -125,10 +132,10 @@ func sftpWSHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 				continue
 			}
 			if env.Type == msgTypePing {
-				_ = wc.writePong()
-				continue
-			}
-			handleSftpOp(wc, sc, env)
+			_ = wc.writePong()
+			continue
+		}
+		handleSftpOp(ctx, wc, sc, env, &downloadMu)
 		}
 	}
 }
@@ -144,7 +151,7 @@ func listRoot(wc *wsConn, sc *sftp.Client, p string) {
 }
 
 // handleSftpOp 分发单个 SFTP 操作。
-func handleSftpOp(wc *wsConn, sc *sftp.Client, env wsEnvelope) {
+func handleSftpOp(ctx context.Context, wc *wsConn, sc *sftp.Client, env wsEnvelope, downloadMu *sync.Mutex) {
 	var req sftpRequestData
 	if len(env.Data) > 0 {
 		if err := json.Unmarshal(env.Data, &req); err != nil {
@@ -204,7 +211,8 @@ func handleSftpOp(wc *wsConn, sc *sftp.Client, env wsEnvelope) {
 
 	case msgTypeDownload:
 		// T2：异步下载，避免大文件阻塞 WS 读循环（心跳/其他操作）
-		go handleDownload(wc, sc, req)
+		// C1/H8：传 ctx 与 downloadMu，串行化下载并在 WS 断开时取消
+		go handleDownload(ctx, wc, sc, req, downloadMu)
 
 	default:
 		_ = wc.writeError("unknown operation: " + env.Type)
@@ -213,13 +221,30 @@ func handleSftpOp(wc *wsConn, sc *sftp.Client, env wsEnvelope) {
 
 // handleDownload 异步处理下载：推送 download_start → 二进制流 → complete。
 // wc 写操作有互斥锁保护，可与主循环并发安全写入。
-func handleDownload(wc *wsConn, sc *sftp.Client, req sftpRequestData) {
+// C1：downloadMu 串行化同一 WS 连接的并发下载，避免二进制帧交错损坏文件。
+// H8：ctx 控制下载生命周期，WS 断开时取消 reader 解除 Read 阻塞。
+func handleDownload(ctx context.Context, wc *wsConn, sc *sftp.Client, req sftpRequestData, downloadMu *sync.Mutex) {
+	downloadMu.Lock()
+	defer downloadMu.Unlock()
+
 	reader, total, err := sc.DownloadStream(req.Path, req.Offset)
 	if err != nil {
 		_ = wc.writeError(err.Error())
 		return
 	}
 	defer func() { _ = reader.Close() }()
+
+	// H8：ctx 取消时关闭 reader，解除 reader.Read 阻塞，使 goroutine 及时退出
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = reader.Close()
+		case <-done:
+		}
+	}()
+
 	_ = wc.writeEnvelope(msgTypeDownloadStart, map[string]any{"total": total})
 	buf := make([]byte, 32*1024)
 	for {
@@ -289,6 +314,11 @@ func parseChunkFrame(data []byte) (uploadID string, chunkIndex int, offset int64
 //nolint:unparam // cfg 保留供未来扩展（下载限速/权限校验），并与同包 handler 签名一致
 func sftpDownloadHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// M5：仅允许 GET，其他方法返回 405
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		nodeStr := r.URL.Query().Get("node")
 		remotePath := r.URL.Query().Get("path")
 		if nodeStr == "" || remotePath == "" {
@@ -352,6 +382,10 @@ func parseRangeOffset(rangeHeader string) int64 {
 	}
 	offset, err := strconv.ParseInt(strings.TrimSpace(rangeSpec[0]), 10, 64)
 	if err != nil {
+		return 0
+	}
+	// L1：负数 offset 无意义，归零避免 Seek 到负偏移
+	if offset < 0 {
 		return 0
 	}
 	return offset

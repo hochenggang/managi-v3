@@ -53,9 +53,10 @@ function defaultShouldRetry(err: unknown): boolean {
   if (err instanceof Response) {
     return err.status >= 500
   }
-  if (err instanceof Error && err.message.startsWith('Error code')) {
-    const code = parseInt(err.message.replace('Error code', '').trim())
-    return code >= 500
+  if (err instanceof Error) {
+    // L5：用正则精确匹配 "Error code NNN"，替代脆弱的 startsWith + replace
+    const m = err.message.match(/^Error code (\d+)$/)
+    if (m) return parseInt(m[1]) >= 500
   }
   return true // 网络错误（TypeError: Failed to fetch）默认重试
 }

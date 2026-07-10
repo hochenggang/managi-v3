@@ -121,10 +121,10 @@ const triggerExecute = () => {
 
 const executeCommand = async () => {
   if (command.value.length < 2) {
-    throw t("cmdPanel.emptyCmd");
+    throw new Error(t("cmdPanel.emptyCmd"));
   }
   if (nodesStore.selectedNodes.length === 0) {
-    throw t("cmdPanel.nothingSelected");
+    throw new Error(t("cmdPanel.nothingSelected"));
   }
 
   isExecuting.value = true;

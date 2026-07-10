@@ -191,7 +191,7 @@ func TestUploadComplete_Rename(t *testing.T) {
 	sc, srv, _, cleanup := newClient(t)
 	defer cleanup()
 
-	uploadID, _, err := sc.UploadInit("/upload", "done.bin", 8, 4)
+	uploadID, _, err := sc.UploadInit("/upload", "done.bin", 10, 4)
 	require.NoError(t, err)
 
 	require.NoError(t, sc.UploadChunk(uploadID, 0, 0, []byte(" Completed")))

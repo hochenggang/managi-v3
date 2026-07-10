@@ -23,6 +23,7 @@ import (
 type uploadState struct {
 	partPath  string // .part 临时文件远程路径
 	finalPath string // 最终文件远程路径
+	totalSize int64  // 期望的最终文件大小，UploadComplete 时校验
 	offset    int64
 	file      *sftp.File // 保持打开的 .part 文件句柄，避免每分片重复 open/close
 }
@@ -145,6 +146,7 @@ func (c *Client) UploadInit(remotePath, filename string, totalSize int64, chunkS
 	c.uploads[uploadID] = &uploadState{
 		partPath:  partPath,
 		finalPath: finalPath,
+		totalSize: totalSize,
 		offset:    offset,
 		file:      f,
 	}
@@ -155,6 +157,7 @@ func (c *Client) UploadInit(remotePath, filename string, totalSize int64, chunkS
 
 // UploadChunk 写入一个分片到指定 offset。
 // 修复 B5：全程持锁访问 st.file，避免与 closeUpload/UploadComplete 竞态写已关闭句柄。
+// H6：校验客户端传入的 offset 与服务端维护的 st.offset 一致，防止恶意客户端写任意位置。
 func (c *Client) UploadChunk(uploadID string, chunkIndex int, offset int64, data []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -163,7 +166,11 @@ func (c *Client) UploadChunk(uploadID string, chunkIndex int, offset int64, data
 		return fmt.Errorf("unknown upload_id: %s", uploadID)
 	}
 
-	if _, err := st.file.Seek(offset, io.SeekStart); err != nil {
+	// H6：校验客户端 offset 与服务端期望一致，忽略客户端值做 Seek
+	if offset != st.offset {
+		return fmt.Errorf("chunk offset mismatch: got %d, expected %d", offset, st.offset)
+	}
+	if _, err := st.file.Seek(st.offset, io.SeekStart); err != nil {
 		c.closeUploadLocked(uploadID)
 		return fmt.Errorf("seek: %w", err)
 	}
@@ -172,7 +179,7 @@ func (c *Client) UploadChunk(uploadID string, chunkIndex int, offset int64, data
 		return fmt.Errorf("write: %w", err)
 	}
 
-	st.offset = offset + int64(len(data))
+	st.offset = st.offset + int64(len(data))
 	return nil
 }
 
@@ -210,6 +217,17 @@ func (c *Client) UploadComplete(uploadID string) error {
 	// 关闭句柄后再重命名，避免远程文件被占用
 	if st.file != nil {
 		_ = st.file.Close()
+	}
+
+	// C5：校验 .part 文件大小 == totalSize，不符则报错保留 .part 允许续传
+	if st.totalSize > 0 {
+		info, statErr := c.sc.Stat(st.partPath)
+		if statErr != nil {
+			return fmt.Errorf("stat .part file: %w", statErr)
+		}
+		if info.Size() != st.totalSize {
+			return fmt.Errorf("upload incomplete: .part size %d != expected %d", info.Size(), st.totalSize)
+		}
 	}
 
 	if err := c.sc.Rename(st.partPath, st.finalPath); err != nil {

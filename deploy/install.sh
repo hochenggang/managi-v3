@@ -63,7 +63,7 @@ read_password() {
         printf "%s: " "$_rp_prompt" >&2
         _rp_restore
         trap _rp_restore INT TERM EXIT
-        stty -echo
+        stty -echo 2>/dev/null || true
         read -r _rp_value
         _rp_restore
         trap - INT TERM EXIT

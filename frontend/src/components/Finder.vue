@@ -136,7 +136,7 @@ const { t } = useI18n()
 
 const {
   currentPath, files, loading, uploadProgress, downloadProgress,
-  list, upload, download, mkdir, del, close,
+  list, upload, download, downloadViaHTTP, mkdir, del, close,
 } = useSFTP(props.node)
 
 const selectedFile = ref<SFTPFile | null>(null)
@@ -208,14 +208,22 @@ const handleFileUpload = async (event: Event) => {
   const input = event.target as HTMLInputElement
   if (!input.files || input.files.length === 0) return
   isUploading.value = true
+  // M3：隔离单文件错误，失败项记录后继续上传剩余文件
+  const failedFiles: string[] = []
   try {
     for (const file of Array.from(input.files)) {
-      await upload(currentPath.value, file)
+      try {
+        await upload(currentPath.value, file)
+      } catch {
+        failedFiles.push(file.name)
+      }
     }
-    handleMsg(t('finder.uploaded'))
+    if (failedFiles.length > 0) {
+      handleError(`${t('finder.uploadFailed')}: ${failedFiles.join(', ')}`)
+    } else {
+      handleMsg(t('finder.uploaded'))
+    }
     await refresh()
-  } catch (e) {
-    handleError(String(e))
   } finally {
     isUploading.value = false
   }
@@ -227,7 +235,12 @@ const downloadSelected = async () => {
   isDownloading.value = true
   const path = getFullPath(selectedFile.value.filename)
   try {
-    await download(path)
+    // H1：大文件走 HTTP Range 流式下载，避免 WS 缓冲超限
+    if (selectedFile.value.size > 100 * 1024 * 1024) {
+      await downloadViaHTTP(path)
+    } else {
+      await download(path)
+    }
     handleMsg(t('finder.downloaded'))
   } catch (e) {
     handleError(String(e))
@@ -251,10 +264,11 @@ const deleteSelected = async () => {
 }
 
 const formatFileSize = (bytes: number): string => {
-  if (bytes === 0) return '0 B'
+  // M4：负数/零归一为 0 B；Math.min 防止极大文件越界；sizes 补 PB
+  if (bytes <= 0) return '0 B'
   const k = 1024
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1)
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
 }
 

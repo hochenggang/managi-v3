@@ -6,7 +6,7 @@ import { ref, computed, watch } from 'vue'
 import type { ApiNode } from '@/protocol/types'
 import { generateNodeId } from '@/protocol/types'
 import { getCachedNodes, setCachedNodes, getCachedGroups, setCachedGroups } from '@/api'
-import { clearSessionId } from '@/composables/useTerminal'
+import { clearSessionId, clearAllSessionIds } from '@/composables/useTerminal'
 
 export const ALL_HOSTS_GROUP = ''
 
@@ -129,10 +129,14 @@ export const useNodesStore = defineStore('nodes', () => {
     nodes.value = {}
     groups.value = []
     selectedNodes.value = []
+    // M1：清空 sessionId 缓存，避免残留复用到已失效的后端会话
+    clearAllSessionIds()
   }
 
   function setAllNodes(list: ApiNode[], groupList?: string[]): void {
     nodes.value = {}
+    // M1：导入配置覆盖全部节点，旧 sessionId 不再有效
+    clearAllSessionIds()
     list.forEach(setNode)
     groups.value = groupList && groupList.length > 0
       ? groupList.filter((g) => g)

@@ -59,7 +59,8 @@
         "exportSucess": "Export Sucessful",
         "exportConfigSucess": "Config Exported",
         "importConfigSucess": "Config Imported",
-        "importConfigError": "Config Import Failed"
+        "importConfigError": "Config Import Failed",
+        "invalidPort": "Port must be an integer between 1 and 65535"
     },
     "cmdPanel": {
         "shortcut": "Shortcut Command: ",
@@ -113,6 +114,7 @@
         "error": "An error occurred",
         "downloaded": "Download completed",
         "uploaded": "Upload completed",
+        "uploadFailed": "Some files failed to upload",
         "deleteConfire": "Are you sure you want to delete this?",
         "ok": "Confirm",
         "cancle": "Cancel",

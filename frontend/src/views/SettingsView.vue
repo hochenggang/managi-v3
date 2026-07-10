@@ -43,7 +43,8 @@
         <h2>{{ t('settings.terminal.title') }}</h2>
         <div class="setting-item">
           <label>{{ t('settings.terminal.fontSize') }}</label>
-          <input type="number" v-model.number="settingsStore.settings.terminalFontSize" min="8" max="32" />
+          <input type="number" :value="settingsStore.settings.terminalFontSize"
+            min="8" max="32" @change="onFontSizeChange" />
         </div>
         <div class="setting-item">
           <label>{{ t('settings.terminal.fontFamily') }}</label>
@@ -155,12 +156,15 @@ function importConfig(): void {
         const inputSettings = isV3Config ? (raw.settings as Partial<Settings> | undefined) : undefined
 
         for (const key1 in inputNodes) {
-          const requiredKeys = ['port', 'auth_type', 'auth_value']
-          for (const key2 of requiredKeys) {
-            if (!Object.prototype.hasOwnProperty.call(inputNodes[key1], key2)) {
-              handleError(`${t('settings.data.importError')} -> [${key1}].${key2}`)
-              return
-            }
+          // M8：先转换为统一 ApiNode 格式，再校验必填字段与类型
+          const n = oldApiNodeConvert(inputNodes[key1])
+          if (typeof n.host !== 'string' || !n.host ||
+            typeof n.username !== 'string' || !n.username ||
+            typeof n.auth_type !== 'string' || !n.auth_type ||
+            typeof n.auth_value !== 'string' || !n.auth_value ||
+            typeof n.port !== 'number' || n.port < 1 || n.port > 65535) {
+            handleError(`${t('settings.data.importError')} -> [${key1}]`)
+            return
           }
         }
 
@@ -203,6 +207,12 @@ function importConfig(): void {
 function handleLanguageChange(): void {
   locale.value = settingsStore.settings.language
   localStorage.setItem('lang', settingsStore.settings.language)
+}
+
+/** M9：字体大小变更时走 store 的 clamp 逻辑，避免 v-model 直接写入绕过边界校验 */
+function onFontSizeChange(e: Event): void {
+  const val = Number((e.target as HTMLInputElement).value)
+  settingsStore.setTerminalFontSize(val)
 }
 
 watch(

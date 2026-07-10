@@ -59,7 +59,8 @@
         "exportSucess": "节点导出成功",
         "exportConfigSucess": "配置导出成功",
         "importConfigSucess": "配置导入成功",
-        "importConfigError": "配置导入失败"
+        "importConfigError": "配置导入失败",
+        "invalidPort": "端口号必须是 1-65535 的整数"
     },
     "cmdPanel": {
         "shortcut": "快捷命令：",
@@ -113,6 +114,7 @@
         "error": "出现错误",
         "downloaded": "下载完成",
         "uploaded": "上传完成",
+        "uploadFailed": "部分文件上传失败",
         "deleteConfire": "确认删除吗？",
         "ok": "确定",
         "cancle": "取消",

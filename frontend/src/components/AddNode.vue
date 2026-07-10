@@ -14,7 +14,7 @@
         </label>
         <label>
           {{ t("addNode.port") }}
-          <input v-model="newNode.port" type="number" :placeholder="t('addNode.portPlaceholder')" required />
+          <input v-model="newNode.port" type="number" min="1" max="65535" :placeholder="t('addNode.portPlaceholder')" required />
         </label>
         <label>
           {{ t("addNode.username") }}
@@ -50,6 +50,7 @@ import { ref } from 'vue';
 import Modal from "@/components/Modal.vue";
 import type { ApiNode } from '@/protocol/types';
 import { useI18n } from 'vue-i18n'
+import { handleError } from '@/helper'
 
 const { t } = useI18n({
   inheritLocale: true,
@@ -76,6 +77,13 @@ const props = defineProps({
 const newNode = ref<ApiNode>(JSON.parse(JSON.stringify(props.node)));
 
 const handleSubmit = () => {
+  // M7：校验端口范围 1-65535
+  const port = Number(newNode.value.port)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    handleError(t('addNode.invalidPort'))
+    return
+  }
+  newNode.value.port = port
   emits('addNode', newNode.value);
 };
 </script>

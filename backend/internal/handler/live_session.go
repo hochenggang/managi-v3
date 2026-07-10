@@ -21,11 +21,13 @@ const scrollbackMax = 256 * 1024
 
 // sessionManager 维护按 sessionID 索引的活跃终端会话。
 type sessionManager struct {
-	mu       sync.Mutex
-	sessions map[string]*liveSession
-	pool     *sshpool.Pool
-	cfg      *config.Config
-	idleTTL  time.Duration
+	mu          sync.Mutex
+	sessions    map[string]*liveSession
+	pool        *sshpool.Pool
+	cfg         *config.Config
+	idleTTL     time.Duration
+	perKeyLocks map[string]*sync.Mutex // C2：per-sessionID 锁，串行化同 id 的 AttachOrCreate
+	perKeyLock  sync.Mutex             // 保护 perKeyLocks 字典
 }
 
 func newSessionManager(pool *sshpool.Pool, cfg *config.Config) *sessionManager {
@@ -34,11 +36,24 @@ func newSessionManager(pool *sshpool.Pool, cfg *config.Config) *sessionManager {
 		ttl = 60 * time.Second
 	}
 	return &sessionManager{
-		sessions: make(map[string]*liveSession),
-		pool:     pool,
-		cfg:      cfg,
-		idleTTL:  ttl,
+		sessions:    make(map[string]*liveSession),
+		pool:        pool,
+		cfg:         cfg,
+		idleTTL:     ttl,
+		perKeyLocks: make(map[string]*sync.Mutex),
 	}
+}
+
+// keyLock 获取指定 sessionID 的 per-key 锁（C2：串行化同 id 的 AttachOrCreate，避免竞态创建）。
+func (m *sessionManager) keyLock(id string) *sync.Mutex {
+	m.perKeyLock.Lock()
+	defer m.perKeyLock.Unlock()
+	if l, ok := m.perKeyLocks[id]; ok {
+		return l
+	}
+	l := &sync.Mutex{}
+	m.perKeyLocks[id] = l
+	return l
 }
 
 // liveSession 一个后端维护的终端会话：SSH shell + scrollback + 当前挂载的 WS 客户端。
@@ -58,10 +73,16 @@ type liveSession struct {
 
 // AttachOrCreate 查找或创建会话。
 // 返回 (会话, 是否复用已存在的)。失败返回 error。
+// C2：使用 per-key 锁串行化同一 sessionID 的并发创建，避免竞态导致 SSH 连接与 goroutine 泄漏。
 func (m *sessionManager) AttachOrCreate(id string, node model.Node, wc *wsConn, cols, rows int) (*liveSession, bool, error) {
 	if id == "" {
 		id = node.ConnectionKey()
 	}
+
+	// C2：per-key 锁保证同一 sessionID 的 AttachOrCreate 串行执行
+	perKey := m.keyLock(id)
+	perKey.Lock()
+	defer perKey.Unlock()
 
 	// 1. 尝试复用已有会话
 	m.mu.Lock()
@@ -88,7 +109,7 @@ func (m *sessionManager) AttachOrCreate(id string, node model.Node, wc *wsConn, 
 	}
 	m.mu.Unlock()
 
-	// 2. 新建会话
+	// 2. 新建会话（perKey 锁保护，不会有并发同 id 创建）
 	sshConn, err := m.pool.Get(node)
 	if err != nil {
 		return nil, false, err
@@ -201,10 +222,12 @@ func (ls *liveSession) outputLoop(ctx context.Context) {
 				return
 			}
 			ls.appendScrollbackLocked(data)
-			if ls.cur != nil {
-				_ = ls.cur.writeMsg(string(data))
-			}
+			cur := ls.cur
+			// H7：复制 cur 引用后释放锁，避免 writeMsg 网络阻塞时持锁卡死 Detach/close 等操作
 			ls.mu.Unlock()
+			if cur != nil {
+				_ = cur.writeMsg(string(data))
+			}
 		}
 		if err != nil {
 			ls.mgr.close(ls.id)
