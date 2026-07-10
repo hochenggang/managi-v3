@@ -179,7 +179,7 @@ func (c *Client) UploadChunk(uploadID string, chunkIndex int, offset int64, data
 		return fmt.Errorf("write: %w", err)
 	}
 
-	st.offset = st.offset + int64(len(data))
+	st.offset += int64(len(data))
 	return nil
 }
 

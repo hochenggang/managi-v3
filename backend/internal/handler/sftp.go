@@ -32,8 +32,8 @@ import (
 	"net/http"
 	"path"
 	"strconv"
-	"sync"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
