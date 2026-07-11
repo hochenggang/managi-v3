@@ -91,7 +91,10 @@
         "hello": "鼠标浮在左侧节点上，点击终端图标来开启一个连接吧",
         "idle": "未连接节点",
         "reattached": "已恢复之前的会话",
-        "reconnecting": "连接断开，正在重连…"
+        "connecting": "正在连接…",
+        "firstFailed": "连接失败",
+        "reconnecting": "正在重连…",
+        "reconnectFailed": "重连失败"
     },
     "finder": {
         "actions": {

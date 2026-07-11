@@ -91,7 +91,10 @@
         "hello": "Hover over a node on the left and click the terminal icon to open a connection.",
         "idle": "No node connected",
         "reattached": "Previous session restored",
-        "reconnecting": "Connection lost, reconnecting…"
+        "connecting": "Connecting…",
+        "firstFailed": "Connection failed",
+        "reconnecting": "Reconnecting…",
+        "reconnectFailed": "Reconnect failed"
     },
     "finder": {
         "actions": {

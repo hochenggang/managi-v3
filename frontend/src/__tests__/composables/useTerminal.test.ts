@@ -55,16 +55,21 @@ let onBinaryCb: ((data: ArrayBuffer) => void) | null = null
 const mockSend = vi.fn()
 const mockConnect = vi.fn()
 const mockClose = vi.fn()
+const mockMarkFailed = vi.fn()
+const mockMarkLoginSuccess = vi.fn()
 
 vi.mock('@/composables/useWebSocket', () => ({
   useWebSocket: (_path: string, opts: any) => {
     onTextCb = opts.onText
     onBinaryCb = opts.onBinary
     return {
+      status: { value: 'idle' },
       connected: { value: false },
       connect: mockConnect,
       send: mockSend,
       close: mockClose,
+      markFailed: mockMarkFailed,
+      markLoginSuccess: mockMarkLoginSuccess,
     }
   },
 }))
@@ -129,21 +134,22 @@ describe('useTerminal', () => {
     expect(mockTerminal.write).not.toHaveBeenCalled()
   })
 
-  it('onText login failure writes formatted error, calls handleError and close', () => {
+  it('onText login failure writes formatted error, calls handleError and markFailed', () => {
     const container = document.createElement('div')
     withSetup(() => useTerminal(container, node))
     mockTerminal.writeln.mockClear()
     onTextCb!(wsMessage('login', { success: false, message: 'auth failed' }))
     expect(mockTerminal.writeln).toHaveBeenCalledWith(expect.stringContaining('登录失败：auth failed'))
     expect(mockHandleError).toHaveBeenCalledWith('登录失败：auth failed')
-    expect(mockClose).toHaveBeenCalledTimes(1)
+    expect(mockMarkFailed).toHaveBeenCalledTimes(1)
   })
 
-  it('onText login success with reattached writes restore message', () => {
+  it('onText login success calls markLoginSuccess and writes restore message if reattached', () => {
     const container = document.createElement('div')
     withSetup(() => useTerminal(container, node))
     mockTerminal.writeln.mockClear()
     onTextCb!(wsMessage('login', { success: true, reattached: true }))
+    expect(mockMarkLoginSuccess).toHaveBeenCalledTimes(1)
     expect(mockTerminal.writeln).toHaveBeenCalledWith(expect.stringContaining('已恢复之前的会话'))
   })
 

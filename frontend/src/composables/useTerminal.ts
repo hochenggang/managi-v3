@@ -55,7 +55,7 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
   term.focus()
 
   const sessionId = getSessionId(node)
-  const { connected, connect, send, close } = useWebSocket('/ws', {
+  const { status, connect, send, close, markFailed, markLoginSuccess } = useWebSocket('/ws', {
     authPayload: loginMessage(node, sessionId, term.cols, term.rows),
     maxReconnect: 10, // 后端维持会话，前端应积极重连
     onText: (data) => {
@@ -73,9 +73,12 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
             const m = r.message ?? 'unknown'
             term.writeln(`\x1b[31m登录失败：${m}\x1b[0m`)
             handleError(`登录失败：${m}`)
-            close() // 抑制重连，避免无限重试加剧账号锁定
-          } else if (r && r.reattached) {
-            term.writeln(`\x1b[32m[已恢复之前的会话]\x1b[0m`)
+            markFailed() // 替代 close()，设置 first_failed/reconnect_failed 并抑制重连
+          } else if (r && r.success) {
+            markLoginSuccess() // 标记登录成功，后续断线重连时状态为 reconnecting 而非 connecting
+            if (r.reattached) {
+              term.writeln(`\x1b[32m[已恢复之前的会话]\x1b[0m`)
+            }
           }
           break
         }
@@ -144,7 +147,7 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
     term.dispose()
   })
 
-  return { term, connected }
+  return { term, status }
 }
 
 export function getTerminalTheme(): ITheme {
