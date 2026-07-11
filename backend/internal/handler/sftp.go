@@ -132,10 +132,10 @@ func sftpWSHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 				continue
 			}
 			if env.Type == msgTypePing {
-			_ = wc.writePong()
-			continue
-		}
-		handleSftpOp(ctx, wc, sc, env, &downloadMu)
+				_ = wc.writePong()
+				continue
+			}
+			handleSftpOp(ctx, wc, sc, env, &downloadMu)
 		}
 	}
 }

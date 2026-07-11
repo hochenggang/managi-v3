@@ -51,7 +51,7 @@ test-coverage:
 	cd $(FRONTEND_DIR) && npm run test:coverage
 
 lint:
-	cd $(BACKEND_DIR) && go vet ./...
+	cd $(BACKEND_DIR) && golangci-lint run --timeout=3m
 
 # ===== 清理 =====
 clean:
