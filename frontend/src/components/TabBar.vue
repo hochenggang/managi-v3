@@ -23,13 +23,17 @@
       <slot></slot>
     </div>
 
-    <div v-if="contextMenu.visible" class="context-menu"
-      :style="{ top: contextMenu.y + 'px', left: contextMenu.x + 'px' }">
-      <div class="context-menu-item" @click="closeCurrent">{{ t('tabs.close') }}</div>
-      <div class="context-menu-item" @click="closeOthers">{{ t('tabs.closeOthers') }}</div>
-      <div class="context-menu-item" @click="closeAll">{{ t('tabs.closeAll') }}</div>
-    </div>
-    <div v-if="contextMenu.visible" class="context-menu-overlay" @click="contextMenu.visible = false"></div>
+    <Transition name="tab-ctx-menu">
+      <div v-if="contextMenu.visible" class="context-menu"
+        :style="{ top: contextMenu.y + 'px', left: contextMenu.x + 'px' }">
+        <div class="context-menu-item" @click="closeCurrent">{{ t('tabs.close') }}</div>
+        <div class="context-menu-item" @click="closeOthers">{{ t('tabs.closeOthers') }}</div>
+        <div class="context-menu-item" @click="closeAll">{{ t('tabs.closeAll') }}</div>
+      </div>
+    </Transition>
+    <Transition name="tab-ctx-overlay">
+      <div v-if="contextMenu.visible" class="context-menu-overlay" @click="contextMenu.visible = false"></div>
+    </Transition>
   </div>
 </template>
 
@@ -153,10 +157,12 @@ function closeAll(): void {
   font-size: 0.9rem;
   line-height: 1;
   cursor: pointer;
+  transition: color 0.15s ease, transform 0.15s ease;
 }
 
 .tab-close:hover {
   color: var(--color-red);
+  transform: scale(1.1);
 }
 
 .tab-add {
@@ -198,6 +204,7 @@ function closeAll(): void {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
   z-index: 2000;
   min-width: 8rem;
+  transform-origin: top left;
 }
 
 .context-menu-item {
@@ -205,6 +212,7 @@ function closeAll(): void {
   font-size: 0.85rem;
   color: var(--color-font-1);
   cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
 }
 
 .context-menu-item:hover {
@@ -215,5 +223,28 @@ function closeAll(): void {
   position: fixed;
   inset: 0;
   z-index: 1999;
+}
+
+/* 右键菜单缩放淡入 */
+.tab-ctx-menu-enter-active,
+.tab-ctx-menu-leave-active {
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.tab-ctx-menu-enter-from,
+.tab-ctx-menu-leave-to {
+  opacity: 0;
+  transform: scale(0.92);
+}
+
+/* 遮罩淡入淡出 */
+.tab-ctx-overlay-enter-active,
+.tab-ctx-overlay-leave-active {
+  transition: opacity 0.18s ease;
+}
+
+.tab-ctx-overlay-enter-from,
+.tab-ctx-overlay-leave-to {
+  opacity: 0;
 }
 </style>

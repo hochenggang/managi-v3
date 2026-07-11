@@ -13,64 +13,66 @@
     </aside>
 
     <section class="settings-content">
-      <div v-if="currentSection === 'appearance'" class="settings-group">
-        <h2>{{ t('settings.appearance.title') }}</h2>
-        <div class="setting-item">
-          <label>{{ t('settings.appearance.theme') }}</label>
-          <div class="theme-options">
-            <button
-              v-for="theme in themes"
-              :key="theme.key"
-              class="theme-card"
-              :class="{ active: settingsStore.settings.theme === theme.key }"
-              @click="settingsStore.setTheme(theme.key as ThemeName)"
-            >
-              <span class="theme-preview" :style="{ background: theme.preview }"></span>
-              <span>{{ theme.label }}</span>
-            </button>
+      <Transition name="settings-section" mode="out-in">
+        <div v-if="currentSection === 'appearance'" key="appearance" class="settings-group">
+          <h2>{{ t('settings.appearance.title') }}</h2>
+          <div class="setting-item">
+            <label>{{ t('settings.appearance.theme') }}</label>
+            <div class="theme-options">
+              <button
+                v-for="theme in themes"
+                :key="theme.key"
+                class="theme-card"
+                :class="{ active: settingsStore.settings.theme === theme.key }"
+                @click="settingsStore.setTheme(theme.key as ThemeName)"
+              >
+                <span class="theme-preview" :style="{ background: theme.preview }"></span>
+                <span>{{ theme.label }}</span>
+              </button>
+            </div>
+          </div>
+          <div class="setting-item">
+            <label>{{ t('settings.appearance.language') }}</label>
+            <select v-model="settingsStore.settings.language" @change="handleLanguageChange">
+              <option value="zh">中文</option>
+              <option value="en">English</option>
+            </select>
           </div>
         </div>
-        <div class="setting-item">
-          <label>{{ t('settings.appearance.language') }}</label>
-          <select v-model="settingsStore.settings.language" @change="handleLanguageChange">
-            <option value="zh">中文</option>
-            <option value="en">English</option>
-          </select>
-        </div>
-      </div>
 
-      <div v-if="currentSection === 'terminal'" class="settings-group">
-        <h2>{{ t('settings.terminal.title') }}</h2>
-        <div class="setting-item">
-          <label>{{ t('settings.terminal.fontSize') }}</label>
-          <input type="number" :value="settingsStore.settings.terminalFontSize"
-            min="8" max="32" @change="onFontSizeChange" />
+        <div v-else-if="currentSection === 'terminal'" key="terminal" class="settings-group">
+          <h2>{{ t('settings.terminal.title') }}</h2>
+          <div class="setting-item">
+            <label>{{ t('settings.terminal.fontSize') }}</label>
+            <input type="number" :value="settingsStore.settings.terminalFontSize"
+              min="8" max="32" @change="onFontSizeChange" />
+          </div>
+          <div class="setting-item">
+            <label>{{ t('settings.terminal.fontFamily') }}</label>
+            <input type="text" v-model="settingsStore.settings.terminalFontFamily" />
+          </div>
         </div>
-        <div class="setting-item">
-          <label>{{ t('settings.terminal.fontFamily') }}</label>
-          <input type="text" v-model="settingsStore.settings.terminalFontFamily" />
+
+        <div v-else-if="currentSection === 'security'" key="security" class="settings-group">
+          <h2>{{ t('settings.security.title') }}</h2>
+          <p class="setting-desc">{{ t('settings.security.desc') }}</p>
         </div>
-      </div>
 
-      <div v-if="currentSection === 'security'" class="settings-group">
-        <h2>{{ t('settings.security.title') }}</h2>
-        <p class="setting-desc">{{ t('settings.security.desc') }}</p>
-      </div>
-
-      <div v-if="currentSection === 'about'" class="settings-group">
-        <h2>{{ t('settings.about.title') }}</h2>
-        <p class="setting-desc">Managi v3</p>
-        <p class="setting-desc">{{ t('settings.about.desc') }}</p>
-      </div>
-
-      <div v-if="currentSection === 'data'" class="settings-group">
-        <h2>{{ t('settings.data.title') }}</h2>
-        <p class="setting-desc">{{ t('settings.data.desc') }}</p>
-        <div class="setting-actions">
-          <button class="small-button" @click="exportConfig">{{ t('settings.data.export') }}</button>
-          <button class="small-button" @click="importConfig">{{ t('settings.data.import') }}</button>
+        <div v-else-if="currentSection === 'about'" key="about" class="settings-group">
+          <h2>{{ t('settings.about.title') }}</h2>
+          <p class="setting-desc">Managi v3</p>
+          <p class="setting-desc">{{ t('settings.about.desc') }}</p>
         </div>
-      </div>
+
+        <div v-else-if="currentSection === 'data'" key="data" class="settings-group">
+          <h2>{{ t('settings.data.title') }}</h2>
+          <p class="setting-desc">{{ t('settings.data.desc') }}</p>
+          <div class="setting-actions">
+            <button class="small-button" @click="exportConfig">{{ t('settings.data.export') }}</button>
+            <button class="small-button" @click="importConfig">{{ t('settings.data.import') }}</button>
+          </div>
+        </div>
+      </Transition>
     </section>
   </main>
 </template>
@@ -343,5 +345,31 @@ watch(
   display: flex;
   gap: 0.75rem;
   margin-top: 1rem;
+}
+
+/* section 切换过渡：淡入 + 轻微上移 */
+.settings-section-enter-active,
+.settings-section-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.settings-section-enter-from {
+  opacity: 0;
+  transform: translateY(0.5rem);
+}
+
+.settings-section-leave-to {
+  opacity: 0;
+  transform: translateY(-0.5rem);
+}
+
+/* nav-item 状态切换颜色过渡 */
+.nav-item {
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* theme-card 选中态过渡 */
+.theme-card {
+  transition: border-color 0.2s ease, background-color 0.2s ease;
 }
 </style>

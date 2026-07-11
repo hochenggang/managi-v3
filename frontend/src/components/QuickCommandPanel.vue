@@ -11,9 +11,11 @@
           <div class="command-preview">{{ cmd.cmd }}</div>
         </div>
       </div>
-      <div v-if="filteredCommands.length === 0" class="command-empty">
-        {{ t('quickCommand.noResult') }}
-      </div>
+      <Transition name="cmd-empty">
+        <div v-if="filteredCommands.length === 0" class="command-empty">
+          {{ t('quickCommand.noResult') }}
+        </div>
+      </Transition>
     </div>
   </div>
 
@@ -180,5 +182,17 @@ function handleCommandContextMenu(event: MouseEvent, cmd: CommandItem): void {
   text-align: center;
   color: var(--color-font-3);
   font-size: 0.7rem;
+}
+
+/* 空状态淡入淡出 */
+.cmd-empty-enter-active,
+.cmd-empty-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.cmd-empty-enter-from,
+.cmd-empty-leave-to {
+  opacity: 0;
+  transform: translateY(0.25rem);
 }
 </style>

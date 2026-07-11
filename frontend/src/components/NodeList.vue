@@ -30,7 +30,8 @@
             <span class="group-count">{{ group.count }}</span>
           </div>
 
-          <div v-show="!isGroupCollapsed(group.name)" class="group-nodes">
+          <div class="group-nodes-wrapper" :class="{ expanded: !isGroupCollapsed(group.name) }">
+            <div class="group-nodes">
             <div v-for="node in group.nodes" :key="generateNodeId(node)" class="node"
               :class="{ selected: selectedNodes.includes(generateNodeId(node)) }"
               @click="nodesStore.toggleNodeSelection(generateNodeId(node))"
@@ -42,6 +43,7 @@
                 <IconTerm :title="t('xtermPanel.terminal')" @click.stop="tabsStore.openTerminal(node)" />
                 <IconFinder :title="t('xtermPanel.finder')" @click.stop="tabsStore.openSftp(node)" />
               </div>
+            </div>
             </div>
           </div>
         </div>
@@ -388,7 +390,19 @@ function openContextMenu(event: MouseEvent, items: { label: string; action?: () 
   font-size: 0.7rem;
 }
 
+.group-nodes-wrapper {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.2s ease;
+}
+
+.group-nodes-wrapper.expanded {
+  grid-template-rows: 1fr;
+}
+
 .group-nodes {
+  overflow: hidden;
+  min-height: 0;
   padding-left: 1.5rem;
 }
 

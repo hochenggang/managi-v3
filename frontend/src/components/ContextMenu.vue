@@ -1,22 +1,26 @@
 <template>
   <teleport to="body">
-    <div
-      v-if="visible"
-      class="context-menu"
-      :style="{ top: y + 'px', left: x + 'px' }"
-      @click.stop
-    >
+    <Transition name="ctx-menu">
       <div
-        v-for="item in items"
-        :key="item.label"
-        class="context-menu-item"
-        :class="{ danger: item.danger, disabled: item.disabled }"
-        @click="handleClick(item)"
+        v-if="visible"
+        class="context-menu"
+        :style="{ top: y + 'px', left: x + 'px' }"
+        @click.stop
       >
-        {{ item.label }}
+        <div
+          v-for="item in items"
+          :key="item.label"
+          class="context-menu-item"
+          :class="{ danger: item.danger, disabled: item.disabled }"
+          @click="handleClick(item)"
+        >
+          {{ item.label }}
+        </div>
       </div>
-    </div>
-    <div v-if="visible" class="context-menu-overlay" @click="close"></div>
+    </Transition>
+    <Transition name="ctx-overlay">
+      <div v-if="visible" class="context-menu-overlay" @click="close"></div>
+    </Transition>
   </teleport>
 </template>
 
@@ -85,5 +89,37 @@ function handleClick(item: MenuItem): void {
   position: fixed;
   inset: 0;
   z-index: 1999;
+}
+
+/* 菜单缩放淡入 */
+.ctx-menu-enter-active {
+  transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.15s ease;
+  transform-origin: top left;
+}
+
+.ctx-menu-leave-active {
+  transition: transform 0.12s ease, opacity 0.1s ease;
+  transform-origin: top left;
+}
+
+.ctx-menu-enter-from {
+  transform: scale(0.88);
+  opacity: 0;
+}
+
+.ctx-menu-leave-to {
+  transform: scale(0.92);
+  opacity: 0;
+}
+
+/* 遮罩淡入淡出 */
+.ctx-overlay-enter-active,
+.ctx-overlay-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.ctx-overlay-enter-from,
+.ctx-overlay-leave-to {
+  opacity: 0;
 }
 </style>

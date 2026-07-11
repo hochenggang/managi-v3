@@ -2,9 +2,6 @@
   <div class="terminal-tab">
     <div class="terminal-wrapper">
       <div ref="terminalContainer" class="terminal-container"></div>
-      <div v-if="node && showOverlay" class="terminal-overlay">
-        <span class="overlay-text">{{ overlayText }}</span>
-      </div>
     </div>
     <div class="terminal-toolbar">
       <span class="terminal-info">{{ node ? `${node.name} (${node.host}:${node.port})` : t('xtermPanel.idle') }}</span>
@@ -17,6 +14,7 @@
 // 终端标签页：每个标签独立维护 xterm.js 实例与 WebSocket 连接。
 // 组件被隐藏（v-show）时不会卸载，连接保持后台运行。
 // 连接状态细分为：首次连接(进行中/成功/失败) + 重试连接(进行中/成功/失败)。
+// 所有状态仅通过工具栏 status 文本+颜色呈现，不使用覆盖层。
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
@@ -29,27 +27,13 @@ const props = defineProps<{ node: ApiNode }>()
 
 const { t } = useI18n()
 const terminalContainer = ref<HTMLElement | null>(null)
-const status = ref<ConnectionStatus>('idle')
+// 有节点时初始即为 connecting，确保首帧渲染就显示"正在连接…"而非"已连接"
+const status = ref<ConnectionStatus>(props.node ? 'connecting' : 'idle')
 
 let standaloneTerm: Terminal | null = null
 let cleanup: (() => void) | null = null
 
 const generateGreenText = (text: string) => `\x1B[32m${text}\x1B[0m`
-
-// 覆盖层仅在连接中/失败状态显示（不含 connected/idle/disconnected）
-const showOverlay = computed(() =>
-  ['connecting', 'first_failed', 'reconnecting', 'reconnect_failed'].includes(status.value)
-)
-
-const overlayText = computed(() => {
-  const map: Record<string, string> = {
-    connecting: t('xtermPanel.connecting'),
-    first_failed: t('xtermPanel.firstFailed'),
-    reconnecting: t('xtermPanel.reconnecting'),
-    reconnect_failed: t('xtermPanel.reconnectFailed'),
-  }
-  return map[status.value] ?? ''
-})
 
 const statusText = computed(() => {
   const map: Record<string, string> = {
@@ -89,7 +73,7 @@ onMounted(() => {
     return
   }
   const { status: wsStatus } = useTerminal(terminalContainer.value, props.node)
-  // 修复 L4：immediate: true 确保首帧即同步，避免值拷贝导致初始状态过期
+  // immediate: true 确保首帧即同步，后续状态变更由 watch 驱动
   cleanup = watch(wsStatus, (val) => { status.value = val }, { immediate: true })
 })
 
@@ -131,6 +115,8 @@ onUnmounted(() => {
 
 .status {
   font-size: 0.75rem;
+  white-space: nowrap;
+  transition: color 0.25s ease;
 }
 
 .status.connected {
@@ -159,25 +145,6 @@ onUnmounted(() => {
 .terminal-container {
   position: absolute;
   inset: 8px;
-}
-
-.terminal-overlay {
-  position: absolute;
-  inset: 0;
-  background: rgba(46, 52, 64, 0.7);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 10;
-  pointer-events: none;
-}
-
-.overlay-text {
-  color: var(--color-font-2, #D8DEE9);
-  font-size: 0.9rem;
-  padding: 0.5rem 1rem;
-  background: rgba(0, 0, 0, 0.4);
-  border-radius: 4px;
 }
 
 .terminal-container :deep(.xterm) {

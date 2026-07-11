@@ -1,7 +1,11 @@
 <template>
   <button @click="handleClick" :disabled="isLoading">
-    <componentSpinner v-if="isLoading" :size="props.size" :thicknesses="props.thicknesses" />
-    <slot v-else></slot>
+    <Transition name="btn-spinner" mode="out-in">
+      <componentSpinner v-if="isLoading" key="spinner" :size="props.size" :thicknesses="props.thicknesses" />
+      <span v-else key="content" class="btn-content">
+        <slot></slot>
+      </span>
+    </Transition>
   </button>
 </template>
 
@@ -11,6 +15,28 @@ button {
   justify-content: center;
   align-items: center;
   line-height: 1.25;
+}
+
+/* spinner/content 切换：淡入淡出 + 轻微缩放 */
+.btn-spinner-enter-active,
+.btn-spinner-leave-active {
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.btn-spinner-enter-from {
+  opacity: 0;
+  transform: scale(0.85);
+}
+
+.btn-spinner-leave-to {
+  opacity: 0;
+  transform: scale(0.85);
+}
+
+.btn-content {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 </style>
 

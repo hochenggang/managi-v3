@@ -10,7 +10,8 @@ const COLLAPSED_WIDTH = '12rem'
 const collapsed = ref(false)
 
 function load(): void {
-  collapsed.value = localStorage.getItem(STORAGE_KEY) === 'true'
+  // 默认收缩：未设置时 collapsed=true，仅在用户显式展开时才 false
+  collapsed.value = localStorage.getItem(STORAGE_KEY) !== 'false'
 }
 load()
 

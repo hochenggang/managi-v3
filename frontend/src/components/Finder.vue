@@ -49,15 +49,16 @@
           <div class="file-modified">{{ t('finder.mtime') }}</div>
         </div>
 
-        <div v-if="loading" class="loading">
+        <Transition name="finder-state" mode="out-in">
+        <div v-if="loading" key="loading" class="loading">
           {{ t('finder.loading') }}
         </div>
 
-        <div v-else-if="files.length === 0" class="empty-folder">
+        <div v-else-if="files.length === 0" key="empty" class="empty-folder">
           {{ t('finder.empty') }}
         </div>
 
-        <div v-else class="file-items">
+        <div v-else key="items" class="file-items">
           <div v-show="currentPath.length > 1" class="file-item directory" @dblclick="navigateUp">
             <div class="file-icon">
               <svg viewBox="0 0 24 24" width="24" height="24">
@@ -86,6 +87,7 @@
             <div class="file-modified">{{ formatDate(file.mtime) }}</div>
           </div>
         </div>
+        </Transition>
       </div>
 
       <div class="status-bar">
@@ -98,7 +100,9 @@
         </div>
       </div>
 
+      <Transition name="finder-dialog">
       <div v-if="showCreateFolderDialog" class="dialog-overlay">
+        <Transition name="finder-dialog-content" appear>
         <div class="dialog">
           <div class="dialog-header">
             {{ t("finder.actions.newDir") }}
@@ -113,7 +117,9 @@
             <button class="sucess" @click="confirmCreateFolder" :disabled="!newFolderName">{{ t("finder.ok") }}</button>
           </div>
         </div>
+        </Transition>
       </div>
+      </Transition>
 
       <input type="file" ref="fileInput" style="display: none" @change="handleFileUpload" multiple />
     </div>
@@ -535,5 +541,37 @@ onBeforeUnmount(() => {
   padding: 0.35rem 0.75rem;
   border-radius: 0;
   cursor: pointer;
+}
+
+/* 文件列表三态切换：淡入淡出 */
+.finder-state-enter-active,
+.finder-state-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.finder-state-enter-from,
+.finder-state-leave-to {
+  opacity: 0;
+}
+
+/* 新建文件夹对话框遮罩淡入淡出 */
+.finder-dialog-enter-active,
+.finder-dialog-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.finder-dialog-enter-from,
+.finder-dialog-leave-to {
+  opacity: 0;
+}
+
+/* 对话框内容缩放上浮 */
+.finder-dialog-content-enter-active {
+  transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.2s ease;
+}
+
+.finder-dialog-content-enter-from {
+  opacity: 0;
+  transform: scale(0.92) translateY(1rem);
 }
 </style>
