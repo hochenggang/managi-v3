@@ -1,4 +1,4 @@
-// Package handler - WebSocket SSH 终端端点 /ws。
+// Package handler - WebSocket SSH 终端端点 /ws/ssh。
 // v3 协议：统一 {type, data} envelope。
 //
 //	客户端 → 服务端：
@@ -34,7 +34,7 @@ var terminalUpgrader = websocket.Upgrader{
 
 var errLoginFrameExpected = errors.New(`expected login frame: {type:"login",data:{node,session_id}}`)
 
-// terminalWSHandler WS /ws
+// terminalWSHandler WS /ws/ssh
 // 通过 sessionManager 复用终端会话：前端 60s 内重连可恢复同一 shell。
 func terminalWSHandler(mgr *sessionManager, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

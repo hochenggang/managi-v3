@@ -61,7 +61,7 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
   const sessionId = getSessionId(node)
   // 修复 B24：重连期间缓冲用户输入，重连成功后 flush
   let inputBuffer = ''
-  const { status, connect, send, close, markFailed, markLoginSuccess } = useWebSocket('/ws', {
+  const { status, connect, send, close, markFailed, markLoginSuccess } = useWebSocket('/ws/ssh', {
     authPayload: loginMessage(node, sessionId, term.cols, term.rows),
     maxReconnect: 10, // 后端维持会话，前端应积极重连
     onText: (data) => {

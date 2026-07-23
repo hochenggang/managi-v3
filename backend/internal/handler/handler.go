@@ -27,7 +27,7 @@ func Register(mux *http.ServeMux, cfg *config.Config, done <-chan struct{}) *ssh
 
 	// WebSocket 端点
 	mgr := newSessionManager(pool, cfg)
-	mux.HandleFunc("/ws", terminalWSHandler(mgr, cfg))
+	mux.HandleFunc("/ws/ssh", terminalWSHandler(mgr, cfg))
 	mux.HandleFunc("/ws/sftp", sftpWSHandler(pool, cfg))
 
 	// v3 新增：SFTP 下载（HTTP Range，断点续传）

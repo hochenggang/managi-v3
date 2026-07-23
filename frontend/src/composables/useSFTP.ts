@@ -96,7 +96,7 @@ export function useSFTP(node: ApiNode) {
     })
   }
 
-  const { status, connected, connect, send, close: wsClose, markFailed } = useWebSocket('/ws/sftp', {
+  const { status, connected, connect, send, close: wsClose, markFailed, markLoginSuccess } = useWebSocket('/ws/sftp', {
     authPayload: sftpLogin(node),
     // 修复 B9：原 maxReconnect:3 过低，网络抖动时 SFTP 早早放弃。后端 SSH 连接池维持会话，
     // 提高到 10 与终端一致。登录失败由 markFailed 抑制重连。
@@ -119,6 +119,9 @@ export function useSFTP(node: ApiNode) {
             // 修复 B4：用 markFailed 替代 close，设置 first_failed 状态而非 disconnected，
             // UI 可区分"登录失败"与"主动关闭"
             markFailed()
+          } else if (r && r.success) {
+            // 登录成功才置 connected（与 useTerminal 一致，避免 WS 握手即显示已连接）
+            markLoginSuccess()
           }
           return
         }

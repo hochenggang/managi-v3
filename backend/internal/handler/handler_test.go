@@ -32,7 +32,7 @@ func TestRegister(t *testing.T) {
 		{"GET", "/"},
 		{"POST", "/api/ssh/test"},
 		{"POST", "/api/ssh/batch"},
-		{"GET", "/ws"},
+		{"GET", "/ws/ssh"},
 		{"GET", "/ws/sftp"},
 		{"GET", "/api/sftp/download"},
 	}

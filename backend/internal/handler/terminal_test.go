@@ -24,7 +24,7 @@ func TestTerminalWSHandler_Basic(t *testing.T) {
 	httpSrv := httptest.NewServer(h)
 	defer httpSrv.Close()
 
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL(t, httpSrv.URL, "/ws"), nil)
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL(t, httpSrv.URL, "/ws/ssh"), nil)
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
 
@@ -67,7 +67,7 @@ func TestTerminalWSHandler_BadAuthFrame(t *testing.T) {
 	httpSrv := httptest.NewServer(h)
 	defer httpSrv.Close()
 
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL(t, httpSrv.URL, "/ws"), nil)
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL(t, httpSrv.URL, "/ws/ssh"), nil)
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
 
@@ -90,7 +90,7 @@ func TestTerminalWSHandler_AuthFailure(t *testing.T) {
 	httpSrv := httptest.NewServer(h)
 	defer httpSrv.Close()
 
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL(t, httpSrv.URL, "/ws"), nil)
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL(t, httpSrv.URL, "/ws/ssh"), nil)
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
 
@@ -116,7 +116,7 @@ func TestTerminalWSHandler_Ping(t *testing.T) {
 	httpSrv := httptest.NewServer(h)
 	defer httpSrv.Close()
 
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL(t, httpSrv.URL, "/ws"), nil)
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL(t, httpSrv.URL, "/ws/ssh"), nil)
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
 
@@ -154,7 +154,7 @@ func TestTerminalWSHandler_Reattach(t *testing.T) {
 	sessionID := "test-reattach-id"
 
 	// 第一次连接：建立会话
-	conn1, _, err := websocket.DefaultDialer.Dial(wsURL(t, httpSrv.URL, "/ws"), nil)
+	conn1, _, err := websocket.DefaultDialer.Dial(wsURL(t, httpSrv.URL, "/ws/ssh"), nil)
 	require.NoError(t, err)
 	writeWSEnvelope(t, conn1, msgTypeLogin, loginFrame{
 		Node: node, SessionID: sessionID, Cols: 80, Rows: 24,
@@ -169,7 +169,7 @@ func TestTerminalWSHandler_Reattach(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// 第二次连接：相同 session_id → 应复用
-	conn2, _, err := websocket.DefaultDialer.Dial(wsURL(t, httpSrv.URL, "/ws"), nil)
+	conn2, _, err := websocket.DefaultDialer.Dial(wsURL(t, httpSrv.URL, "/ws/ssh"), nil)
 	require.NoError(t, err)
 	defer func() { _ = conn2.Close() }()
 	writeWSEnvelope(t, conn2, msgTypeLogin, loginFrame{

@@ -82,16 +82,19 @@ describe('useWebSocket', () => {
     expect(MockWebSocket.LAST!.url).toMatch(/^ws:\/\/.+\/ws\/sftp$/)
   })
 
-  it('onopen flips connected, fires onOpen, and sends authPayload string as-is', () => {
+  it('onopen fires onOpen and sends authPayload, but connected only after markLoginSuccess', () => {
     const onOpen = vi.fn()
     const auth = { host: '1.2.3.4', port: 22 }
     const { result } = withSetup(() => useWebSocket('/ws/sftp', { authPayload: JSON.stringify(auth), onOpen }))
     result.connect()
     expect(result.connected.value).toBe(false)
     MockWebSocket.LAST!.fireOpen()
-    expect(result.connected.value).toBe(true)
+    // onopen 不再置 connected：需收到登录 ack（调用方调 markLoginSuccess）才置位
+    expect(result.connected.value).toBe(false)
     expect(onOpen).toHaveBeenCalledTimes(1)
     expect(MockWebSocket.LAST!.sent[0]).toBe(JSON.stringify(auth))
+    result.markLoginSuccess()
+    expect(result.connected.value).toBe(true)
   })
 
   it('onmessage text invokes onText, binary invokes onBinary', () => {
@@ -172,14 +175,14 @@ describe('useWebSocket', () => {
     expect(MockWebSocket.instances).toHaveLength(2)
   })
 
-  // 修复 B25：onerror 在 connected 状态下更新为 reconnecting
+  // 修复 B25：onerror 在已登录状态下更新为 reconnecting
   it('onerror updates status from connected to reconnecting (B25 fix)', () => {
     const { result } = withSetup(() => useWebSocket('/ws'))
     result.connect()
     MockWebSocket.LAST!.fireOpen()
-    expect(result.status.value).toBe('connected')
-    // 标记登录成功，使 onerror 走 reconnecting 分支（区分首次连接与重连）
+    // 先标记登录成功（onopen 不再置 connected）
     result.markLoginSuccess()
+    expect(result.status.value).toBe('connected')
     // 模拟 onerror（onclose 之前触发）
     MockWebSocket.LAST!.onerror!(new Event('error'))
     expect(result.status.value).toBe('reconnecting')
@@ -231,5 +234,33 @@ describe('useWebSocket', () => {
     // 不再重连
     await vi.advanceTimersByTimeAsync(30000)
     expect(MockWebSocket.instances).toHaveLength(2)
+  })
+
+  // 响应超时：发出数据（登录帧/输入/ping）后 10s 内未收到任何消息则判定连接已死并重连
+  it('response timeout triggers reconnect when no message received after send', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { result } = withSetup(() => useWebSocket('/ws', { authPayload: '{"host":"x"}', maxReconnect: 1 }))
+    result.connect()
+    MockWebSocket.LAST!.fireOpen() // 发送 authPayload，启动 10s 响应超时
+    expect(MockWebSocket.instances).toHaveLength(1)
+    // 10s 内无任何消息 → 超时触发重连调度（1s 退避后新建 WS）
+    await vi.advanceTimersByTimeAsync(11000)
+    expect(MockWebSocket.instances).toHaveLength(2)
+    expect(result.status.value).toBe('reconnecting')
+  })
+
+  it('receiving any message clears response timeout, no reconnect', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const onText = vi.fn()
+    const { result } = withSetup(() => useWebSocket('/ws', { authPayload: '{"host":"x"}', onText }))
+    result.connect()
+    MockWebSocket.LAST!.fireOpen() // 启动 10s 响应超时
+    // 9s 时收到消息 → 清除响应超时
+    await vi.advanceTimersByTimeAsync(9000)
+    MockWebSocket.LAST!.fireText('{"type":"pong"}')
+    expect(onText).toHaveBeenCalledTimes(1)
+    // 继续推进超过 10s，不应触发重连（无活跃计时器，心跳 30s 未到）
+    await vi.advanceTimersByTimeAsync(11000)
+    expect(MockWebSocket.instances).toHaveLength(1)
   })
 })

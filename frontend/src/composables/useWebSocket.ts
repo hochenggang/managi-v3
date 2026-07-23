@@ -1,5 +1,8 @@
 // useWebSocket：WebSocket 连接管理 composable。
 // v3 协议：统一 {type, data} envelope。心跳发 {type:"ping"}，重连上限默认 3 次。
+// 状态语义：onopen 仅代表 WS 握手成功，不置 connected；调用方需在收到登录 ack 后
+// 调用 markLoginSuccess() 才置 connected，避免「已连接但 SSH 登录未完成」的误显示。
+// 响应超时：发出数据（登录帧/输入/ping）后 10s 内未收到任何消息即判定连接已死并重连。
 // 设计见 ../../../design-v3.md §6.2 §6.3。
 
 import { ref, computed, onUnmounted } from 'vue'
@@ -21,6 +24,8 @@ export interface WSOptions {
   authPayload?: string
   /** 心跳间隔毫秒，默认 30000。 */
   heartbeatInterval?: number
+  /** 响应超时毫秒，默认 10000。发出数据（登录帧/输入/ping）后若该时间内未收到任何消息，判定连接已死并重连。 */
+  responseTimeoutMs?: number
   /** 最大重连次数，默认 3。登录失败由调用方在 onText 中调用 markFailed() 抑制重连。 */
   maxReconnect?: number
   /** 收到文本消息回调。 */
@@ -40,6 +45,7 @@ export function useWebSocket(path: string, opts: WSOptions = {}) {
   let ws: WebSocket | null = null
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let responseTimer: ReturnType<typeof setTimeout> | null = null
   let reconnectAttempts = 0
   let manualClose = false
   let pageHidden = false
@@ -54,6 +60,7 @@ export function useWebSocket(path: string, opts: WSOptions = {}) {
     if (!pageHidden && ws?.readyState === WebSocket.OPEN) {
       // 切回前台立即补发一次 ping，并重置心跳定时器
       ws.send(wsMessage('ping'))
+      startResponseTimer()
       startHeartbeat()
     }
   }
@@ -73,16 +80,21 @@ export function useWebSocket(path: string, opts: WSOptions = {}) {
     ws.binaryType = 'arraybuffer'
 
     ws.onopen = () => {
-      status.value = 'connected'
+      // 不在此置 connected：onopen 仅代表 WS 握手成功，SSH 登录尚未确认。
+      // 调用方需在收到登录 ack 后调用 markLoginSuccess() 才置 connected。
       reconnectAttempts = 0
       if (opts.authPayload !== undefined) {
         ws?.send(opts.authPayload)
+        // 登录帧已发，启动响应超时；10s 内未收到任何消息则判定连接已死并重连
+        startResponseTimer()
       }
       startHeartbeat()
       opts.onOpen?.()
     }
 
     ws.onmessage = (ev) => {
+      // 任意入站消息即代表连接存活，清除响应超时计时器
+      clearResponseTimer()
       if (typeof ev.data === 'string') {
         opts.onText?.(ev.data)
       } else {
@@ -92,31 +104,66 @@ export function useWebSocket(path: string, opts: WSOptions = {}) {
 
     ws.onclose = (ev: CloseEvent) => {
       stopHeartbeat()
+      clearResponseTimer()
       // 日志记录关闭原因，便于排查后台重连问题
       console.warn('[useWebSocket] closed', ev.code, ev.reason)
       if (manualClose) return // 状态已由 close()/markFailed() 设置
-      if (reconnectAttempts < (opts.maxReconnect ?? 3)) {
-        status.value = 'reconnecting'
-        // 修复 B21：指数退避 + 随机 jitter，避免多客户端同时重连导致服务端惊群
-        const base = Math.min(1000 * 2 ** reconnectAttempts, 16000)
-        const jitter = Math.random() * 500 // 0~500ms 随机抖动
-        reconnectAttempts++
-        reconnectTimer = setTimeout(doConnect, base + jitter)
-      } else {
-        // 修复 T3：重连耗尽时通知调用方做可视化提示，避免用户体感「卡住」
-        status.value = hasLoginSucceeded ? 'reconnect_failed' : 'first_failed'
-        opts.onReconnectFailed?.()
-        opts.onClose?.()
-      }
+      scheduleReconnect()
     }
 
     ws.onerror = () => {
       stopHeartbeat()
       // 修复 B25：onerror 时更新状态，避免 UI 卡在 connecting/connected
       // onclose 会随后设置最终状态（reconnecting/reconnect_failed）
-      if (!manualClose && status.value === 'connected') {
-        status.value = hasLoginSucceeded ? 'reconnecting' : 'connecting'
+      // 改用 hasLoginSucceeded 判断（onopen 不再置 connected，status 可能仍是 connecting）
+      if (!manualClose && hasLoginSucceeded) {
+        status.value = 'reconnecting'
       }
+    }
+  }
+
+  /** scheduleReconnect 重连调度：指数退避 + jitter，达到上限则通知调用方。
+   *  从 ws.onclose 与响应超时两处复用，保证重连策略一致。 */
+  function scheduleReconnect(): void {
+    if (reconnectAttempts < (opts.maxReconnect ?? 3)) {
+      status.value = 'reconnecting'
+      // 修复 B21：指数退避 + 随机 jitter，避免多客户端同时重连导致服务端惊群
+      const base = Math.min(1000 * 2 ** reconnectAttempts, 16000)
+      const jitter = Math.random() * 500 // 0~500ms 随机抖动
+      reconnectAttempts++
+      reconnectTimer = setTimeout(doConnect, base + jitter)
+    } else {
+      // 修复 T3：重连耗尽时通知调用方做可视化提示，避免用户体感「卡住」
+      status.value = hasLoginSucceeded ? 'reconnect_failed' : 'first_failed'
+      opts.onReconnectFailed?.()
+      opts.onClose?.()
+    }
+  }
+
+  /** startResponseTimer 启动响应超时计时器。
+   *  发出数据（登录帧/输入/ping）后若 responseTimeoutMs 内未收到任何消息，
+   *  判定连接已死（TCP 半开 / 服务端无响应），关闭 WS 并触发重连。 */
+  function startResponseTimer(): void {
+    clearResponseTimer()
+    const timeout = opts.responseTimeoutMs ?? 10000
+    responseTimer = setTimeout(() => {
+      console.warn('[useWebSocket] response timeout, forcing reconnect')
+      stopHeartbeat()
+      if (ws) {
+        // 置空回调避免 onclose 重复触发 scheduleReconnect
+        ws.onclose = null
+        ws.onerror = null
+        ws.close()
+        ws = null
+      }
+      scheduleReconnect()
+    }, timeout)
+  }
+
+  function clearResponseTimer(): void {
+    if (responseTimer) {
+      clearTimeout(responseTimer)
+      responseTimer = null
     }
   }
 
@@ -130,6 +177,8 @@ export function useWebSocket(path: string, opts: WSOptions = {}) {
       if (pageHidden) return
       if (ws?.readyState === WebSocket.OPEN) {
         ws.send(wsMessage('ping'))
+        // ping 发出后启动响应超时，10s 内无 pong（或任何消息）则重连
+        startResponseTimer()
       }
     }, interval)
   }
@@ -141,20 +190,23 @@ export function useWebSocket(path: string, opts: WSOptions = {}) {
     }
   }
 
-  /** 发送数据，仅在 OPEN 时发送。返回是否成功投递。 */
+  /** 发送数据，仅在 OPEN 时发送。返回是否成功投递。
+   *  成功投递后启动响应超时：10s 内未收到任何消息（如终端回显）则判定连接已死并重连。 */
   function send(data: string | ArrayBuffer): boolean {
     if (ws?.readyState === WebSocket.OPEN) {
       ws.send(data)
+      startResponseTimer()
       return true
     }
     return false
   }
 
   /** markLoginSuccess 标记应用层登录成功，用于区分首次连接与重连。
-   *  调用方在收到登录成功消息时调用。
+   *  调用方在收到登录成功消息时调用。此时才将状态置为 connected。
    */
   function markLoginSuccess(): void {
     hasLoginSucceeded = true
+    status.value = 'connected'
   }
 
   /** markFailed 标记连接失败（如登录失败），设置 first_failed 或 reconnect_failed 并关闭 WS。
@@ -163,6 +215,7 @@ export function useWebSocket(path: string, opts: WSOptions = {}) {
   function markFailed(): void {
     manualClose = true
     stopHeartbeat()
+    clearResponseTimer()
     if (reconnectTimer) {
       clearTimeout(reconnectTimer)
       reconnectTimer = null
@@ -179,6 +232,7 @@ export function useWebSocket(path: string, opts: WSOptions = {}) {
   function close(): void {
     manualClose = true
     stopHeartbeat()
+    clearResponseTimer()
     // 清理待执行的重连定时器，避免 close 后连接"复活"（修复 A9）
     if (reconnectTimer) {
       clearTimeout(reconnectTimer)
