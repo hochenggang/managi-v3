@@ -166,8 +166,12 @@ const enterPathEditMode = (): void => {
   pathInputValue.value = normalizePath(currentPath.value)
   pathEditing.value = true
   nextTick(() => {
-    pathInputEl.value?.focus()
-    pathInputEl.value?.select()
+    const el = pathInputEl.value
+    if (!el) return
+    el.focus()
+    // 光标置于末尾，不选中全部路径
+    const len = el.value.length
+    el.setSelectionRange(len, len)
   })
 }
 
@@ -426,6 +430,7 @@ onBeforeUnmount(() => {
   color: var(--color-font-1);
   font-size: 0.85rem;
   padding: 0 4px;
+  text-align: left;
 }
 
 .actions {

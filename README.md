@@ -2,6 +2,12 @@
 
 轻量级的 Web 端 SSH 管理工具，支持终端会话、SFTP 文件传输、批量命令执行。
 
+## 预览
+
+![终端会话](doc/preview/preview1.webp)
+![SFTP 文件管理](doc/preview/preview2.webp)
+![批量命令执行](doc/preview/preview3.webp)
+
 ## 特性
 
 - **SSH 终端**：基于 xterm.js 的 Web 终端，支持多会话、窗口大小调整
@@ -27,18 +33,6 @@ sudo ./install.sh
 
 [下载 Windows 客户端](https://github.com/hochenggang/managi-v3/releases/latest/download/windows-app.exe)（约 9MB，内嵌服务、前端与托盘）
 
-### 手动运行
-
-```bash
-# 下载二进制和前端单页
-mkdir -p /opt/managi
-wget -O /opt/managi/managi https://github.com/hochenggang/managi-v3/releases/latest/download/managi-linux-amd64
-wget -O /opt/managi/index.html https://github.com/hochenggang/managi-v3/releases/latest/download/index.html
-chmod +x /opt/managi/managi
-
-# 运行
-/opt/managi/managi -port 18001
-```
 
 ## 配置
 

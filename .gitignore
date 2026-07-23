@@ -6,3 +6,4 @@ binaries/
 backend/bin/
 coverage.out
 *.exe
+.trae/

@@ -74,9 +74,10 @@ const props = defineProps({
   }
 });
 
-// 修复 B31：用 structuredClone 替代 JSON.parse(JSON.stringify()) 深拷贝。
-// structuredClone 支持 Date/Map/Set 等原生类型，且不丢失非 JSON 可序列化字段。
-const newNode = ref<ApiNode>(structuredClone(props.node));
+// 浅拷贝 props.node 为可编辑本地副本，避免 v-model 修改父组件数据。
+// ApiNode 为扁平结构（仅原始类型），浅拷贝即等价深拷贝；
+// 且 props.node 是 Vue reactive proxy，structuredClone 无法克隆 Proxy 会抛 DataCloneError。
+const newNode = ref<ApiNode>({ ...props.node });
 
 const handleSubmit = () => {
   // M7：校验端口范围 1-65535
