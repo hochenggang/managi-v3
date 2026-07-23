@@ -113,7 +113,7 @@ func BasicAuthMiddleware(cfg *config.Config, done <-chan struct{}) func(http.Han
 	expectedPass := []byte(cfg.BasicAuthPassword)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// /health 放行：Docker healthcheck / Tauri sidecar 探活
+			// /health 放行：Docker healthcheck / Windows 桌面端探活
 			if r.URL.Path == "/health" {
 				next.ServeHTTP(w, r)
 				return
@@ -155,7 +155,7 @@ func clientIP(r *http.Request) string {
 }
 
 // checkOrigin 校验 WebSocket 升级请求来源。
-// Origin 为空 → 放行（非浏览器客户端如 Tauri sidecar / 测试工具）。
+// Origin 为空 → 放行（非浏览器客户端如 Windows 桌面端 / 测试工具）。
 // 非空 → 必须与请求 Host 同源（防 WS CSRF）。
 func checkOrigin(r *http.Request) bool {
 	origin := r.Header.Get("Origin")

@@ -1,12 +1,20 @@
 package model
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
 
-// TestNode_ConnectionKey 验证连接键格式 host:port:username。
+// authHash 计算 auth_value 的 SHA256 前 8 字符（与 ConnectionKey 同逻辑）。
+func authHash(authValue string) string {
+	h := sha256.Sum256([]byte(authValue))
+	return hex.EncodeToString(h[:])[:8]
+}
+
+// TestNode_ConnectionKey 验证连接键格式 host:port:username:auth_type:auth_hash。
 func TestNode_ConnectionKey(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -15,30 +23,35 @@ func TestNode_ConnectionKey(t *testing.T) {
 	}{
 		{
 			name:     "standard",
-			node:     Node{Host: "10.0.0.1", Port: 22, Username: "root"},
-			expected: "10.0.0.1:22:root",
+			node:     Node{Host: "10.0.0.1", Port: 22, Username: "root", AuthType: AuthPassword, AuthValue: "pass"},
+			expected: "10.0.0.1:22:root:password:" + authHash("pass"),
 		},
 		{
 			name:     "custom_port",
-			node:     Node{Host: "192.168.1.100", Port: 22022, Username: "admin"},
-			expected: "192.168.1.100:22022:admin",
+			node:     Node{Host: "192.168.1.100", Port: 22022, Username: "admin", AuthType: AuthPassword, AuthValue: "p"},
+			expected: "192.168.1.100:22022:admin:password:" + authHash("p"),
 		},
 		{
 			name:     "ipv6_like",
-			node:     Node{Host: "fe80::1", Port: 22, Username: "ubuntu"},
-			expected: "[fe80::1]:22:ubuntu",
+			node:     Node{Host: "fe80::1", Port: 22, Username: "ubuntu", AuthType: AuthKey, AuthValue: "keydata"},
+			expected: "[fe80::1]:22:ubuntu:key:" + authHash("keydata"),
 		},
 		{
-			name:     "empty_username",
-			node:     Node{Host: "host", Port: 22, Username: ""},
-			expected: "host:22:",
+			name:     "different_password_different_key",
+			node:     Node{Host: "10.0.0.1", Port: 22, Username: "root", AuthType: AuthPassword, AuthValue: "other"},
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			assert.Equal(t, c.expected, c.node.ConnectionKey())
+			if c.expected != "" {
+				assert.Equal(t, c.expected, c.node.ConnectionKey())
+			}
 		})
 	}
+	// 不同凭据产生不同 key
+	n1 := Node{Host: "10.0.0.1", Port: 22, Username: "root", AuthType: AuthPassword, AuthValue: "pass1"}
+	n2 := Node{Host: "10.0.0.1", Port: 22, Username: "root", AuthType: AuthPassword, AuthValue: "pass2"}
+	assert.NotEqual(t, n1.ConnectionKey(), n2.ConnectionKey())
 }
 
 // TestNode_Masked 验证脱敏：AuthValue 置为 ***，原 Node 不变。

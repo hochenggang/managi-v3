@@ -6,6 +6,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -20,6 +21,12 @@ import (
 // maxRequestBodySize 限制请求体大小（修复 B12：防止超大请求体导致 OOM）。
 const maxRequestBodySize = 10 << 20 // 10MB
 
+// maxCmdsCount 单次请求最大命令条数。
+const maxCmdsCount = 100
+
+// maxCmdLength 单条命令最大字符数。
+const maxCmdLength = 4096
+
 // testHandler POST /api/ssh/test
 // 请求体: {node, cmds}  响应: CmdsTestResult
 //
@@ -28,7 +35,7 @@ func testHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// M5：仅允许 POST，其他方法返回 405
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		// 修复 B12：限制请求体大小
@@ -38,7 +45,15 @@ func testHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 			Cmds []string   `json:"cmds"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeJSONError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := validateNode(req.Node); err != nil {
+			writeJSONError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := validateCmds(req.Cmds); err != nil {
+			writeJSONError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		result := executeSingle(r.Context(), pool, req.Node, req.Cmds)
@@ -56,14 +71,24 @@ func batchHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// M5：仅允许 POST，其他方法返回 405
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		// 修复 B12：限制请求体大小
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		var req model.BatchCmdRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeJSONError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		for _, node := range req.Nodes {
+			if err := validateNode(node); err != nil {
+				writeJSONError(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+		if err := validateCmds(req.Cmds); err != nil {
+			writeJSONError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		results := make([]model.CmdsTestResult, len(req.Nodes))
@@ -116,4 +141,34 @@ func executeSingle(ctx context.Context, pool *sshpool.Pool, node model.Node, cmd
 
 func joinCmds(cmds []string) string {
 	return strings.Join(cmds, "\n")
+}
+
+// validateNode 校验节点字段完整性，防止无效输入触发下游无用连接。
+func validateNode(n model.Node) error {
+	if n.Host == "" {
+		return fmt.Errorf("node.host is required")
+	}
+	if n.Port < 1 || n.Port > 65535 {
+		return fmt.Errorf("node.port must be 1-65535, got %d", n.Port)
+	}
+	if n.Username == "" {
+		return fmt.Errorf("node.username is required")
+	}
+	return nil
+}
+
+// validateCmds 校验命令列表长度与单条命令长度。
+func validateCmds(cmds []string) error {
+	if len(cmds) == 0 {
+		return fmt.Errorf("cmds is required")
+	}
+	if len(cmds) > maxCmdsCount {
+		return fmt.Errorf("too many commands: %d, max %d", len(cmds), maxCmdsCount)
+	}
+	for i, c := range cmds {
+		if len(c) > maxCmdLength {
+			return fmt.Errorf("command %d too long: %d chars, max %d", i, len(c), maxCmdLength)
+		}
+	}
+	return nil
 }

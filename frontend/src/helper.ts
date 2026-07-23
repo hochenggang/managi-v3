@@ -27,3 +27,41 @@ export function toErrorMessage(value: unknown): string {
   if (value instanceof Error) return value.message
   return String(value)
 }
+
+/** copyToClipboard 复制文本到剪贴板。
+ *  修复 B14：非安全上下文（HTTP）下 navigator.clipboard 不可用，降级到 execCommand。
+ */
+export async function copyToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+  // 降级：用临时 textarea + execCommand('copy')
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.opacity = '0'
+  document.body.appendChild(ta)
+  ta.select()
+  try {
+    document.execCommand('copy')
+  } finally {
+    document.body.removeChild(ta)
+  }
+}
+
+/** readFromClipboard 从剪贴板读取文本。
+ *  修复 B14：非安全上下文降级返回空字符串（execCommand 无 paste 等价物，
+ *  浏览器安全策略禁止 JS 读取剪贴板，只能提示用户用 Ctrl+V）。
+ */
+export async function readFromClipboard(): Promise<string> {
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      return await navigator.clipboard.readText()
+    } catch {
+      return ''
+    }
+  }
+  // 非安全上下文无法读取剪贴板，返回空（用户可用 Ctrl+V 粘贴）
+  return ''
+}

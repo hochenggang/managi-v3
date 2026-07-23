@@ -2,7 +2,7 @@
 // v3 协议：统一 {type, data} envelope。服务端登录成功后主动 list /，无需前端首请求。
 // 设计见 ../../../design-v3.md §6.4 §6.5。
 
-import { ref } from 'vue'
+import { ref, onUnmounted } from 'vue'
 import { useWebSocket } from './useWebSocket'
 import { parseWSMessage, type WSMessage, type WSLoginResult, type WSError } from '@/protocol/ws'
 import {
@@ -46,8 +46,8 @@ export function useSFTP(node: ApiNode) {
   let pendingResolve: ((r: SFTPOperationResult) => void) | null = null
   let pendingReject: ((e: Error) => void) | null = null
   let pendingTimer: ReturnType<typeof setTimeout> | null = null
-  // C4：超时后标记丢弃下一个响应（延迟到达的旧响应），防止其错误 resolve 新请求
-  let discardNextResponse = false
+  // SF2：递增 token 替代布尔 flag，超时时设置 token，resolvePending 检查 token 是否匹配
+  let discardToken = 0
   let discardTimer: ReturnType<typeof setTimeout> | null = null
   let downloadBuffer: Uint8Array[] = []
   let downloadTotalSize = 0
@@ -72,9 +72,9 @@ export function useSFTP(node: ApiNode) {
   }
 
   function resolvePending(msg: WSMessage): void {
-    // C4：丢弃超时后延迟到达的旧响应
-    if (discardNextResponse) {
-      discardNextResponse = false
+    // SF2：检查 discardToken，超时后到达的旧响应 token 匹配则丢弃
+    if (discardToken > 0) {
+      discardToken = 0
       if (discardTimer) {
         clearTimeout(discardTimer)
         discardTimer = null
@@ -200,6 +200,9 @@ export function useSFTP(node: ApiNode) {
   loading.value = true
   connect()
 
+  // P1-11：自动清理，组件卸载时关闭 WebSocket，避免泄漏。
+  onUnmounted(() => close())
+
   /** sendAndAwait 发送并等待服务端响应（resolve 时 clear 超时，避免泄漏）。
    *  @param timeoutMs 等待响应的超时时间，分片上传等耗时操作可传入更大值。
    *
@@ -218,12 +221,13 @@ export function useSFTP(node: ApiNode) {
         pendingResolve = null
         pendingReject = null
         pendingTimer = null
-        // C4：标记丢弃下一个延迟到达的旧响应，防止其错误 resolve 新请求
-        discardNextResponse = true
+        // SF2：超时后标记丢弃下一个响应。使用递增 token 替代布尔 flag，
+        // 避免超时后新请求的响应被误丢弃。
+        const token = ++discardToken
         if (discardTimer) clearTimeout(discardTimer)
-        // 安全兜底：5s 后自动清 flag，避免延迟响应永远不到导致后续请求被误丢
+        // 安全兜底：5s 后自动重置 token，避免延迟响应永远不到导致后续请求被误丢
         discardTimer = setTimeout(() => {
-          discardNextResponse = false
+          if (discardToken === token) discardToken = 0
           discardTimer = null
         }, 5000)
         reject(new Error('SFTP request timeout'))

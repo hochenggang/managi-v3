@@ -184,6 +184,7 @@ func (m *sessionManager) close(id string) {
 		return
 	}
 	delete(m.sessions, id)
+	delete(m.perKeyLocks, id) // P1：清理已删除会话的 per-key 锁
 	m.mu.Unlock()
 
 	ls.mu.Lock()

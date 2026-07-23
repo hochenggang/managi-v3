@@ -6,6 +6,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { i18n } from '@/i18n'
 import type { ApiNode } from '@/protocol/types'
+import { generateNodeId } from '@/protocol/types'
 
 export type TabType = 'welcome' | 'batch' | 'terminal' | 'sftp' | 'settings'
 
@@ -54,25 +55,27 @@ export const useTabsStore = defineStore('tabs', () => {
   }
 
   function openTerminal(node: ApiNode): TabItem {
+    const nodeId = generateNodeId(node)
     const existing = tabs.value.find(
-      (t) => t.type === 'terminal' && (t.props?.node as ApiNode | undefined)?.host === node.host,
+      (t) => t.type === 'terminal' && (t.props?.nodeId as string | undefined) === nodeId,
     )
     if (existing) {
       activeTabId.value = existing.id
       return existing
     }
-    return add({ type: 'terminal', title: `${node.name}`, icon: 'terminal', props: { node } })
+    return add({ type: 'terminal', title: `${node.name}`, icon: 'terminal', props: { node, nodeId } })
   }
 
   function openSftp(node: ApiNode): TabItem {
+    const nodeId = generateNodeId(node)
     const existing = tabs.value.find(
-      (t) => t.type === 'sftp' && (t.props?.node as ApiNode | undefined)?.host === node.host,
+      (t) => t.type === 'sftp' && (t.props?.nodeId as string | undefined) === nodeId,
     )
     if (existing) {
       activeTabId.value = existing.id
       return existing
     }
-    return add({ type: 'sftp', title: `${node.name} ${i18n.global.t('tabs.sftp')}`, icon: 'sftp', props: { node } })
+    return add({ type: 'sftp', title: `${node.name} ${i18n.global.t('tabs.sftp')}`, icon: 'sftp', props: { node, nodeId } })
   }
 
   function openSettings(): TabItem {
@@ -92,6 +95,10 @@ export const useTabsStore = defineStore('tabs', () => {
       const next = tabs.value[Math.max(0, idx - 1)] || tabs.value[idx] || null
       activeTabId.value = next?.id ?? ''
     }
+    // TB2：关闭所有 tab 后自动打开 batch，避免界面空白
+    if (tabs.value.length === 0) {
+      openBatch()
+    }
   }
 
   function closeOthers(id: string): void {
@@ -104,6 +111,8 @@ export const useTabsStore = defineStore('tabs', () => {
   function closeAll(): void {
     tabs.value = []
     activeTabId.value = ''
+    // TB2：关闭所有 tab 后自动打开 batch，避免界面空白
+    openBatch()
   }
 
   return {

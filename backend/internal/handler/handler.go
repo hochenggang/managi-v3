@@ -5,6 +5,8 @@ package handler
 
 import (
 	"bytes"
+	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -45,4 +47,38 @@ func indexHandler(cfg *config.Config) http.HandlerFunc {
 		}
 		http.ServeFile(w, r, cfg.IndexHTMLPath)
 	}
+}
+
+// writeJSONError 返回 JSON 格式的错误响应，保持 API 响应格式一致。
+// 前端 fetchWithRetry 期望 JSON，http.Error() 返回纯文本会导致 resp.json() 异常。
+func writeJSONError(w http.ResponseWriter, message string, code int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
+}
+
+// RequestLogMiddleware 记录 HTTP 请求日志（method、path、状态码、耗时）。
+func RequestLogMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		slog.Info("http",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", sw.status,
+			"latency", time.Since(start).Round(time.Millisecond),
+		)
+	})
+}
+
+// statusWriter 包装 ResponseWriter 以捕获状态码。
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
 }

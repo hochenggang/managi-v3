@@ -53,14 +53,15 @@ func main() {
 	mux := http.NewServeMux()
 	pool := handler.Register(mux, cfg, done)
 
-	// 健康检查端点（供 Tauri sidecar 与 Docker healthcheck 使用）
+	// 健康检查端点（供 Windows 桌面端与 Docker healthcheck 使用）
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	// BasicAuth 中间件包裹全部路由（内部对 /health 放行）
-	finalHandler := basicAuthWrap(cfg, mux, done)
+	// BasicAuth 中间件包裹全部路由（内部对 /health 放行），外层加请求日志
+	loggedMux := handler.RequestLogMiddleware(mux)
+	finalHandler := basicAuthWrap(cfg, loggedMux, done)
 
 	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
 	slog.Info("managi v3 starting", "addr", addr, "basicAuth", cfg.BasicAuthEnabled)

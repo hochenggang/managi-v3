@@ -132,7 +132,7 @@
 // SFTP 文件管理器：基于 useSFTP composable。
 // 修正 v2 缺陷 N3：上传改用分片协议（upload_init/upload_chunk/upload_complete），
 // 替代 v2 裸二进制 ws.send(data)（无分片、无断点续传、无进度）。
-import { ref, computed, nextTick, onBeforeUnmount } from 'vue'
+import { ref, computed, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
 import CirclePercent from '@/components/CirclePercent.vue'
 import { useSFTP } from '@/composables/useSFTP'
@@ -299,8 +299,8 @@ const handleFileUpload = async (event: Event) => {
     await refresh()
   } finally {
     isUploading.value = false
+    input.value = '' // FI1：移入 finally，确保异常时也能重置文件选择器
   }
-  input.value = ''
 }
 
 const downloadSelected = async () => {
@@ -327,7 +327,7 @@ const { confirm } = useConfirm()
 const deleteSelected = async () => {
   if (!selectedFile.value) return
   // 修复 B30：用 Modal 确认对话框替代原生 confirm()
-  if (await confirm(`${t("finder.deleteConfire")}\n${selectedFile.value.filename}`)) {
+  if (await confirm(`${t("finder.deleteConfire")} ${selectedFile.value.filename}`)) {
     const path = getFullPath(selectedFile.value.filename)
     try {
       await del(path)
@@ -359,10 +359,7 @@ const currentPathParts = computed(() => {
 
 // 服务端登录成功后主动推送 list /，无需前端 onMounted 主动请求。
 // 若首屏空白，用户可点击工具栏刷新按钮触发 list(currentPath)。
-
-onBeforeUnmount(() => {
-  close()
-})
+// close() 由 useSFTP 内部 onUnmounted 自动调用，无需手动关闭。
 </script>
 
 <style scoped>

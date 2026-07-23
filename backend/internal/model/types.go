@@ -4,6 +4,8 @@
 package model
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
 	"strconv"
 )
@@ -26,10 +28,13 @@ type Node struct {
 	AuthValue string   `json:"auth_value"`
 }
 
-// ConnectionKey 返回连接池键：[host]:port:username（IPv6 地址自动加方括号）。
-// 注意：不含凭据，与 v2 行为一致。
+// ConnectionKey 返回连接池键：[host]:port:username:auth_type:auth_hash。
+// auth_hash 为凭据的 SHA256 前 8 字符，确保不同凭据的节点不会复用同一连接。
+// IPv6 地址自动加方括号。
 func (n Node) ConnectionKey() string {
-	return net.JoinHostPort(n.Host, strconv.Itoa(n.Port)) + ":" + n.Username
+	h := sha256.Sum256([]byte(n.AuthValue))
+	authHash := hex.EncodeToString(h[:])[:8]
+	return net.JoinHostPort(n.Host, strconv.Itoa(n.Port)) + ":" + n.Username + ":" + string(n.AuthType) + ":" + authHash
 }
 
 // CmdsTestResult 单节点命令执行结果。

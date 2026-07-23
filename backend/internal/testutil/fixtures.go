@@ -13,9 +13,13 @@ func TestConfig() *config.Config {
 		Port:               18001,
 		SSHTimeout:         15,
 		KeepaliveInterval:  30,
+		SSHIdleTimeout:     120,
 		WSReadDeadline:     60,
+		WSPingInterval:     30,
 		ChunkSize:          1 << 20,
 		DownloadChunkSize:  1 << 16,
+		UploadIdleTimeout:  1800,
+		SSHPoolSize:        20,
 		IndexHTMLPath:      "index.html",
 		SessionIdleTimeout: 60,
 	}

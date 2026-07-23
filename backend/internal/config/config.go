@@ -29,6 +29,10 @@ type Config struct {
 	// SFTP
 	ChunkSize         int // 上传分片
 	DownloadChunkSize int // 下载分片
+	UploadIdleTimeout int // 秒，上传分片空闲超时
+
+	// 连接池
+	SSHPoolSize int // 连接池最大连接数
 
 	// BasicAuth
 	BasicAuthEnabled  bool
@@ -48,15 +52,17 @@ type Config struct {
 func Load() *Config {
 	cfg := &Config{
 		Host:               envStr("MANAGI_HOST", "0.0.0.0"),
-		Port:               envInt("MANAGI_PORT", 18001),
-		SSHTimeout:         envInt("MANAGI_SSH_TIMEOUT", 15),
-		KeepaliveInterval:  envInt("MANAGI_KEEPALIVE", 30),
-		SSHIdleTimeout:     envInt("MANAGI_SSH_IDLE_TIMEOUT", 120),
-		WSReadDeadline:     envInt("MANAGI_WS_READ_DEADLINE", 90),
-		WSPingInterval:     envInt("MANAGI_WS_PING_INTERVAL", 30),
-		SessionIdleTimeout: envInt("MANAGI_SESSION_IDLE_TIMEOUT", 60),
-		ChunkSize:          envInt("MANAGI_SFTP_CHUNK_SIZE", 1<<20), // 1MB
-		DownloadChunkSize:  envInt("MANAGI_SFTP_DOWNLOAD_CHUNK", 1<<16),
+		Port:               envIntRange("MANAGI_PORT", 18001, 1, 65535),
+		SSHTimeout:         envIntRange("MANAGI_SSH_TIMEOUT", 15, 1, 300),
+		KeepaliveInterval:  envIntRange("MANAGI_KEEPALIVE", 30, 5, 600),
+		SSHIdleTimeout:     envIntRange("MANAGI_SSH_IDLE_TIMEOUT", 120, 10, 3600),
+		WSReadDeadline:     envIntRange("MANAGI_WS_READ_DEADLINE", 90, 10, 600),
+		WSPingInterval:     envIntRange("MANAGI_WS_PING_INTERVAL", 30, 5, 300),
+		SessionIdleTimeout: envIntRange("MANAGI_SESSION_IDLE_TIMEOUT", 60, 5, 600),
+		ChunkSize:          envIntRange("MANAGI_SFTP_CHUNK_SIZE", 1<<20, 1024, 100<<20),
+		DownloadChunkSize:  envIntRange("MANAGI_SFTP_DOWNLOAD_CHUNK", 1<<16, 1024, 1<<20),
+		UploadIdleTimeout:  envIntRange("MANAGI_SFTP_UPLOAD_TIMEOUT", 1800, 60, 7200),
+		SSHPoolSize:        envIntRange("MANAGI_SSH_POOL_SIZE", 20, 1, 100),
 		BasicAuthEnabled:   envBool("MANAGI_BASICAUTH_ENABLED", false),
 		BasicAuthUser:      envStr("MANAGI_BASICAUTH_USERNAME", "admin"),
 		BasicAuthPassword:  envStr("MANAGI_BASICAUTH_PASSWORD", "admin123"),
@@ -86,6 +92,16 @@ func envInt(key string, def int) int {
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil {
+		return def
+	}
+	return n
+}
+
+// envIntRange 读取环境变量并校验范围，越界则使用默认值。
+// C1：防止用户设置不合理的值导致运行异常。
+func envIntRange(key string, def, min, max int) int {
+	n := envInt(key, def)
+	if n < min || n > max {
 		return def
 	}
 	return n

@@ -9,9 +9,11 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path"
 	"sync"
+	"time"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
@@ -26,6 +28,7 @@ type uploadState struct {
 	totalSize int64  // 期望的最终文件大小，UploadComplete 时校验
 	offset    int64
 	file      *sftp.File // 保持打开的 .part 文件句柄，避免每分片重复 open/close
+	createdAt time.Time  // S3：创建时间，供超时清理
 }
 
 // Client 封装一次 SFTP 会话。
@@ -36,20 +39,38 @@ type Client struct {
 
 	mu      sync.Mutex
 	uploads map[string]*uploadState
+
+	// S3：upload 超时清理，防止客户端发起 upload_init 后不完成导致句柄泄漏
+	cleanerDone      chan struct{}
+	uploadIdleTimeout time.Duration
 }
 
 // New 创建 SFTP 客户端（复用 sshpool 连接）。
-func New(node model.Node, sshc *ssh.Client) (*Client, error) {
+func New(node model.Node, sshc *ssh.Client, opts ...Option) (*Client, error) {
 	sc, err := sftp.NewClient(sshc)
 	if err != nil {
 		return nil, fmt.Errorf("sftp new client: %w", err)
 	}
-	return &Client{
-		node:    node,
-		sshc:    sshc,
-		sc:      sc,
-		uploads: make(map[string]*uploadState),
-	}, nil
+	c := &Client{
+		node:             node,
+		sshc:             sshc,
+		sc:               sc,
+		uploads:          make(map[string]*uploadState),
+		cleanerDone:      make(chan struct{}),
+		uploadIdleTimeout: defaultUploadIdleTimeout,
+	}
+	for _, o := range opts {
+		o(c)
+	}
+	return c, nil
+}
+
+// Option 配置 SFTP Client 的可选参数。
+type Option func(*Client)
+
+// WithUploadIdleTimeout 设置上传空闲超时。
+func WithUploadIdleTimeout(d time.Duration) Option {
+	return func(c *Client) { c.uploadIdleTimeout = d }
 }
 
 // List 列出目录项。
@@ -149,6 +170,7 @@ func (c *Client) UploadInit(remotePath, filename string, totalSize int64, chunkS
 		totalSize: totalSize,
 		offset:    offset,
 		file:      f,
+		createdAt: time.Now(),
 	}
 	c.mu.Unlock()
 
@@ -266,6 +288,13 @@ func (c *Client) DownloadStream(remotePath string, offset int64) (io.ReadCloser,
 
 // Close 关闭 SFTP 客户端（不关底层 ssh.Client，由 sshpool 管）。
 func (c *Client) Close() error {
+	// S3：通知清理 goroutine 退出
+	select {
+	case <-c.cleanerDone:
+		// already closed
+	default:
+		close(c.cleanerDone)
+	}
 	c.mu.Lock()
 	for _, st := range c.uploads {
 		if st.file != nil {
@@ -278,6 +307,39 @@ func (c *Client) Close() error {
 		return c.sc.Close()
 	}
 	return nil
+}
+
+// defaultUploadIdleTimeout upload 会话空闲超时：超过此时长无分片写入的会话将被清理。
+const defaultUploadIdleTimeout = 30 * time.Minute
+
+// StartUploadCleaner 启动后台 goroutine 定期清理超时的 upload 会话。
+// S3：防止客户端发起 upload_init 后不完成导致远程文件句柄泄漏。
+func (c *Client) StartUploadCleaner() {
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-c.cleanerDone:
+				return
+			case <-ticker.C:
+				c.cleanExpiredUploads()
+			}
+		}
+	}()
+}
+
+// cleanExpiredUploads 清理超时的 upload 会话。
+func (c *Client) cleanExpiredUploads() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	for id, st := range c.uploads {
+		if now.Sub(st.createdAt) > c.uploadIdleTimeout {
+			slog.Debug("sftp upload expired, cleaning up", "upload_id", id, "path", st.partPath)
+			c.closeUploadLocked(id)
+		}
+	}
 }
 
 // makeUploadID 生成 upload 会话 ID（基于路径 + 节点 + 随机数的哈希）。

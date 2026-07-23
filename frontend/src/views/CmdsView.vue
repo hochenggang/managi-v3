@@ -55,6 +55,17 @@
         </div>
       </main>
     </Modal>
+
+    <Modal @close="showRenameShortcutModal = false" v-if="showRenameShortcutModal">
+      <main class="modal-content">
+        <h2>{{ t("cmdPanel.renameShortcut") }}</h2>
+        <input class="shortcut-input" v-model="renameLabel" :placeholder="t('cmdPanel.renameShortcut')" autofocus />
+        <div class="buttons">
+          <button class="sucess" @click="confirmRenameShortcut">{{ t("cmdPanel.confirmAddShortcut") }}</button>
+          <button @click="showRenameShortcutModal = false">{{ t("cmdPanel.cancelShortCut") }}</button>
+        </div>
+      </main>
+    </Modal>
   </main>
 </template>
 
@@ -68,7 +79,7 @@ import QuickCommandPanel from "@/components/QuickCommandPanel.vue";
 import { useNodesStore } from '@/stores/nodesStore';
 import { useShortcutsStore } from '@/stores/shortcutsStore';
 import { generateNodeId } from '@/protocol/types';
-import { handleError, handleMsg } from "@/helper";
+import { handleError, handleMsg, copyToClipboard } from "@/helper";
 import { batchSSH } from '@/api';
 import { useConfirm } from '@/composables/useConfirm';
 import type { CmdsTestResult } from '@/protocol/types';
@@ -83,6 +94,9 @@ const command = ref('');
 const executionResults = ref<CmdsTestResult[]>([]);
 const newShortcutLabel = ref('');
 const showAddShortcutModal = ref(false);
+const showRenameShortcutModal = ref(false);
+const renameIndex = ref(0);
+const renameLabel = ref('');
 const isExecuting = ref(false);
 
 const startAddShortcut = () => {
@@ -106,8 +120,16 @@ const confirmAddShortcut = () => {
 const handleRenameShortcut = (index: number) => {
   const item = shortcutsStore.shortcuts[index]
   if (!item) return
-  const name = window.prompt(t('cmdPanel.renameShortcut'), item.label)
-  if (name) shortcutsStore.rename(index, name.trim())
+  renameIndex.value = index
+  renameLabel.value = item.label
+  showRenameShortcutModal.value = true
+}
+
+const confirmRenameShortcut = () => {
+  if (renameLabel.value.trim()) {
+    shortcutsStore.rename(renameIndex.value, renameLabel.value.trim())
+  }
+  showRenameShortcutModal.value = false
 }
 
 const { confirm } = useConfirm()
@@ -154,12 +176,13 @@ const executeCommand = async () => {
   }
 };
 
-const copyCode = (text: string) => {
-  navigator.clipboard.writeText(text).then(() => {
+const copyCode = async (text: string) => {
+  try {
+    await copyToClipboard(text)
     handleMsg(t("cmdPanel.copied"))
-  }).catch(err => {
+  } catch (err) {
     handleError(t("cmdPanel.copyError") + err);
-  });
+  }
 };
 </script>
 

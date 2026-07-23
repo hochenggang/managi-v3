@@ -10,7 +10,7 @@ import { useWebSocket } from './useWebSocket'
 import { loginMessage, inputMessage, resizeMessage } from '@/protocol/terminal'
 import { parseWSMessage, type WSLoginResult, type WSError } from '@/protocol/ws'
 import type { ApiNode } from '@/protocol/types'
-import { handleError } from '@/helper'
+import { handleError, copyToClipboard, readFromClipboard } from '@/helper'
 import { useSettingsStore } from '@/stores/settingsStore'
 
 // 会话 ID 缓存：按 host:port:username 索引，同节点复用同一 sessionId。
@@ -21,7 +21,7 @@ function getSessionId(node: ApiNode): string {
   const key = `${node.host}:${node.port}:${node.username}`
   let id = sessionIds.get(key)
   if (!id) {
-    id = crypto.randomUUID?.() ?? Math.random().toString(36).slice(2) + Date.now().toString(36)
+    id = crypto.randomUUID()
     sessionIds.set(key, id)
   }
   return id
@@ -59,7 +59,9 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
   term.focus()
 
   const sessionId = getSessionId(node)
-  // 修复 B24：重连期间缓冲用户输入，重连成功后 flush
+  // 修复 B24：重连期间缓冲用户输入，重连后 flush
+  // T1：缓冲上限，避免长时间断连导致内存无限增长
+  const MAX_INPUT_BUFFER = 64 * 1024 // 64KB
   let inputBuffer = ''
   const { status, connect, send, close, markFailed, markLoginSuccess } = useWebSocket('/ws', {
     authPayload: loginMessage(node, sessionId, term.cols, term.rows),
@@ -106,6 +108,10 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
   // 修复 B24：用户输入透传，WS 未连接时缓冲，重连后 flush
   term.onData((data) => {
     if (!send(inputMessage(data))) {
+      // T1：超限截断头部，保留最新输入
+      if (inputBuffer.length + data.length > MAX_INPUT_BUFFER) {
+        inputBuffer = inputBuffer.slice(inputBuffer.length + data.length - MAX_INPUT_BUFFER)
+      }
       inputBuffer += data
     }
   })
@@ -138,9 +144,16 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
   container.addEventListener('contextmenu', handleContextMenu)
 
   // 首次连接即发送当前尺寸，避免 v2 的 80×24 默认值导致换行错乱。
+  // T2：用 rAF 节流 resize，避免窗口拖动时高频触发 fit + resize 消息淹没通道
+  let resizeRafPending = false
   const onResize = () => {
-    fitAddon.fit()
-    send(resizeMessage(term.cols, term.rows))
+    if (resizeRafPending) return
+    resizeRafPending = true
+    requestAnimationFrame(() => {
+      resizeRafPending = false
+      fitAddon.fit()
+      send(resizeMessage(term.cols, term.rows))
+    })
   }
 
   // 修复 B28：移除冗余的 window.addEventListener('resize')，
@@ -164,7 +177,7 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
   )
 
   connect()
-  onResize() // 立即同步一次
+  fitAddon.fit() // 立即同步一次尺寸，不走 rAF 节流
 
   onUnmounted(() => {
     stopStatusWatch()
@@ -209,42 +222,4 @@ export function getTerminalTheme(): ITheme {
     brightCyan: get('--color-terminal-brightCyan', '#8FBCBB'),
     brightWhite: get('--color-terminal-brightWhite', '#ECEFF4'),
   }
-}
-
-/** copyToClipboard 复制文本到剪贴板。
- *  修复 B14：非安全上下文（HTTP）下 navigator.clipboard 不可用，降级到 execCommand。
- */
-async function copyToClipboard(text: string): Promise<void> {
-  if (navigator.clipboard && window.isSecureContext) {
-    await navigator.clipboard.writeText(text)
-    return
-  }
-  // 降级：用临时 textarea + execCommand('copy')
-  const ta = document.createElement('textarea')
-  ta.value = text
-  ta.style.position = 'fixed'
-  ta.style.opacity = '0'
-  document.body.appendChild(ta)
-  ta.select()
-  try {
-    document.execCommand('copy')
-  } finally {
-    document.body.removeChild(ta)
-  }
-}
-
-/** readFromClipboard 从剪贴板读取文本。
- *  修复 B14：非安全上下文降级返回空字符串（execCommand 无 paste 等价物，
- *  浏览器安全策略禁止 JS 读取剪贴板，只能提示用户用 Ctrl+V）。
- */
-async function readFromClipboard(): Promise<string> {
-  if (navigator.clipboard && window.isSecureContext) {
-    try {
-      return await navigator.clipboard.readText()
-    } catch {
-      return ''
-    }
-  }
-  // 非安全上下文无法读取剪贴板，返回空（用户可用 Ctrl+V 粘贴）
-  return ''
 }

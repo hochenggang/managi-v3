@@ -91,12 +91,13 @@ func sftpWSHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 		}
 		defer pool.Release(node)
 
-		sc, err := sftp.New(node, sshConn.Client())
+		sc, err := sftp.New(node, sshConn.Client(), sftp.WithUploadIdleTimeout(time.Duration(cfg.UploadIdleTimeout)*time.Second))
 		if err != nil {
 			_ = wc.writeLoginResult(false, err.Error(), false)
 			return
 		}
 		defer func() { _ = sc.Close() }()
+		sc.StartUploadCleaner() // S3：启动 upload 超时清理
 
 		// 登录成功（SFTP 不支持会话恢复，reattached 恒为 false）
 		_ = wc.writeLoginResult(true, "", false)
@@ -308,39 +309,42 @@ func parseChunkFrame(data []byte) (uploadID string, chunkIndex int, offset int64
 	return uploadID, chunkIndex, offset, chunkData, nil
 }
 
-// sftpDownloadHandler GET /api/sftp/download?node=...&path=...
+// sftpDownloadHandler POST /api/sftp/download
 // v3 新增：HTTP Range 下载，支持断点续传。设计见 design-v3.md §6.5。
+// 凭据通过 body 传递（不暴露在 URL 中），path 通过 query string 传递（非敏感）。
 //
 //nolint:unparam // cfg 保留供未来扩展（下载限速/权限校验），并与同包 handler 签名一致
 func sftpDownloadHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// M5：仅允许 GET，其他方法返回 405
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		// 仅允许 POST，凭据通过 body 传递避免 URL 泄露
+		if r.Method != http.MethodPost {
+			writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		nodeStr := r.URL.Query().Get("node")
 		remotePath := r.URL.Query().Get("path")
-		if nodeStr == "" || remotePath == "" {
-			http.Error(w, "missing node or path", http.StatusBadRequest)
+		if remotePath == "" {
+			writeJSONError(w, "missing path", http.StatusBadRequest)
 			return
 		}
-		var node model.Node
-		if err := json.Unmarshal([]byte(nodeStr), &node); err != nil {
-			http.Error(w, "invalid node json: "+err.Error(), http.StatusBadRequest)
+		var req struct {
+			Node model.Node `json:"node"`
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		sshConn, err := pool.Get(node)
+		sshConn, err := pool.Get(req.Node)
 		if err != nil {
-			http.Error(w, "ssh connect: "+err.Error(), http.StatusBadGateway)
+			writeJSONError(w, "ssh connect: "+err.Error(), http.StatusBadGateway)
 			return
 		}
-		defer pool.Release(node)
+		defer pool.Release(req.Node)
 
-		sc, err := sftp.New(node, sshConn.Client())
+		sc, err := sftp.New(req.Node, sshConn.Client(), sftp.WithUploadIdleTimeout(time.Duration(cfg.UploadIdleTimeout)*time.Second))
 		if err != nil {
-			http.Error(w, "sftp init: "+err.Error(), http.StatusBadGateway)
+			writeJSONError(w, "sftp init: "+err.Error(), http.StatusBadGateway)
 			return
 		}
 		defer func() { _ = sc.Close() }()
@@ -348,7 +352,7 @@ func sftpDownloadHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFun
 		offset := parseRangeOffset(r.Header.Get("Range"))
 		reader, total, err := sc.DownloadStream(remotePath, offset)
 		if err != nil {
-			http.Error(w, "sftp open: "+err.Error(), http.StatusBadGateway)
+			writeJSONError(w, "sftp open: "+err.Error(), http.StatusBadGateway)
 			return
 		}
 		defer func() { _ = reader.Close() }()

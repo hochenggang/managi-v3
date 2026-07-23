@@ -40,6 +40,15 @@ export const useNodesStore = defineStore('nodes', () => {
       save()
     }, 300)
   }
+  // N2：页面卸载前强制同步保存，避免 debounce 未刷出的数据丢失
+  function flushSave(): void {
+    if (saveTimer) {
+      clearTimeout(saveTimer)
+      saveTimer = null
+      save()
+    }
+  }
+  window.addEventListener('beforeunload', flushSave)
   watch([nodes, groups], scheduleSave, { deep: true })
 
   const allNodes = computed(() => Object.values(nodes.value))

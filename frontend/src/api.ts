@@ -54,31 +54,50 @@ async function fetchWithRetry(url: string, body: unknown, timeoutMs = 30000): Pr
 
 export async function testSSH(node: ApiNode, cmds: string[]): Promise<CmdsTestResult> {
   const resp = await fetchWithRetry(`${getApiUrl()}${API_URI.sshTest}`, { node, cmds })
-  if (!resp.ok) throw new Error(`Error code ${resp.status}`)
+  if (!resp.ok) {
+    const msg = await safeJSONError(resp)
+    throw new Error(msg)
+  }
   return resp.json()
 }
 
 export async function batchSSH(nodes: ApiNode[], cmds: string[]): Promise<CmdsTestResult[]> {
   const req: BatchCmdRequest = { nodes, cmds }
   const resp = await fetchWithRetry(`${getApiUrl()}${API_URI.sshBatch}`, req)
-  if (!resp.ok) throw new Error(`Error code ${resp.status}`)
+  if (!resp.ok) {
+    const msg = await safeJSONError(resp)
+    throw new Error(msg)
+  }
   return resp.json()
 }
 
+/** safeJSONError 尝试从错误响应中提取 JSON error 字段，失败则回退到状态码。 */
+async function safeJSONError(resp: Response): Promise<string> {
+  try {
+    const data = await resp.json()
+    if (data.error) return data.error
+  } catch { /* ignore */ }
+  return `Error code ${resp.status}`
+}
+
 // v3 新增：HTTP Range 下载（断点续传）。设计见 design-v3.md §6.5。
+// 凭据通过 POST body 传递（不暴露在 URL 中），path 通过 query string 传递。
 export async function downloadWithRange(
   node: ApiNode,
   path: string,
   offset = 0,
 ): Promise<{ total: number; stream: ReadableStream<Uint8Array> }> {
-  const params = new URLSearchParams({ node: JSON.stringify(node), path })
+  const params = new URLSearchParams({ path })
   // M6：加 AbortController 超时，防止连接挂起时无限等待（仅控制首字节响应）
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 60000)
   try {
     const resp = await fetch(`${getApiUrl()}${API_URI.sftpDownload}?${params}`, {
-      headers: { Range: `bytes=${offset}-` },
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Range: `bytes=${offset}-` },
+      body: JSON.stringify({ node }),
       signal: controller.signal,
+      credentials: 'include',
     })
     if (!resp.ok && resp.status !== 206) throw new Error(`Error code ${resp.status}`)
     // T4：body 可能为 null（服务端错误/网络中断），显式检查避免后续 getReader() 崩溃
@@ -103,6 +122,12 @@ export function getCachedNodes(): ApiNode[] {
   if (!raw) return []
   try {
     const arr = JSON.parse(raw) as (ApiNode | OldApiNode)[]
+    // N1：检测到凭据明文存储时提示安全风险
+    const hasCreds = arr.some((n) => ('auth_value' in n && n.auth_value))
+    if (hasCreds && !sessionStorage.getItem('managi-cred-warned')) {
+      console.warn('[managi] 节点凭据以明文存储在 localStorage 中。如在共享环境使用，建议启用 BasicAuth 或使用 Windows 桌面端。')
+      sessionStorage.setItem('managi-cred-warned', '1')
+    }
     return arr.map(oldApiNodeConvert)
   } catch {
     return []

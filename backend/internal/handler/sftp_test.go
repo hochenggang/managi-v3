@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"net/http"
@@ -15,20 +16,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"managi/internal/model"
 	"managi/internal/sshpool"
 	"managi/internal/testutil"
 )
 
 // ===== sftpDownloadHandler 测试 =====
-
-// nodeQuery 编码 node 为 URL query 参数值。
-func nodeQuery(t *testing.T, node model.Node) string {
-	t.Helper()
-	b, err := json.Marshal(node)
-	require.NoError(t, err)
-	return url.QueryEscape(string(b))
-}
 
 // TestSftpDownloadHandler_Full 验证完整下载：200 + 完整内容 + Accept-Ranges。
 func TestSftpDownloadHandler_Full(t *testing.T) {
@@ -42,8 +34,10 @@ func TestSftpDownloadHandler_Full(t *testing.T) {
 	defer pool.CloseAll()
 	h := sftpDownloadHandler(pool, testutil.TestConfig())
 
-	target := "/api/sftp/download?node=" + nodeQuery(t, testutil.TestNode(srv.Host(), srv.Port())) + "&path=/test.txt"
-	req := httptest.NewRequest("GET", target, nil)
+	node := testutil.TestNode(srv.Host(), srv.Port())
+	body, _ := json.Marshal(map[string]any{"node": node})
+	req := httptest.NewRequest("POST", "/api/sftp/download?path=/test.txt", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -64,8 +58,10 @@ func TestSftpDownloadHandler_Range(t *testing.T) {
 	defer pool.CloseAll()
 	h := sftpDownloadHandler(pool, testutil.TestConfig())
 
-	target := "/api/sftp/download?node=" + nodeQuery(t, testutil.TestNode(srv.Host(), srv.Port())) + "&path=/test.txt"
-	req := httptest.NewRequest("GET", target, nil)
+	node := testutil.TestNode(srv.Host(), srv.Port())
+	body, _ := json.Marshal(map[string]any{"node": node})
+	req := httptest.NewRequest("POST", "/api/sftp/download?path=/test.txt", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Range", "bytes=10-")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -83,16 +79,19 @@ func TestSftpDownloadHandler_MissingParams(t *testing.T) {
 	pool := sshpool.New(testutil.TestConfig())
 	defer pool.CloseAll()
 	h := sftpDownloadHandler(pool, testutil.TestConfig())
-	node := testutil.TestNode(srv.Host(), srv.Port())
 
 	// 缺 path
-	req := httptest.NewRequest("GET", "/api/sftp/download?node="+nodeQuery(t, node), nil)
+	node := testutil.TestNode(srv.Host(), srv.Port())
+	body, _ := json.Marshal(map[string]any{"node": node})
+	req := httptest.NewRequest("POST", "/api/sftp/download", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 
-	// 缺 node
-	req = httptest.NewRequest("GET", "/api/sftp/download?path=/test.txt", nil)
+	// 缺 node body
+	req = httptest.NewRequest("POST", "/api/sftp/download?path=/test.txt", nil)
+	req.Header.Set("Content-Type", "application/json")
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -107,7 +106,8 @@ func TestSftpDownloadHandler_InvalidNodeJSON(t *testing.T) {
 	defer pool.CloseAll()
 	h := sftpDownloadHandler(pool, testutil.TestConfig())
 
-	req := httptest.NewRequest("GET", "/api/sftp/download?node=notjson&path=/test.txt", nil)
+	req := httptest.NewRequest("POST", "/api/sftp/download?path=/test.txt", bytes.NewReader([]byte("not json")))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -122,8 +122,10 @@ func TestSftpDownloadHandler_AuthFailure(t *testing.T) {
 	defer pool.CloseAll()
 	h := sftpDownloadHandler(pool, testutil.TestConfig())
 
-	target := "/api/sftp/download?node=" + nodeQuery(t, testutil.BadPasswordNode(srv.Host(), srv.Port())) + "&path=/test.txt"
-	req := httptest.NewRequest("GET", target, nil)
+	node := testutil.BadPasswordNode(srv.Host(), srv.Port())
+	body, _ := json.Marshal(map[string]any{"node": node})
+	req := httptest.NewRequest("POST", "/api/sftp/download?path=/test.txt", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusBadGateway, rec.Code)

@@ -29,10 +29,16 @@ type Connection struct {
 	lastUsed time.Time
 	client   *ssh.Client
 	done     chan struct{} // M2：close 时通知 keepalive goroutine 退出，避免短暂泄漏
+	closeOnce sync.Once    // P3：保护 done 仅关闭一次，防止 keepalive 与 cleanIdle/evict 并发 close panic
 }
 
 // Client 返回底层 SSH 客户端（供 sftp/terminal 复用）。
 func (c *Connection) Client() *ssh.Client { return c.client }
+
+// closeDone 安全关闭 done channel（幂等，多次调用不会 panic）。
+func (c *Connection) closeDone() {
+	c.closeOnce.Do(func() { close(c.done) })
+}
 
 // hostKeyEntry TOFU 主机密钥记录条目。
 // H5：lastSeen 用于 cleanIdle 清理长期未使用的主机密钥，防止 map 无限增长。
@@ -72,8 +78,8 @@ func New(cfg *config.Config) *Pool {
 		conns:       make(map[string]*Connection),
 		perKeyLocks: make(map[string]*sync.Mutex),
 		cfg:         cfg,
-		maxSize:     20,
-		hardCap:     40, // 修复 B3：硬上限为 maxSize 2 倍，防止全部占用时无限增长
+		maxSize:     cfg.SSHPoolSize,
+		hardCap:     cfg.SSHPoolSize * 2, // 硬上限为 maxSize 2 倍，防止全部占用时无限增长
 		idleTimeout: idleTimeout,
 		hostKeys:    make(map[string]hostKeyEntry),
 	}
@@ -122,8 +128,9 @@ func (p *Pool) Get(node model.Node) (*Connection, error) {
 				if cStill.client != nil {
 					_ = cStill.client.Close()
 				}
-				close(cStill.done) // M2：通知 keepalive goroutine 退出
+				cStill.closeDone() // M2：通知 keepalive goroutine 退出
 				delete(p.conns, key)
+				delete(p.perKeyLocks, key) // P1：清理已删除连接的 per-key 锁
 			}
 			p.mu.Unlock()
 		}
@@ -188,8 +195,9 @@ func (p *Pool) CloseAll() {
 		if c.client != nil {
 			_ = c.client.Close()
 		}
-		close(c.done) // M2：通知 keepalive goroutine 退出
+		c.closeDone() // M2：通知 keepalive goroutine 退出
 		delete(p.conns, k)
+		delete(p.perKeyLocks, k) // P1：清理 per-key 锁
 	}
 	for k := range p.hostKeys {
 		delete(p.hostKeys, k)
@@ -334,8 +342,9 @@ func (p *Pool) keepalive(key string, client *ssh.Client, done <-chan struct{}) {
 			p.mu.Lock()
 			if c, ok := p.conns[key]; ok && c.client == client && c.refs == 0 {
 				_ = c.client.Close()
-				close(c.done) // 通知自身退出（安全：仅当连接仍在 map 中时执行）
+				c.closeDone() // 通知自身退出（安全：仅当连接仍在 map 中时执行）
 				delete(p.conns, key)
+				delete(p.perKeyLocks, key) // P1：清理 per-key 锁
 				slog.Debug("ssh pool keepalive detected dead conn, removed", "key", key)
 			}
 			p.mu.Unlock()
@@ -382,8 +391,9 @@ func (p *Pool) cleanIdle() {
 			if c.client != nil {
 				_ = c.client.Close()
 			}
-			close(c.done) // M2：通知 keepalive 退出
+			c.closeDone() // M2：通知 keepalive 退出
 			delete(p.conns, k)
+			delete(p.perKeyLocks, k) // P1：清理 per-key 锁
 		}
 	}
 	// H5：清理长期未使用的主机密钥条目，防止 map 无限增长。
@@ -411,8 +421,9 @@ func (p *Pool) evictOldestLocked() {
 			if c.client != nil {
 				_ = c.client.Close()
 			}
-			close(c.done) // M2：通知 keepalive 退出
+			c.closeDone() // M2：通知 keepalive 退出
 			delete(p.conns, oldestKey)
+			delete(p.perKeyLocks, oldestKey) // P1：清理 per-key 锁
 		}
 	}
 }

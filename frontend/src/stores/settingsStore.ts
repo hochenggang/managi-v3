@@ -31,6 +31,9 @@ function loadSettings(): Settings {
     if (!isValidTheme(merged.theme)) {
       merged.theme = defaults.theme
     }
+    if (typeof merged.terminalFontSize !== 'number' || merged.terminalFontSize < 8 || merged.terminalFontSize > 32) {
+      merged.terminalFontSize = defaults.terminalFontSize
+    }
     return merged
   } catch {
     return { ...defaults }

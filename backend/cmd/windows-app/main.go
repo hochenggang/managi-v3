@@ -22,6 +22,7 @@ import (
 
 	"managi/internal/config"
 	"managi/internal/handler"
+	"managi/internal/sshpool"
 )
 
 const (
@@ -36,6 +37,7 @@ var indexHTML []byte
 var iconICO []byte
 
 var srv *http.Server
+var pool *sshpool.Pool // W2：保存 pool 引用供 onExit 时 CloseAll
 // done 用于通知后台 goroutine 退出（修复 B10）
 var done = make(chan struct{})
 
@@ -88,14 +90,15 @@ func runServer() {
 	cfg.IndexHTML = indexHTML
 
 	mux := http.NewServeMux()
-	handler.Register(mux, cfg, done)
+	pool = handler.Register(mux, cfg, done)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	// H9：与服务器端入口一致，应用 BasicAuth 中间件（cfg.BasicAuthEnabled=false 时透传）
-	finalHandler := handler.BasicAuthMiddleware(cfg, done)(mux)
+	// H9：与服务器端入口一致，应用请求日志 + BasicAuth 中间件（cfg.BasicAuthEnabled=false 时透传）
+	loggedMux := handler.RequestLogMiddleware(mux)
+	finalHandler := handler.BasicAuthMiddleware(cfg, done)(loggedMux)
 
 	srv = &http.Server{
 		// 修复 B20：用 strconv.Itoa 替代自实现的 itoa，去除冗余代码
@@ -125,6 +128,10 @@ func onExit() {
 		if err := srv.Shutdown(ctx); err != nil {
 			slog.Error("server shutdown failed", "err", err)
 		}
+	}
+	// W2：优雅关闭 SSH 连接池
+	if pool != nil {
+		pool.CloseAll()
 	}
 }
 

@@ -1,7 +1,4 @@
 node_modules
-# Rust / Tauri
-target/
-binaries/
 # Go
 backend/bin/
 coverage.out
