@@ -57,7 +57,9 @@ export function useWebSocket(path: string, opts: WSOptions = {}) {
       startHeartbeat()
     }
   }
-  document.addEventListener('visibilitychange', handleVisibilityChange)
+  // 优化：共享单个 document visibilitychange 监听器，避免 N 个 WS 连接注册 N 个监听器
+  visibilitySubscribers.add(handleVisibilityChange)
+  ensureVisibilityListener()
 
   function connect(): void {
     manualClose = false
@@ -95,9 +97,11 @@ export function useWebSocket(path: string, opts: WSOptions = {}) {
       if (manualClose) return // 状态已由 close()/markFailed() 设置
       if (reconnectAttempts < (opts.maxReconnect ?? 3)) {
         status.value = 'reconnecting'
-        const delay = Math.min(1000 * 2 ** reconnectAttempts, 16000)
+        // 修复 B21：指数退避 + 随机 jitter，避免多客户端同时重连导致服务端惊群
+        const base = Math.min(1000 * 2 ** reconnectAttempts, 16000)
+        const jitter = Math.random() * 500 // 0~500ms 随机抖动
         reconnectAttempts++
-        reconnectTimer = setTimeout(doConnect, delay)
+        reconnectTimer = setTimeout(doConnect, base + jitter)
       } else {
         // 修复 T3：重连耗尽时通知调用方做可视化提示，避免用户体感「卡住」
         status.value = hasLoginSucceeded ? 'reconnect_failed' : 'first_failed'
@@ -108,6 +112,11 @@ export function useWebSocket(path: string, opts: WSOptions = {}) {
 
     ws.onerror = () => {
       stopHeartbeat()
+      // 修复 B25：onerror 时更新状态，避免 UI 卡在 connecting/connected
+      // onclose 会随后设置最终状态（reconnecting/reconnect_failed）
+      if (!manualClose && status.value === 'connected') {
+        status.value = hasLoginSucceeded ? 'reconnecting' : 'connecting'
+      }
     }
   }
 
@@ -175,7 +184,8 @@ export function useWebSocket(path: string, opts: WSOptions = {}) {
       clearTimeout(reconnectTimer)
       reconnectTimer = null
     }
-    document.removeEventListener('visibilitychange', handleVisibilityChange)
+    // 优化：从共享监听器订阅中移除，而非直接 removeEventListener
+    visibilitySubscribers.delete(handleVisibilityChange)
     if (ws) {
       ws.onclose = null
       ws.onerror = null
@@ -198,4 +208,16 @@ export function useWebSocket(path: string, opts: WSOptions = {}) {
  */
 function getWsHost(): string {
   return getApiBase().replace(/^https?:\/\//, '')
+}
+
+// 优化：共享单个 document visibilitychange 监听器。
+// 每个 useWebSocket 实例将自身 handler 加入 Set，由单个 document 监听器统一分发。
+const visibilitySubscribers = new Set<() => void>()
+let visibilityListenerInstalled = false
+function ensureVisibilityListener(): void {
+  if (visibilityListenerInstalled) return
+  visibilityListenerInstalled = true
+  document.addEventListener('visibilitychange', () => {
+    visibilitySubscribers.forEach((fn) => fn())
+  })
 }

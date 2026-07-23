@@ -1,8 +1,10 @@
 <template>
   <div class="file-manager" :class="{ progress: isUploading || isDownloading }">
       <div class="toolbar">
-        <div class="path-navigator">
-          <span v-for="(part, index) in currentPathParts" :key="index" @click="navigateTo(index)"
+        <div class="path-navigator" @click="enterPathEditMode">
+          <input v-if="pathEditing" ref="pathInputEl" v-model="pathInputValue" class="path-input" type="text"
+            @keyup.enter="commitPath" @keyup.esc="cancelPathEdit" @blur="cancelPathEdit" @click.stop />
+          <span v-for="(part, index) in currentPathParts" v-else :key="index" @click.stop="navigateTo(index)"
             class="path-part small-button">
             {{ part }}
           </span>
@@ -96,7 +98,8 @@
           {{ selectedFile ? `${t("finder.current")}${selectedFile.is_dir ? t("finder.dir") : t("finder.file")} ${getFullPath(selectedFile.filename)}` : "" }}
         </div>
         <div class="selected-info">
-          {{ props.node.name }}
+          <span>{{ props.node.name }}</span>
+          <span v-if="statusText" :class="['sftp-status', statusClass]">{{ statusText }}</span>
         </div>
       </div>
 
@@ -129,20 +132,22 @@
 // SFTP 文件管理器：基于 useSFTP composable。
 // 修正 v2 缺陷 N3：上传改用分片协议（upload_init/upload_chunk/upload_complete），
 // 替代 v2 裸二进制 ws.send(data)（无分片、无断点续传、无进度）。
-import { ref, computed, onBeforeUnmount } from 'vue'
+import { ref, computed, nextTick, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import CirclePercent from '@/components/CirclePercent.vue'
 import { useSFTP } from '@/composables/useSFTP'
+import { useConfirm } from '@/composables/useConfirm'
 import { handleError, handleMsg } from '@/helper'
 import type { ApiNode } from '@/protocol/types'
 import type { SFTPFile } from '@/protocol/sftp'
+import type { ConnectionStatus } from '@/composables/useWebSocket'
 
 const props = defineProps<{ node: ApiNode }>()
 const { t } = useI18n()
 
 const {
   currentPath, files, loading, uploadProgress, downloadProgress,
-  list, upload, download, downloadViaHTTP, mkdir, del, close,
+  status, list, upload, download, downloadViaHTTP, mkdir, del, close,
 } = useSFTP(props.node)
 
 const selectedFile = ref<SFTPFile | null>(null)
@@ -152,26 +157,88 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const isUploading = ref(false)
 const isDownloading = ref(false)
 
+// 路径编辑模式：点击 path-navigator 缝隙时切换为 input，回车提交、Esc/blur 取消
+const pathEditing = ref(false)
+const pathInputValue = ref('')
+const pathInputEl = ref<HTMLInputElement | null>(null)
+
+const enterPathEditMode = (): void => {
+  pathInputValue.value = normalizePath(currentPath.value)
+  pathEditing.value = true
+  nextTick(() => {
+    pathInputEl.value?.focus()
+    pathInputEl.value?.select()
+  })
+}
+
+const commitPath = (): void => {
+  const target = normalizePath(pathInputValue.value)
+  pathEditing.value = false
+  // 路径未变化时无需请求
+  if (target === normalizePath(currentPath.value)) return
+  list(target).catch((e) => handleError(String(e)))
+}
+
+const cancelPathEdit = (): void => {
+  pathEditing.value = false
+}
+
+// 修复 B23：SFTP 连接状态 UI。原 Finder 仅在 status bar 显示节点名，
+// 连接断开/重连/登录失败时用户无感知。补充状态文本与颜色提示。
+const statusText = computed(() => {
+  const map: Record<ConnectionStatus, string> = {
+    idle: '',
+    connecting: t('finder.connecting'),
+    connected: t('finder.connected'),
+    first_failed: t('finder.error'),
+    reconnecting: t('finder.reconnecting'),
+    reconnect_failed: t('finder.error'),
+    disconnected: t('finder.disconnected'),
+  }
+  return map[status.value]
+})
+const statusClass = computed(() => {
+  const map: Record<ConnectionStatus, string> = {
+    idle: '',
+    connecting: 'connecting',
+    connected: 'connected',
+    first_failed: 'failed',
+    reconnecting: 'connecting',
+    reconnect_failed: 'failed',
+    disconnected: 'disconnected',
+  }
+  return map[status.value]
+})
+
+// 修复 B17：路径规范化。折叠多个连续斜杠、去除尾部斜杠（根 '/' 除外）。
+// navigateTo 原用 join('/') 会产生 '//foo//bar/' 双斜杠；navigateUp 对带尾斜杠的路径会错算层级。
+function normalizePath(p: string): string {
+  const collapsed = p.replace(/\/+/g, '/')
+  return collapsed.length > 1 && collapsed.endsWith('/') ? collapsed.slice(0, -1) : collapsed
+}
+
 const getFullPath = (filename: string): string => {
-  return currentPath.value === '/' ? `/${filename}` : `${currentPath.value}/${filename}`
+  return normalizePath(`${currentPath.value}/${filename}`)
 }
 
 const refresh = async () => {
   try {
-    await list(currentPath.value)
+    await list(normalizePath(currentPath.value))
   } catch (e) {
     handleError(String(e))
   }
 }
 
 const navigateUp = () => {
-  if (currentPath.value === '/') return
-  const newPath = currentPath.value.split('/').slice(0, -1).join('/') || '/'
-  list(newPath).catch((e) => handleError(String(e)))
+  const normalized = normalizePath(currentPath.value)
+  if (normalized === '/') return
+  const parts = normalized.split('/').filter((p) => p !== '')
+  parts.pop()
+  list('/' + parts.join('/')).catch((e) => handleError(String(e)))
 }
 
 const navigateTo = (index: number) => {
-  const newPath = currentPathParts.value.slice(0, index + 1).join('/')
+  const newPath = normalizePath(currentPathParts.value.slice(0, index + 1).join('/'))
   list(newPath).catch((e) => handleError(String(e)))
 }
 
@@ -255,9 +322,12 @@ const downloadSelected = async () => {
   }
 }
 
+const { confirm } = useConfirm()
+
 const deleteSelected = async () => {
   if (!selectedFile.value) return
-  if (confirm(`${t("finder.deleteConfire")}\n${selectedFile.value.filename}`)) {
+  // 修复 B30：用 Modal 确认对话框替代原生 confirm()
+  if (await confirm(`${t("finder.deleteConfire")}\n${selectedFile.value.filename}`)) {
     const path = getFullPath(selectedFile.value.filename)
     try {
       await del(path)
@@ -345,6 +415,17 @@ onBeforeUnmount(() => {
 
 .path-part:hover {
   background-color: var(--color-hover-bg);
+}
+
+.path-input {
+  width: 100%;
+  height: 100%;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--color-font-1);
+  font-size: 0.85rem;
+  padding: 0 4px;
 }
 
 .actions {
@@ -479,6 +560,23 @@ onBeforeUnmount(() => {
   border-top: 1px solid var(--color-border);
   flex-shrink: 0;
 }
+
+.selected-info {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* 修复 B23：SFTP 连接状态指示器 */
+.sftp-status {
+  padding: 0 0.35rem;
+  border-radius: 0;
+  font-size: 0.7rem;
+}
+.sftp-status.connecting { color: var(--color-yellow); }
+.sftp-status.connected { color: var(--color-green); }
+.sftp-status.failed { color: var(--color-red); }
+.sftp-status.disconnected { color: var(--color-font-3); }
 
 .dialog-overlay {
   position: fixed;

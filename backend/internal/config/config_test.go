@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -32,11 +33,15 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.False(t, cfg.BasicAuthEnabled)
 	assert.Equal(t, "admin", cfg.BasicAuthUser)
 	assert.Equal(t, "admin123", cfg.BasicAuthPassword)
-	assert.Equal(t, "index.html", cfg.IndexHTMLPath)
+	// 修复 B36：IndexHTMLPath 现在在 Load 中转为绝对路径
+	assert.True(t, filepath.IsAbs(cfg.IndexHTMLPath), "IndexHTMLPath should be absolute")
+	assert.True(t, filepath.Base(cfg.IndexHTMLPath) == "index.html", "IndexHTMLPath base should be index.html")
 }
 
 // TestLoad_EnvOverride 验证环境变量覆盖默认值。
 func TestLoad_EnvOverride(t *testing.T) {
+	// 使用跨平台绝对路径，避免 Windows 上 /var/www 被视为相对路径
+	absPath := filepath.Join(t.TempDir(), "index.html")
 	t.Setenv("MANAGI_HOST", "192.168.1.1")
 	t.Setenv("MANAGI_PORT", "8080")
 	t.Setenv("MANAGI_SSH_TIMEOUT", "30")
@@ -49,7 +54,7 @@ func TestLoad_EnvOverride(t *testing.T) {
 	t.Setenv("MANAGI_BASICAUTH_ENABLED", "true")
 	t.Setenv("MANAGI_BASICAUTH_USERNAME", "ops")
 	t.Setenv("MANAGI_BASICAUTH_PASSWORD", "secret")
-	t.Setenv("MANAGI_INDEX_HTML", "/var/www/index.html")
+	t.Setenv("MANAGI_INDEX_HTML", absPath)
 
 	cfg := Load()
 	assert.Equal(t, "192.168.1.1", cfg.Host)
@@ -64,7 +69,8 @@ func TestLoad_EnvOverride(t *testing.T) {
 	assert.True(t, cfg.BasicAuthEnabled)
 	assert.Equal(t, "ops", cfg.BasicAuthUser)
 	assert.Equal(t, "secret", cfg.BasicAuthPassword)
-	assert.Equal(t, "/var/www/index.html", cfg.IndexHTMLPath)
+	// 已是绝对路径，Load 不会修改
+	assert.Equal(t, absPath, cfg.IndexHTMLPath)
 }
 
 // TestEnvInt_Invalid 验证非数字环境变量回退默认值。
@@ -111,4 +117,12 @@ func TestEnvStr_EmptyString(t *testing.T) {
 	t.Setenv("MANAGI_HOST", "")
 	cfg := Load()
 	assert.Equal(t, "0.0.0.0", cfg.Host)
+}
+
+// TestLoad_RelativePathConvertedToAbsolute 验证相对 IndexHTMLPath 被转为绝对路径（B36 修复）。
+func TestLoad_RelativePathConvertedToAbsolute(t *testing.T) {
+	t.Setenv("MANAGI_INDEX_HTML", "relative/path/index.html")
+	cfg := Load()
+	assert.True(t, filepath.IsAbs(cfg.IndexHTMLPath), "relative path should be converted to absolute")
+	assert.Equal(t, "index.html", filepath.Base(cfg.IndexHTMLPath))
 }

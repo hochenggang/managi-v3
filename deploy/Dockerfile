@@ -19,7 +19,8 @@ COPY backend/ ./
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /managi ./cmd/managi
 
 # ===== 阶段3: 运行 =====
-FROM alpine:3.19
+# 修复 B37：Alpine 3.19 已于 2025-11 EOL，升级到 3.21（持续维护至 2027-11）
+FROM alpine:3.21
 RUN apk add --no-cache ca-certificates tzdata wget
 COPY --from=backend /managi /app/managi
 COPY --from=frontend /fe/dist/index.html /app/index.html

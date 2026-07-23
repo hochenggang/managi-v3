@@ -116,8 +116,9 @@ func (w *wsConn) writeError(message string) error {
 	return w.writeEnvelope(msgTypeError, wsErrorData{Message: message})
 }
 
-func (w *wsConn) writeLoginResult(success bool, message string) error {
-	return w.writeEnvelope(msgTypeLogin, wsLoginResult{Success: success, Message: message})
+// writeLoginResult 发送登录结果。reattached=true 表示复用了已存在的终端会话。
+func (w *wsConn) writeLoginResult(success bool, message string, reattached bool) error {
+	return w.writeEnvelope(msgTypeLogin, wsLoginResult{Success: success, Message: message, Reattached: reattached})
 }
 
 func (w *wsConn) writeMsg(data string) error {

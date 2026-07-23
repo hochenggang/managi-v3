@@ -5,6 +5,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strconv"
 )
 
@@ -45,7 +46,7 @@ type Config struct {
 // MANAGI_KEEPALIVE / MANAGI_BASICAUTH_ENABLED / MANAGI_BASICAUTH_USERNAME /
 // MANAGI_BASICAUTH_PASSWORD。
 func Load() *Config {
-	return &Config{
+	cfg := &Config{
 		Host:               envStr("MANAGI_HOST", "0.0.0.0"),
 		Port:               envInt("MANAGI_PORT", 18001),
 		SSHTimeout:         envInt("MANAGI_SSH_TIMEOUT", 15),
@@ -61,6 +62,14 @@ func Load() *Config {
 		BasicAuthPassword:  envStr("MANAGI_BASICAUTH_PASSWORD", "admin123"),
 		IndexHTMLPath:      envStr("MANAGI_INDEX_HTML", "index.html"),
 	}
+	// 修复 A19/B36：启动时将相对 IndexHTMLPath 转为绝对路径，避免 CWD 不确定时 404。
+	// 从 handler.Register 移到此处，保持 config 为唯一的配置归一化入口。
+	if cfg.IndexHTMLPath != "" && !filepath.IsAbs(cfg.IndexHTMLPath) {
+		if abs, err := filepath.Abs(cfg.IndexHTMLPath); err == nil {
+			cfg.IndexHTMLPath = abs
+		}
+	}
+	return cfg
 }
 
 func envStr(key, def string) string {

@@ -2,7 +2,7 @@
 // v3 协议：只渲染 {type:"msg"} 输出；登录失败格式化错误并 close() 抑制重连。
 // 设计见 ../../../design-v3.md §6.1。
 
-import { ref, onUnmounted } from 'vue'
+import { ref, onUnmounted, watch } from 'vue'
 import { Terminal, type ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
@@ -11,6 +11,7 @@ import { loginMessage, inputMessage, resizeMessage } from '@/protocol/terminal'
 import { parseWSMessage, type WSLoginResult, type WSError } from '@/protocol/ws'
 import type { ApiNode } from '@/protocol/types'
 import { handleError } from '@/helper'
+import { useSettingsStore } from '@/stores/settingsStore'
 
 // 会话 ID 缓存：按 host:port:username 索引，同节点复用同一 sessionId。
 // 前端断线重连时携带相同 sessionId，后端即可复用已维护的 shell 会话。
@@ -42,9 +43,12 @@ export function clearAllSessionIds(): void {
 }
 
 export function useTerminal(container: HTMLElement, node: ApiNode) {
+  // 修复 B6/B7：从设置 store 读取终端字体大小与字体族，并在变化时热更新
+  const settings = useSettingsStore()
   const term = new Terminal({
     cursorBlink: true,
-    fontSize: 14,
+    fontSize: settings.settings.terminalFontSize,
+    fontFamily: settings.settings.terminalFontFamily,
     rightClickSelectsWord: false,
     theme: getTerminalTheme(),
   })
@@ -55,6 +59,8 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
   term.focus()
 
   const sessionId = getSessionId(node)
+  // 修复 B24：重连期间缓冲用户输入，重连成功后 flush
+  let inputBuffer = ''
   const { status, connect, send, close, markFailed, markLoginSuccess } = useWebSocket('/ws', {
     authPayload: loginMessage(node, sessionId, term.cols, term.rows),
     maxReconnect: 10, // 后端维持会话，前端应积极重连
@@ -93,34 +99,40 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
           break
       }
     },
-    onBinary: (data) => {
-      term.write(new TextDecoder('utf-8').decode(data))
-    },
+    // 移除 onBinary：v3 协议后端仅发送文本帧（writeEnvelope → TextMessage），
+    // 终端输出统一走 {type:"msg"} 文本帧，二进制处理为死代码。
   })
 
-  // 用户输入透传（封装为 {type:"msg"}），终端尺寸变化发 resize 消息。
-  term.onData((data) => send(inputMessage(data)))
+  // 修复 B24：用户输入透传，WS 未连接时缓冲，重连后 flush
+  term.onData((data) => {
+    if (!send(inputMessage(data))) {
+      inputBuffer += data
+    }
+  })
+
+  // 修复 B24：watch status，重连成功后 flush 缓冲的输入
+  const stopStatusWatch = watch(status, (s) => {
+    if (s === 'connected' && inputBuffer) {
+      send(inputMessage(inputBuffer))
+      inputBuffer = ''
+    }
+  })
 
   // 右键菜单：有选区则复制，无选区则粘贴（屏蔽浏览器默认右键菜单）。
+  // 修复 B14：非安全上下文（HTTP）下 navigator.clipboard 不可用，降级到 execCommand。
   const handleContextMenu = async (ev: MouseEvent) => {
     ev.preventDefault()
     const selection = term.getSelection()
     if (selection) {
-      try {
-        await navigator.clipboard.writeText(selection)
-        term.clearSelection()
-      } catch (e) {
-        handleError('复制失败')
-      }
+      await copyToClipboard(selection)
+      term.clearSelection()
       return
     }
-    try {
-      const text = await navigator.clipboard.readText()
-      if (text) {
-        term.paste(text)
-      }
-    } catch (e) {
-      handleError('粘贴失败，请确认已授予剪贴板权限')
+    const text = await readFromClipboard()
+    if (text) {
+      // 修复 B15：bracketed paste，多行粘贴时用 ESC[200~ ... ESC[201~ 包裹，
+      // 让 shell 识别为粘贴而非手动输入，避免意外执行命令
+      term.paste(`\x1b[200~${text}\x1b[201~`)
     }
   }
   container.addEventListener('contextmenu', handleContextMenu)
@@ -130,21 +142,40 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
     fitAddon.fit()
     send(resizeMessage(term.cols, term.rows))
   }
-  window.addEventListener('resize', onResize)
 
-  // 监听容器尺寸变化，比 window.resize 更可靠，避免面板缩放时行列数不同步。
+  // 修复 B28：移除冗余的 window.addEventListener('resize')，
+  // ResizeObserver 已覆盖容器尺寸变化（含 window resize 导致的变化）。
   const resizeObserver = new ResizeObserver(() => onResize())
   resizeObserver.observe(container)
+
+  // 修复 B6/B7：监听终端字体/主题变化，热更新 xterm 实例并重新 fit
+  const stopSettingsWatch = watch(
+    () => settings.settings,
+    (s) => {
+      term.options.fontSize = s.terminalFontSize
+      term.options.fontFamily = s.terminalFontFamily
+      // 主题变更时重新读取 CSS 变量（applyTheme 会切换 document 上的 class）
+      term.options.theme = getTerminalTheme()
+      // 字体/主题变化影响字符宽高，需重新 fit 同步行列数到后端
+      fitAddon.fit()
+      send(resizeMessage(term.cols, term.rows))
+    },
+    { deep: true },
+  )
 
   connect()
   onResize() // 立即同步一次
 
   onUnmounted(() => {
-    window.removeEventListener('resize', onResize)
+    stopStatusWatch()
+    stopSettingsWatch()
     container.removeEventListener('contextmenu', handleContextMenu)
     resizeObserver.disconnect()
     close()
     term.dispose()
+    // 优化：tab 关闭时清除 sessionId 缓存。
+    // WS 关闭后后端会话将进入 60s 空闲回收，重新打开 tab 应创建新会话而非尝试 reattach 已失效的会话。
+    clearSessionId(node)
   })
 
   return { term, status }
@@ -178,4 +209,42 @@ export function getTerminalTheme(): ITheme {
     brightCyan: get('--color-terminal-brightCyan', '#8FBCBB'),
     brightWhite: get('--color-terminal-brightWhite', '#ECEFF4'),
   }
+}
+
+/** copyToClipboard 复制文本到剪贴板。
+ *  修复 B14：非安全上下文（HTTP）下 navigator.clipboard 不可用，降级到 execCommand。
+ */
+async function copyToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+  // 降级：用临时 textarea + execCommand('copy')
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.opacity = '0'
+  document.body.appendChild(ta)
+  ta.select()
+  try {
+    document.execCommand('copy')
+  } finally {
+    document.body.removeChild(ta)
+  }
+}
+
+/** readFromClipboard 从剪贴板读取文本。
+ *  修复 B14：非安全上下文降级返回空字符串（execCommand 无 paste 等价物，
+ *  浏览器安全策略禁止 JS 读取剪贴板，只能提示用户用 Ctrl+V）。
+ */
+async function readFromClipboard(): Promise<string> {
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      return await navigator.clipboard.readText()
+    } catch {
+      return ''
+    }
+  }
+  // 非安全上下文无法读取剪贴板，返回空（用户可用 Ctrl+V 粘贴）
+  return ''
 }

@@ -22,10 +22,12 @@ import { useTerminal, getTerminalTheme } from '@/composables/useTerminal'
 import type { ConnectionStatus } from '@/composables/useWebSocket'
 import { useI18n } from 'vue-i18n'
 import type { ApiNode } from '@/protocol/types'
+import { useSettingsStore } from '@/stores/settingsStore'
 
 const props = defineProps<{ node: ApiNode }>()
 
 const { t } = useI18n()
+const settings = useSettingsStore()
 const terminalContainer = ref<HTMLElement | null>(null)
 // 有节点时初始即为 connecting，确保首帧渲染就显示"正在连接…"而非"已连接"
 const status = ref<ConnectionStatus>(props.node ? 'connecting' : 'idle')
@@ -65,11 +67,23 @@ onMounted(() => {
   if (!props.node) {
     standaloneTerm = new Terminal({
       cursorBlink: true,
-      fontSize: 14,
+      fontSize: settings.settings.terminalFontSize,
+      fontFamily: settings.settings.terminalFontFamily,
       theme: getTerminalTheme(),
     })
     standaloneTerm.open(terminalContainer.value)
     standaloneTerm.writeln(generateGreenText(t('xtermPanel.hello')))
+    // 修复 B7：空状态终端也需响应主题变化
+    cleanup = watch(
+      () => settings.settings,
+      () => {
+        if (!standaloneTerm) return
+        standaloneTerm.options.fontSize = settings.settings.terminalFontSize
+        standaloneTerm.options.fontFamily = settings.settings.terminalFontFamily
+        standaloneTerm.options.theme = getTerminalTheme()
+      },
+      { deep: true },
+    )
     return
   }
   const { status: wsStatus } = useTerminal(terminalContainer.value, props.node)

@@ -74,7 +74,9 @@ const props = defineProps({
   }
 });
 
-const newNode = ref<ApiNode>(JSON.parse(JSON.stringify(props.node)));
+// 修复 B31：用 structuredClone 替代 JSON.parse(JSON.stringify()) 深拷贝。
+// structuredClone 支持 Date/Map/Set 等原生类型，且不丢失非 JSON 可序列化字段。
+const newNode = ref<ApiNode>(structuredClone(props.node));
 
 const handleSubmit = () => {
   // M7：校验端口范围 1-65535

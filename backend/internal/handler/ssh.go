@@ -4,8 +4,10 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -14,6 +16,9 @@ import (
 	"managi/internal/model"
 	"managi/internal/sshpool"
 )
+
+// maxRequestBodySize 限制请求体大小（修复 B12：防止超大请求体导致 OOM）。
+const maxRequestBodySize = 10 << 20 // 10MB
 
 // testHandler POST /api/ssh/test
 // 请求体: {node, cmds}  响应: CmdsTestResult
@@ -26,6 +31,8 @@ func testHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		// 修复 B12：限制请求体大小
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		var req struct {
 			Node model.Node `json:"node"`
 			Cmds []string   `json:"cmds"`
@@ -34,7 +41,7 @@ func testHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		result := executeSingle(pool, req.Node, req.Cmds)
+		result := executeSingle(r.Context(), pool, req.Node, req.Cmds)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(result)
 	}
@@ -52,6 +59,8 @@ func batchHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		// 修复 B12：限制请求体大小
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		var req model.BatchCmdRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -61,12 +70,12 @@ func batchHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 
 		// errgroup 提供并发上限与 ctx 取消语义；单节点失败不取消其他节点
 		// （由 results[i].Success 表达失败），故闭包仍 return nil。
-		g, _ := errgroup.WithContext(r.Context())
+		g, ctx := errgroup.WithContext(r.Context())
 		g.SetLimit(10) // 并发上限
+		// 修复 B32：Go 1.22+ 循环变量每次迭代是新变量，无需 i,node := i,node
 		for i, node := range req.Nodes {
-			i, node := i, node
 			g.Go(func() error {
-				results[i] = executeSingle(pool, node, req.Cmds)
+				results[i] = executeSingle(ctx, pool, node, req.Cmds)
 				return nil
 			})
 		}
@@ -78,9 +87,10 @@ func batchHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 }
 
 // executeSingle 单节点命令执行，连接用完 release（修正 v2：release 不关闭）。
-func executeSingle(pool *sshpool.Pool, node model.Node, cmds []string) model.CmdsTestResult {
+// 修复 B11：接收 ctx，客户端断开时终止 SSH 命令执行。
+func executeSingle(ctx context.Context, pool *sshpool.Pool, node model.Node, cmds []string) model.CmdsTestResult {
 	start := time.Now()
-	output, errs, err := pool.Execute(node, cmds)
+	output, errs, err := pool.Execute(ctx, node, cmds)
 	// 连接失败时 err 非 nil，应视为失败（修正忽略 err 的缺陷）
 	success := err == nil && len(errs) == 0
 	allErrors := errs
@@ -105,12 +115,5 @@ func executeSingle(pool *sshpool.Pool, node model.Node, cmds []string) model.Cmd
 }
 
 func joinCmds(cmds []string) string {
-	out := ""
-	for i, c := range cmds {
-		if i > 0 {
-			out += "\n"
-		}
-		out += c
-	}
-	return out
+	return strings.Join(cmds, "\n")
 }

@@ -63,12 +63,18 @@ func (l *authFailLimiter) reset(ip string) {
 
 // Start 启动后台清理 goroutine，定期删除全过期的 IP 条目。
 // H4：防止攻击者用大量不同 IP 发起失败认证导致 attempts map 无限增长。
-func (l *authFailLimiter) Start() {
+// 修复 B10：接收 done channel，进程退出时停止协程，避免 goroutine 泄漏。
+func (l *authFailLimiter) Start(done <-chan struct{}) {
 	go func() {
 		ticker := time.NewTicker(authFailWindow)
 		defer ticker.Stop()
-		for range ticker.C {
-			l.pruneExpired()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				l.pruneExpired()
+			}
 		}
 	}()
 }
@@ -96,12 +102,13 @@ func (l *authFailLimiter) pruneExpired() {
 // BasicAuthMiddleware 返回 Basic Auth 中间件。
 // cfg.BasicAuthEnabled == false 时透传（零开销）。
 // 浏览器在首次 401+WWW-Authenticate 后缓存凭据，后续同源 HTTP 与 WebSocket 升级请求自动携带。
-func BasicAuthMiddleware(cfg *config.Config) func(http.Handler) http.Handler {
+// 修复 B10：done 用于停止 limiter 后台 goroutine。
+func BasicAuthMiddleware(cfg *config.Config, done <-chan struct{}) func(http.Handler) http.Handler {
 	if !cfg.BasicAuthEnabled {
 		return func(next http.Handler) http.Handler { return next }
 	}
 	limiter := newAuthFailLimiter()
-	limiter.Start() // H4：启动后台清理，防止 attempts map 无限增长
+	limiter.Start(done) // H4：启动后台清理，防止 attempts map 无限增长
 	expectedUser := []byte(cfg.BasicAuthUser)
 	expectedPass := []byte(cfg.BasicAuthPassword)
 	return func(next http.Handler) http.Handler {

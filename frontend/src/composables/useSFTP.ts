@@ -52,6 +52,24 @@ export function useSFTP(node: ApiNode) {
   let downloadBuffer: Uint8Array[] = []
   let downloadTotalSize = 0
   let downloadReceivedSize = 0
+  // B6：下载激活标志，仅在 download_start → complete 期间为 true，避免前次下载的延迟二进制帧污染新下载
+  let downloadActive = false
+
+  /** rejectPending 拒绝并清理 pending Promise。供 close/onClose/超时调用。 */
+  function rejectPending(err: Error): void {
+    if (pendingTimer) {
+      clearTimeout(pendingTimer)
+      pendingTimer = null
+    }
+    if (pendingResolve) {
+      pendingResolve = null
+    }
+    if (pendingReject) {
+      const fn = pendingReject
+      pendingReject = null
+      fn(err)
+    }
+  }
 
   function resolvePending(msg: WSMessage): void {
     // C4：丢弃超时后延迟到达的旧响应
@@ -78,19 +96,16 @@ export function useSFTP(node: ApiNode) {
     })
   }
 
-  const { connected, connect, send, close } = useWebSocket('/ws/sftp', {
+  const { status, connected, connect, send, close: wsClose, markFailed } = useWebSocket('/ws/sftp', {
     authPayload: sftpLogin(node),
-    maxReconnect: 3,
+    // 修复 B9：原 maxReconnect:3 过低，网络抖动时 SFTP 早早放弃。后端 SSH 连接池维持会话，
+    // 提高到 10 与终端一致。登录失败由 markFailed 抑制重连。
+    maxReconnect: 10,
     onClose: () => {
       loading.value = false
+      downloadActive = false
       // H2：WS 断开时 reject pending Promise，避免用户卡住等待超时
-      if (pendingReject) {
-        if (pendingTimer) clearTimeout(pendingTimer)
-        pendingResolve = null
-        pendingReject(new Error('WebSocket closed'))
-        pendingReject = null
-        pendingTimer = null
-      }
+      rejectPending(new Error('WebSocket closed'))
     },
     onText: (data) => {
       const msg = parseWSMessage(data)
@@ -101,7 +116,9 @@ export function useSFTP(node: ApiNode) {
           if (r && !r.success) {
             loading.value = false
             handleError(`登录失败：${r.message ?? 'unknown'}`)
-            close() // 抑制重连
+            // 修复 B4：用 markFailed 替代 close，设置 first_failed 状态而非 disconnected，
+            // UI 可区分"登录失败"与"主动关闭"
+            markFailed()
           }
           return
         }
@@ -118,12 +135,15 @@ export function useSFTP(node: ApiNode) {
         }
         case 'download_start':
           downloadTotalSize = (msg.data as SFTPDownloadStartData)?.total ?? 0
+          // B6：标记下载激活，后续二进制帧才会被接纳
+          downloadActive = true
           return
         case 'complete': {
           const d = msg.data as SFTPCompleteData
           const blob = new Blob(downloadBuffer as BlobPart[])
           triggerDownload(blob, d?.filename ?? 'download')
           downloadBuffer = []
+          downloadActive = false
           resolvePending(msg)
           return
         }
@@ -132,6 +152,8 @@ export function useSFTP(node: ApiNode) {
           return
         case 'error':
           loading.value = false
+          // B6：错误时关闭下载激活标志，避免后续二进制帧误纳入
+          downloadActive = false
           handleError((msg.data as WSError)?.message ?? 'SFTP error')
           resolvePending(msg)
           return
@@ -145,13 +167,16 @@ export function useSFTP(node: ApiNode) {
       }
     },
     onBinary: (data) => {
+      // B6：仅在被激活的下载期间接纳二进制帧，避免前次下载延迟帧污染新下载
+      if (!downloadActive) return
       // 修复 B8：缓冲上限保护，超限中止并提示走 HTTP Range，避免浏览器 OOM
       if (downloadReceivedSize + data.byteLength > DOWNLOAD_BUFFER_LIMIT) {
         handleError(`文件超过 ${DOWNLOAD_BUFFER_LIMIT / 1024 / 1024}MB，请使用 downloadViaHTTP 流式下载`)
         downloadBuffer = []
         downloadReceivedSize = 0
         downloadTotalSize = 0
-        close()
+        downloadActive = false
+        wsClose()
         return
       }
       downloadBuffer.push(new Uint8Array(data))
@@ -161,6 +186,16 @@ export function useSFTP(node: ApiNode) {
         : 0
     },
   })
+
+  /** close 包装：手动关闭时先 reject pending Promise，再关闭 WS。
+   *  修复 B5：原 close() 设 ws.onclose=null 导致 onClose 回调永不触发，
+   *  pending Promise 永不 reject，组件卸载时泄漏。
+   */
+  function close(): void {
+    rejectPending(new Error('SFTP closed manually'))
+    downloadActive = false
+    wsClose()
+  }
 
   loading.value = true
   connect()
@@ -251,6 +286,7 @@ export function useSFTP(node: ApiNode) {
   /** downloadViaHTTP 大文件流式下载（HTTP Range，分块触发 Blob 下载，避免内存累积）。
    *  修复 B8：WS 下载会将全部 chunk 累积到内存，GB 级文件会 OOM。
    *  调用方在文件已知较大（超 LARGE_FILE_THRESHOLD）时应直接使用本方法。
+   *  修复 B29：错误/超限提前返回时重置进度并释放 reader，避免残留非零进度与流悬挂。
    */
   async function downloadViaHTTP(remotePath: string): Promise<void> {
     downloadProgress.value = 0
@@ -258,19 +294,27 @@ export function useSFTP(node: ApiNode) {
     const chunks: Uint8Array[] = []
     let received = 0
     const reader = stream.getReader()
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      if (value) {
-        chunks.push(value)
-        received += value.byteLength
-        downloadProgress.value = total ? Math.min(100, Math.round((received / total) * 100)) : 0
-        // 流式路径同样设上限，避免极端大文件 OOM
-        if (received > DOWNLOAD_BUFFER_LIMIT) {
-          handleError(`文件超过 ${DOWNLOAD_BUFFER_LIMIT / 1024 / 1024}MB 下载上限`)
-          return
+    let succeeded = false
+    try {
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        if (value) {
+          chunks.push(value)
+          received += value.byteLength
+          downloadProgress.value = total ? Math.min(100, Math.round((received / total) * 100)) : 0
+          // 流式路径同样设上限，避免极端大文件 OOM
+          if (received > DOWNLOAD_BUFFER_LIMIT) {
+            handleError(`文件超过 ${DOWNLOAD_BUFFER_LIMIT / 1024 / 1024}MB 下载上限`)
+            return
+          }
         }
       }
+      succeeded = true
+    } finally {
+      reader.releaseLock()
+      // 修复 B29：失败/超限时重置进度，避免残留值影响下次下载显示
+      if (!succeeded) downloadProgress.value = 0
     }
     const blob = new Blob(chunks as BlobPart[])
     triggerDownload(blob, remotePath.split('/').pop() ?? 'download')
@@ -288,7 +332,7 @@ export function useSFTP(node: ApiNode) {
 
   return {
     currentPath, files, loading, uploadProgress, downloadProgress,
-    connected, list, upload, download, downloadViaHTTP, mkdir, del, close,
+    connected, status, list, upload, download, downloadViaHTTP, mkdir, del, close,
   }
 }
 

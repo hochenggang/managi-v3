@@ -6,7 +6,6 @@ package handler
 import (
 	"bytes"
 	"net/http"
-	"path/filepath"
 	"time"
 
 	"managi/internal/config"
@@ -14,16 +13,10 @@ import (
 )
 
 // Register 注册全部路由到给定 mux。
-func Register(mux *http.ServeMux, cfg *config.Config) {
-	// 修复 A19：启动时将相对 IndexHTMLPath 转为绝对路径，避免 CWD 不确定时 404
-	if cfg.IndexHTMLPath != "" && !filepath.IsAbs(cfg.IndexHTMLPath) {
-		if abs, err := filepath.Abs(cfg.IndexHTMLPath); err == nil {
-			cfg.IndexHTMLPath = abs
-		}
-	}
-
+// done 用于通知后台 goroutine（pool cleaner 等）退出。
+func Register(mux *http.ServeMux, cfg *config.Config, done <-chan struct{}) *sshpool.Pool {
 	pool := sshpool.New(cfg)
-	pool.StartCleaner()
+	pool.StartCleaner(done)
 
 	// 静态首页（v2 GET /）
 	mux.HandleFunc("/", indexHandler(cfg))
@@ -39,6 +32,8 @@ func Register(mux *http.ServeMux, cfg *config.Config) {
 
 	// v3 新增：SFTP 下载（HTTP Range，断点续传）
 	mux.HandleFunc("/api/sftp/download", sftpDownloadHandler(pool, cfg))
+
+	return pool
 }
 
 func indexHandler(cfg *config.Config) http.HandlerFunc {

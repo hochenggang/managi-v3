@@ -4,6 +4,7 @@
 import { onBeforeMount } from 'vue'
 import NodeList from '@/components/NodeList.vue'
 import TabBar from '@/components/TabBar.vue'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import CmdsView from '@/views/CmdsView.vue'
 import TerminalTab from '@/views/TerminalTab.vue'
 import SftpTab from '@/views/SftpTab.vue'
@@ -45,6 +46,7 @@ onBeforeMount(() => {
 
 <template>
   <notifications position="bottom center"  />
+  <ConfirmDialog />
   <div class="app-root" :style="{ '--sidebar-width': width }">
     <NodeList />
     <main class="workspace">

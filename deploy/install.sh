@@ -13,6 +13,9 @@ INSTALL_DIR="/opt/managi"
 CONFIG_DIR="/etc/managi"
 SERVICE_USER="managi"
 GITHUB_REPO="${MANAGI_REPO:-hochenggang/managi-v3}"
+# 修复 B39：可选 SHA256 校验，用户可通过 MANAGI_SHA256 环境变量指定预期值
+# 形如：MANAGI_SHA256=abc123... ./install.sh
+EXPECTED_SHA256="${MANAGI_SHA256:-}"
 
 # ===== 颜色 =====
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; NC='\033[0m'
@@ -168,6 +171,7 @@ download_binary() {
     URL="https://github.com/${GITHUB_REPO}/releases/latest/download/${BINARY_NAME}"
     wget -qO "$INSTALL_DIR/managi" "$URL" || error "下载失败: $URL"
     chmod +x "$INSTALL_DIR/managi"
+    verify_checksum "$INSTALL_DIR/managi" "$BINARY_NAME"
     info "二进制已安装到 $INSTALL_DIR/managi"
 }
 
@@ -177,7 +181,50 @@ download_frontend() {
     info "下载前端 index.html..."
     URL="https://github.com/${GITHUB_REPO}/releases/latest/download/index.html"
     wget -qO "$INSTALL_DIR/index.html" "$URL" || error "下载前端失败: $URL"
+    verify_checksum "$INSTALL_DIR/index.html" "index.html"
     info "前端已安装到 $INSTALL_DIR/index.html"
+}
+
+# 修复 B39：校验下载文件 SHA256
+# 优先级：MANAGI_SHA256 环境变量 > GitHub Release 中的 <file>.sha256 sidecar > 跳过（告警）
+# 返回值：0=校验通过或跳过；1=校验失败（已调用 error，调用方可据此 return）
+verify_checksum() {
+    _vc_file="$1"
+    _vc_asset="$2"
+    if [ -n "$EXPECTED_SHA256" ]; then
+        # 用户显式指定了预期值
+        _vc_actual="$(sha256sum "$_vc_file" | awk '{print $1}')"
+        if [ "$_vc_actual" != "$EXPECTED_SHA256" ]; then
+            rm -f "$_vc_file"
+            error "SHA256 校验失败：expected=$EXPECTED_SHA256 actual=$_vc_actual"
+            return 1
+        fi
+        info "SHA256 校验通过（环境变量）"
+        return 0
+    fi
+    # 尝试下载 sidecar <asset>.sha256
+    _vc_sidecar_url="https://github.com/${GITHUB_REPO}/releases/latest/download/${_vc_asset}.sha256"
+    if wget -q --spider "$_vc_sidecar_url" 2>/dev/null; then
+        _vc_sidecar="$(mktemp)"
+        if wget -qO "$_vc_sidecar" "$_vc_sidecar_url" 2>/dev/null; then
+            # sidecar 文件格式："<sha256>  <filename>" 或纯哈希
+            _vc_expected="$(awk '{print $1}' "$_vc_sidecar" | tr -d '[:space:]')"
+            rm -f "$_vc_sidecar"
+            if [ -n "$_vc_expected" ]; then
+                _vc_actual="$(sha256sum "$_vc_file" | awk '{print $1}')"
+                if [ "$_vc_actual" != "$_vc_expected" ]; then
+                    rm -f "$_vc_file"
+                    error "SHA256 校验失败：expected=$_vc_expected actual=$_vc_actual"
+                    return 1
+                fi
+                info "SHA256 校验通过（sidecar）"
+                return 0
+            fi
+        fi
+        rm -f "$_vc_sidecar" 2>/dev/null
+    fi
+    warn "未提供 SHA256，跳过校验。建议设置 MANAGI_SHA256 环境变量或发布时附带 .sha256 sidecar"
+    return 0
 }
 
 # ===== 创建用户 =====

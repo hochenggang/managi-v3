@@ -86,20 +86,20 @@ func sftpWSHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 
 		sshConn, err := pool.Get(node)
 		if err != nil {
-			_ = wc.writeLoginResult(false, err.Error())
+			_ = wc.writeLoginResult(false, err.Error(), false)
 			return
 		}
 		defer pool.Release(node)
 
 		sc, err := sftp.New(node, sshConn.Client())
 		if err != nil {
-			_ = wc.writeLoginResult(false, err.Error())
+			_ = wc.writeLoginResult(false, err.Error(), false)
 			return
 		}
 		defer func() { _ = sc.Close() }()
 
-		// 登录成功
-		_ = wc.writeLoginResult(true, "")
+		// 登录成功（SFTP 不支持会话恢复，reattached 恒为 false）
+		_ = wc.writeLoginResult(true, "", false)
 
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()

@@ -30,7 +30,17 @@ export const useNodesStore = defineStore('nodes', () => {
     setCachedGroups(groups.value)
   }
 
-  watch([nodes, groups], save, { deep: true })
+  // 修复 B16：批量操作（setAllNodes/clearNodes/导入）会触发多次 deep watch 回调，
+  // 每次都写 localStorage 同步阻塞主线程。debounce 300ms 合并连续变更，降低 I/O 压力。
+  let saveTimer: ReturnType<typeof setTimeout> | null = null
+  function scheduleSave(): void {
+    if (saveTimer) clearTimeout(saveTimer)
+    saveTimer = setTimeout(() => {
+      saveTimer = null
+      save()
+    }, 300)
+  }
+  watch([nodes, groups], scheduleSave, { deep: true })
 
   const allNodes = computed(() => Object.values(nodes.value))
   const getSelectedNodes = computed(() =>

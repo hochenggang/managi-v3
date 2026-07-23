@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/getlantern/systray"
@@ -35,6 +36,8 @@ var indexHTML []byte
 var iconICO []byte
 
 var srv *http.Server
+// done 用于通知后台 goroutine 退出（修复 B10）
+var done = make(chan struct{})
 
 func main() {
 	systray.Run(onReady, onExit)
@@ -51,7 +54,8 @@ func onReady() {
 
 	go runServer()
 
-	url := fmt.Sprintf("http://%s:%d", host, port)
+	// 修复 B33：用 strconv.Itoa + 字符串拼接替代 fmt.Sprintf，减少反射开销
+	url := "http://" + host + ":" + strconv.Itoa(port)
 	if err := waitForHealth(); err != nil {
 		slog.Error("server health check failed", "err", err)
 		systray.Quit()
@@ -84,17 +88,18 @@ func runServer() {
 	cfg.IndexHTML = indexHTML
 
 	mux := http.NewServeMux()
-	handler.Register(mux, cfg)
+	handler.Register(mux, cfg, done)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
 
 	// H9：与服务器端入口一致，应用 BasicAuth 中间件（cfg.BasicAuthEnabled=false 时透传）
-	finalHandler := handler.BasicAuthMiddleware(cfg)(mux)
+	finalHandler := handler.BasicAuthMiddleware(cfg, done)(mux)
 
 	srv = &http.Server{
-		Addr:              net.JoinHostPort(host, itoa(port)),
+		// 修复 B20：用 strconv.Itoa 替代自实现的 itoa，去除冗余代码
+		Addr:              net.JoinHostPort(host, strconv.Itoa(port)),
 		Handler:           finalHandler,
 		ReadHeaderTimeout: 10 * time.Second, // G112: 防 Slowloris 攻击
 	}
@@ -107,6 +112,13 @@ func runServer() {
 }
 
 func onExit() {
+	// 修复 B10：通知后台 goroutine 退出
+	select {
+	case <-done:
+		// already closed
+	default:
+		close(done)
+	}
 	if srv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -118,7 +130,8 @@ func onExit() {
 
 func waitForHealth() error {
 	client := http.Client{Timeout: 200 * time.Millisecond}
-	url := fmt.Sprintf("http://%s:%d/health", host, port)
+	// 修复 B33：用 strconv.Itoa + 字符串拼接替代 fmt.Sprintf
+	url := "http://" + host + ":" + strconv.Itoa(port) + "/health"
 	deadline := time.Now().Add(30 * time.Second)
 
 	for time.Now().Before(deadline) {
@@ -132,19 +145,4 @@ func waitForHealth() error {
 		time.Sleep(200 * time.Millisecond)
 	}
 	return fmt.Errorf("health check timed out")
-}
-
-// itoa 将非负整数转为字符串。
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	buf := [16]byte{}
-	pos := len(buf)
-	for n > 0 {
-		pos--
-		buf[pos] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[pos:])
 }

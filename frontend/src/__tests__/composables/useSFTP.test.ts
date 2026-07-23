@@ -1,18 +1,23 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
-import { defineComponent, h } from 'vue'
+import { defineComponent, h, ref } from 'vue'
 import type { ApiNode } from '@/protocol/types'
 import type { WSMessage } from '@/protocol/ws'
 import { useSFTP } from '@/composables/useSFTP'
 
 // vi.hoisted 确保 mock 在 vi.mock 工厂执行前已初始化
-const { mockHandleError } = vi.hoisted(() => ({
+const { mockHandleError, mockDownloadWithRange } = vi.hoisted(() => ({
   mockHandleError: vi.fn(),
+  mockDownloadWithRange: vi.fn(),
 }))
 
 vi.mock('@/helper', () => ({
   handleError: mockHandleError,
   handleMsg: vi.fn(),
+}))
+
+vi.mock('@/api', () => ({
+  downloadWithRange: mockDownloadWithRange,
 }))
 
 const node: ApiNode = {
@@ -31,16 +36,22 @@ let onBinaryCb: ((data: ArrayBuffer) => void) | null = null
 const mockSend = vi.fn((_data: string | ArrayBuffer) => true)
 const mockConnect = vi.fn()
 const mockClose = vi.fn()
+const mockMarkFailed = vi.fn()
+// 捕获 useWebSocket opts 用于断言 maxReconnect 等
+let capturedOpts: any = null
 
 vi.mock('@/composables/useWebSocket', () => ({
   useWebSocket: (_path: string, opts: any) => {
     onTextCb = opts.onText
     onBinaryCb = opts.onBinary
+    capturedOpts = opts
     return {
+      status: ref('connected'),
       connected: { value: true },
       connect: mockConnect,
       send: mockSend,
       close: mockClose,
+      markFailed: mockMarkFailed,
     }
   },
 }))
@@ -94,6 +105,8 @@ describe('useSFTP', () => {
     vi.clearAllMocks()
     onTextCb = null
     onBinaryCb = null
+    capturedOpts = null
+    mockDownloadWithRange.mockReset()
   })
 
   it('calls connect() on creation', () => {
@@ -251,11 +264,13 @@ describe('useSFTP', () => {
     expect(s.downloadProgress.value).toBe(100)
   })
 
-  it('login failure calls handleError and close', () => {
+  it('login failure calls handleError and markFailed (B4 fix)', () => {
     withSetup(() => useSFTP(node))
     respond({ type: 'login', data: { success: false, message: 'auth failed' } })
     expect(mockHandleError).toHaveBeenCalledWith('登录失败：auth failed')
-    expect(mockClose).toHaveBeenCalledTimes(1)
+    // 修复 B4：应调用 markFailed 而非 close，UI 可区分"登录失败"与"主动关闭"
+    expect(mockMarkFailed).toHaveBeenCalledTimes(1)
+    expect(mockClose).not.toHaveBeenCalled()
   })
 
   it('sendAndAwait rejects when previous operation pending (B7 fix)', async () => {
@@ -267,5 +282,63 @@ describe('useSFTP', () => {
     // 清理：响应第一个请求
     respond({ type: 'list', data: { files: [], path: '/a' } })
     await p1
+  })
+
+  // 修复 B5：手动 close 应 reject pending Promise，避免组件卸载时泄漏
+  it('close() rejects pending Promise (B5 fix)', async () => {
+    const s = withSetup(() => useSFTP(node))
+    // 发起 list 但不响应 → pendingResolve 占用
+    const p = s.list('/a')
+    // 调用 close 应 reject pending
+    s.close()
+    await expect(p).rejects.toThrow('SFTP closed manually')
+    expect(mockClose).toHaveBeenCalledTimes(1)
+  })
+
+  // 修复 B6：未激活下载时二进制帧应被忽略，避免前次下载延迟帧污染新下载
+  it('onBinary ignores chunks when download not active (B6 fix)', async () => {
+    const s = withSetup(() => useSFTP(node))
+    // 直接发二进制帧，未经过 download_start，downloadActive=false
+    onBinaryCb?.(new Uint8Array([1, 2, 3]).buffer)
+    // 进度应保持 0，downloadBuffer 未被污染
+    expect(s.downloadProgress.value).toBe(0)
+  })
+
+  // 修复 B9：maxReconnect 从 3 提高到 10，与终端一致
+  it('uses maxReconnect=10 (B9 fix)', () => {
+    withSetup(() => useSFTP(node))
+    expect(capturedOpts?.maxReconnect).toBe(10)
+  })
+
+  // 修复 B29：downloadViaHTTP 在流读取错误时重置进度，避免残留非零值
+  it('downloadViaHTTP resets progress on stream error (B29 fix)', async () => {
+    const s = withSetup(() => useSFTP(node))
+    // 构造一个先产出 50 字节再抛错的流
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(50))
+      },
+      pull() {
+        throw new Error('network interrupted')
+      },
+    })
+    mockDownloadWithRange.mockResolvedValue({ total: 100, stream })
+    await expect(s.downloadViaHTTP('/big.bin')).rejects.toThrow('network interrupted')
+    // 错误后进度应被重置为 0
+    expect(s.downloadProgress.value).toBe(0)
+  })
+
+  // 修复 B29：downloadViaHTTP 正常完成后进度保持 100（succeeded 不重置）
+  it('downloadViaHTTP keeps progress at completion (B29 fix)', async () => {
+    const s = withSetup(() => useSFTP(node))
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(100))
+        controller.close()
+      },
+    })
+    mockDownloadWithRange.mockResolvedValue({ total: 100, stream })
+    await s.downloadViaHTTP('/ok.bin')
+    expect(s.downloadProgress.value).toBe(100)
   })
 })

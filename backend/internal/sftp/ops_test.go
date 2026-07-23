@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pkg/sftp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -214,6 +215,46 @@ func TestUploadComplete_UnknownID(t *testing.T) {
 
 	err := sc.UploadComplete("nonexistent-id")
 	assert.Error(t, err)
+}
+
+// TestUploadComplete_RenameFailure_PreservesState 验证 B34 修复：
+// Rename 失败时 upload 状态被保留，客户端可重试 UploadComplete。
+func TestUploadComplete_RenameFailure_PreservesState(t *testing.T) {
+	sc, srv, sshc, cleanup := newClient(t)
+	defer cleanup()
+
+	// totalSize=0 跳过 stat 校验，直接到 Rename 步骤
+	uploadID, _, err := sc.UploadInit("/upload", "retry.bin", 0, 4)
+	require.NoError(t, err)
+	require.NoError(t, sc.UploadChunk(uploadID, 0, 0, []byte("data")))
+
+	// 关闭 SFTP 连接使 Rename 失败
+	require.NoError(t, sc.sc.Close())
+
+	// UploadComplete 应因 Rename 失败而报错
+	err = sc.UploadComplete(uploadID)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "rename .part to final")
+
+	// 修复 B34：upload 状态应保留（不会返回 unknown upload_id）
+	sc.mu.Lock()
+	_, exists := sc.uploads[uploadID]
+	sc.mu.Unlock()
+	assert.True(t, exists, "upload state should be preserved after Rename failure")
+
+	// 用同一 SSH 连接创建新 SFTP 客户端，重试 UploadComplete
+	newSc, err := sftp.NewClient(sshc)
+	require.NoError(t, err)
+	sc.sc = newSc
+
+	// 重试应成功（.part 文件已完整，只需 rename）
+	err = sc.UploadComplete(uploadID)
+	require.NoError(t, err)
+
+	// 验证 final 文件存在且内容正确
+	content, err := os.ReadFile(filepath.Join(srv.RootDir(), "upload", "retry.bin"))
+	require.NoError(t, err)
+	assert.Equal(t, "data", string(content))
 }
 
 // TestUploadChunk_UnknownID 验证未知 upload_id 分片写入返回错误。

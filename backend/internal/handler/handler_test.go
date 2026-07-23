@@ -23,7 +23,7 @@ func TestRegister(t *testing.T) {
 	cfg.IndexHTMLPath = tmpFile
 
 	mux := http.NewServeMux()
-	Register(mux, cfg)
+	Register(mux, cfg, nil)
 
 	routes := []struct {
 		method string

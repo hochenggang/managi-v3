@@ -83,7 +83,7 @@ import { useI18n } from 'vue-i18n'
 import { useSettingsStore, type ThemeName, type Settings } from '@/stores/settingsStore'
 import { useNodesStore } from '@/stores/nodesStore'
 import { useShortcutsStore } from '@/stores/shortcutsStore'
-import { handleError, handleMsg } from '@/helper'
+import { handleError, handleMsg, toErrorMessage } from '@/helper'
 import type { ApiNode, AppConfig, OldApiNode, ShortcutItem } from '@/protocol/types'
 import { oldApiNodeConvert } from '@/api'
 
@@ -95,8 +95,7 @@ const shortcutsStore = useShortcutsStore()
 const currentSection = ref('appearance')
 
 const sections = computed(() => {
-  // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-  locale.value
+  // t() 本身依赖 locale，locale 变化时 computed 自动重新求值
   return [
     { key: 'appearance', label: t('settings.appearance.title') },
     { key: 'terminal', label: t('settings.terminal.title') },
@@ -157,9 +156,9 @@ function importConfig(): void {
         const inputGroups = isV3Config ? (raw.groups as string[] | undefined) : undefined
         const inputSettings = isV3Config ? (raw.settings as Partial<Settings> | undefined) : undefined
 
-        for (const key1 in inputNodes) {
+        for (const [key1, rawNode] of Object.entries(inputNodes)) {
           // M8：先转换为统一 ApiNode 格式，再校验必填字段与类型
-          const n = oldApiNodeConvert(inputNodes[key1])
+          const n = oldApiNodeConvert(rawNode)
           if (typeof n.host !== 'string' || !n.host ||
             typeof n.username !== 'string' || !n.username ||
             typeof n.auth_type !== 'string' || !n.auth_type ||
@@ -199,7 +198,7 @@ function importConfig(): void {
 
         handleMsg(t('settings.data.importSuccess'))
       } catch (error) {
-        handleError(`${t('settings.data.importError')} ${error}`)
+        handleError(`${t('settings.data.importError')} ${toErrorMessage(error)}`)
       }
     }
     reader.readAsText(file)

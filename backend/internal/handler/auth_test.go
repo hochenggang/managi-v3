@@ -20,7 +20,7 @@ func okHandler() http.Handler {
 // TestBasicAuthMiddleware_Disabled 验证 BasicAuthEnabled=false 时中间件透传。
 func TestBasicAuthMiddleware_Disabled(t *testing.T) {
 	cfg := &config.Config{BasicAuthEnabled: false}
-	h := BasicAuthMiddleware(cfg)(okHandler())
+	h := BasicAuthMiddleware(cfg, nil)(okHandler())
 
 	req := httptest.NewRequest("GET", "/", nil)
 	rec := httptest.NewRecorder()
@@ -31,7 +31,7 @@ func TestBasicAuthMiddleware_Disabled(t *testing.T) {
 // TestBasicAuthMiddleware_HealthBypass 验证 /health 路径放行（无需凭据）。
 func TestBasicAuthMiddleware_HealthBypass(t *testing.T) {
 	cfg := &config.Config{BasicAuthEnabled: true, BasicAuthUser: "admin", BasicAuthPassword: "secret"}
-	h := BasicAuthMiddleware(cfg)(okHandler())
+	h := BasicAuthMiddleware(cfg, nil)(okHandler())
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	rec := httptest.NewRecorder()
@@ -42,7 +42,7 @@ func TestBasicAuthMiddleware_HealthBypass(t *testing.T) {
 // TestBasicAuthMiddleware_CorrectCredentials 验证正确凭据放行。
 func TestBasicAuthMiddleware_CorrectCredentials(t *testing.T) {
 	cfg := &config.Config{BasicAuthEnabled: true, BasicAuthUser: "admin", BasicAuthPassword: "secret"}
-	h := BasicAuthMiddleware(cfg)(okHandler())
+	h := BasicAuthMiddleware(cfg, nil)(okHandler())
 
 	req := httptest.NewRequest("GET", "/", nil)
 	req.SetBasicAuth("admin", "secret")
@@ -54,7 +54,7 @@ func TestBasicAuthMiddleware_CorrectCredentials(t *testing.T) {
 // TestBasicAuthMiddleware_WrongCredentials 验证错误凭据返回 401 + WWW-Authenticate。
 func TestBasicAuthMiddleware_WrongCredentials(t *testing.T) {
 	cfg := &config.Config{BasicAuthEnabled: true, BasicAuthUser: "admin", BasicAuthPassword: "secret"}
-	h := BasicAuthMiddleware(cfg)(okHandler())
+	h := BasicAuthMiddleware(cfg, nil)(okHandler())
 
 	req := httptest.NewRequest("GET", "/", nil)
 	req.SetBasicAuth("admin", "wrong")
@@ -67,7 +67,7 @@ func TestBasicAuthMiddleware_WrongCredentials(t *testing.T) {
 // TestBasicAuthMiddleware_NoCredentials 验证无凭据返回 401。
 func TestBasicAuthMiddleware_NoCredentials(t *testing.T) {
 	cfg := &config.Config{BasicAuthEnabled: true, BasicAuthUser: "admin", BasicAuthPassword: "secret"}
-	h := BasicAuthMiddleware(cfg)(okHandler())
+	h := BasicAuthMiddleware(cfg, nil)(okHandler())
 
 	req := httptest.NewRequest("GET", "/", nil)
 	rec := httptest.NewRecorder()

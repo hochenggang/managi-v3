@@ -57,14 +57,14 @@ func terminalWSHandler(mgr *sessionManager, cfg *config.Config) http.HandlerFunc
 
 		ls, reattached, err := mgr.AttachOrCreate(lf.SessionID, lf.Node, wc, lf.Cols, lf.Rows)
 		if err != nil {
-			_ = wc.writeLoginResult(false, err.Error())
+			_ = wc.writeLoginResult(false, err.Error(), false)
 			return
 		}
 		// 前端断开时仅 detach，不关闭 shell（交给 60s 空闲计时器）
 		defer mgr.Detach(ls, wc)
 
 		// 登录成功（附带 reattached 标志，前端据此提示「已恢复会话」）
-		_ = wc.writeEnvelope(msgTypeLogin, wsLoginResult{Success: true, Reattached: reattached})
+		_ = wc.writeLoginResult(true, "", reattached)
 
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()

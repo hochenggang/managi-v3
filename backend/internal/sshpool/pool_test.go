@@ -1,6 +1,7 @@
 package sshpool
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -19,7 +20,7 @@ func TestExecute_Basic(t *testing.T) {
 	defer pool.CloseAll()
 
 	node := testutil.TestNode(srv.Host(), srv.Port())
-	output, errs, err := pool.Execute(node, []string{"echo hello"})
+	output, errs, err := pool.Execute(context.Background(), node, []string{"echo hello"})
 	require.NoError(t, err)
 	assert.Contains(t, output, "hello")
 	assert.Empty(t, errs)
@@ -34,7 +35,7 @@ func TestExecute_MultiCmds(t *testing.T) {
 	defer pool.CloseAll()
 
 	node := testutil.TestNode(srv.Host(), srv.Port())
-	output, _, err := pool.Execute(node, []string{"echo line1", "echo line2"})
+	output, _, err := pool.Execute(context.Background(), node, []string{"echo line1", "echo line2"})
 	require.NoError(t, err)
 	assert.Contains(t, output, "line1")
 	assert.Contains(t, output, "line2")
@@ -46,7 +47,7 @@ func TestExecute_EmptyCmds(t *testing.T) {
 	defer pool.CloseAll()
 
 	node := testutil.TestNode("127.0.0.1", 22)
-	output, errs, err := pool.Execute(node, []string{})
+	output, errs, err := pool.Execute(context.Background(), node, []string{})
 	assert.NoError(t, err)
 	assert.Nil(t, output)
 	assert.Nil(t, errs)
@@ -61,7 +62,7 @@ func TestExecute_CommandError(t *testing.T) {
 	defer pool.CloseAll()
 
 	node := testutil.TestNode(srv.Host(), srv.Port())
-	_, errs, err := pool.Execute(node, []string{"false"})
+	_, errs, err := pool.Execute(context.Background(), node, []string{"false"})
 	require.NoError(t, err) // SSH 连接成功，err 为 nil
 	assert.NotEmpty(t, errs)
 }
@@ -87,7 +88,7 @@ func TestGet_Release_Refcount(t *testing.T) {
 
 	// Release 一次后连接仍可用
 	pool.Release(node)
-	output, _, err := pool.Execute(node, []string{"echo alive"})
+	output, _, err := pool.Execute(context.Background(), node, []string{"echo alive"})
 	require.NoError(t, err)
 	assert.Contains(t, output, "alive")
 
@@ -105,10 +106,10 @@ func TestGet_ReusesConnection(t *testing.T) {
 
 	node := testutil.TestNode(srv.Host(), srv.Port())
 
-	_, _, err := pool.Execute(node, []string{"echo first"})
+	_, _, err := pool.Execute(context.Background(), node, []string{"echo first"})
 	require.NoError(t, err)
 
-	_, _, err = pool.Execute(node, []string{"echo second"})
+	_, _, err = pool.Execute(context.Background(), node, []string{"echo second"})
 	require.NoError(t, err)
 
 	// mock server 应只 accept 一条 TCP 连接
@@ -164,7 +165,7 @@ func TestPool_Concurrent(t *testing.T) {
 	var g errgroup.Group
 	for i := 0; i < 50; i++ {
 		g.Go(func() error {
-			_, _, err := pool.Execute(node, []string{"echo concurrent"})
+			_, _, err := pool.Execute(context.Background(), node, []string{"echo concurrent"})
 			return err
 		})
 	}

@@ -203,12 +203,12 @@ func (c *Client) closeUpload(uploadID string) {
 }
 
 // UploadComplete 完成上传：.part → final。
+// 修复 B34：Rename 失败时保留 upload 状态，允许客户端重试 UploadComplete（句柄已关闭，
+// 重试只需 stat + rename，无需重新上传分片）。仅在 stat 校验失败（大小不符）时清理状态，
+// 因为此时客户端需 re-init 以获取正确的续传 offset。
 func (c *Client) UploadComplete(uploadID string) error {
 	c.mu.Lock()
 	st, ok := c.uploads[uploadID]
-	if ok {
-		delete(c.uploads, uploadID)
-	}
 	c.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("unknown upload_id: %s", uploadID)
@@ -217,22 +217,29 @@ func (c *Client) UploadComplete(uploadID string) error {
 	// 关闭句柄后再重命名，避免远程文件被占用
 	if st.file != nil {
 		_ = st.file.Close()
+		st.file = nil
 	}
 
 	// C5：校验 .part 文件大小 == totalSize，不符则报错保留 .part 允许续传
 	if st.totalSize > 0 {
 		info, statErr := c.sc.Stat(st.partPath)
 		if statErr != nil {
+			c.closeUpload(uploadID) // stat 失败，清理状态
 			return fmt.Errorf("stat .part file: %w", statErr)
 		}
 		if info.Size() != st.totalSize {
+			c.closeUpload(uploadID) // 大小不符，清理状态（客户端需 re-init 续传）
 			return fmt.Errorf("upload incomplete: .part size %d != expected %d", info.Size(), st.totalSize)
 		}
 	}
 
 	if err := c.sc.Rename(st.partPath, st.finalPath); err != nil {
+		// 修复 B34：Rename 失败时保留 upload 状态，允许客户端重试 UploadComplete
 		return fmt.Errorf("rename .part to final: %w", err)
 	}
+
+	// Rename 成功后才清理 upload 状态
+	c.closeUpload(uploadID)
 	return nil
 }
 

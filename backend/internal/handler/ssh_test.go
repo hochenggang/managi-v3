@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -169,7 +170,7 @@ func TestExecuteSingle_MasksNode(t *testing.T) {
 	defer pool.CloseAll()
 
 	node := testutil.TestNode(srv.Host(), srv.Port())
-	result := executeSingle(pool, node, []string{"echo masked"})
+	result := executeSingle(context.Background(), pool, node, []string{"echo masked"})
 
 	assert.Equal(t, "***", result.Node.AuthValue)
 	assert.NotEqual(t, "testpass", result.Node.AuthValue)

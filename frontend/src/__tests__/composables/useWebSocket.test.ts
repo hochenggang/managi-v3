@@ -132,6 +132,8 @@ describe('useWebSocket', () => {
   })
 
   it('reconnects with exponential backoff on unexpected close, stops at maxReconnect', async () => {
+    // 修复 B21：Math.random 被 mock 为 0，消除 jitter 对定时的干扰
+    vi.spyOn(Math, 'random').mockReturnValue(0)
     const onClose = vi.fn()
     const { result } = withSetup(() => useWebSocket('/ws', { maxReconnect: 2, onClose }))
     result.connect()
@@ -154,6 +156,33 @@ describe('useWebSocket', () => {
     expect(onClose).toHaveBeenCalledTimes(1)
     await vi.advanceTimersByTimeAsync(30000)
     expect(MockWebSocket.instances).toHaveLength(3)
+  })
+
+  // 修复 B21：验证重连延迟包含 jitter（base + 0~500ms 随机抖动）
+  it('reconnect delay includes random jitter (B21 fix)', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5) // jitter = 250ms
+    const { result } = withSetup(() => useWebSocket('/ws', { maxReconnect: 1 }))
+    result.connect()
+    MockWebSocket.LAST!.fireOpen()
+    MockWebSocket.LAST!.fireClose()
+    // base=1000 + jitter=250 = 1250ms
+    await vi.advanceTimersByTimeAsync(1249)
+    expect(MockWebSocket.instances).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(MockWebSocket.instances).toHaveLength(2)
+  })
+
+  // 修复 B25：onerror 在 connected 状态下更新为 reconnecting
+  it('onerror updates status from connected to reconnecting (B25 fix)', () => {
+    const { result } = withSetup(() => useWebSocket('/ws'))
+    result.connect()
+    MockWebSocket.LAST!.fireOpen()
+    expect(result.status.value).toBe('connected')
+    // 标记登录成功，使 onerror 走 reconnecting 分支（区分首次连接与重连）
+    result.markLoginSuccess()
+    // 模拟 onerror（onclose 之前触发）
+    MockWebSocket.LAST!.onerror!(new Event('error'))
+    expect(result.status.value).toBe('reconnecting')
   })
 
   it('close() cancels pending reconnect timer (A9 fix)', async () => {
@@ -182,6 +211,8 @@ describe('useWebSocket', () => {
   })
 
   it('fires onReconnectFailed before onClose when reconnects exhausted (T3 fix)', async () => {
+    // 修复 B21：Math.random 被 mock 为 0，消除 jitter 对定时的干扰
+    vi.spyOn(Math, 'random').mockReturnValue(0)
     const onReconnectFailed = vi.fn()
     const onClose = vi.fn()
     const { result } = withSetup(() => useWebSocket('/ws', { maxReconnect: 1, onReconnectFailed, onClose }))

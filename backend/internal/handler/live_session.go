@@ -19,6 +19,9 @@ import (
 // scrollback 上限：256KB，足够回看数百行终端输出。
 const scrollbackMax = 256 * 1024
 
+// scrollbackChunk 分块回放大小（修复 B13：避免单个超大 WS 帧导致前端卡顿/内存峰值）。
+const scrollbackChunk = 32 * 1024
+
 // sessionManager 维护按 sessionID 索引的活跃终端会话。
 type sessionManager struct {
 	mu          sync.Mutex
@@ -94,8 +97,15 @@ func (m *sessionManager) AttachOrCreate(id string, node model.Node, wc *wsConn, 
 			ls.closeTimer = nil
 		}
 		// 回放 scrollback（持锁保证回放先于后续实时输出）
-		if len(ls.buf) > 0 {
-			_ = wc.writeMsg(string(ls.buf))
+		// 修复 B13：分块发送，避免单个超大 WS 帧导致前端卡顿/内存峰值
+		for pos := 0; pos < len(ls.buf); pos += scrollbackChunk {
+			end := pos + scrollbackChunk
+			if end > len(ls.buf) {
+				end = len(ls.buf)
+			}
+			if err := wc.writeMsg(string(ls.buf[pos:end])); err != nil {
+				break
+			}
 		}
 		ls.cur = wc
 		ls.mu.Unlock()
@@ -191,7 +201,10 @@ func (m *sessionManager) close(id string) {
 	ls.cur = nil
 	ls.mu.Unlock()
 
-	_ = ls.sess.Close()
+	// 修复 B22：记录 sess.Close 错误，便于诊断 shell 已关闭等场景
+	if err := ls.sess.Close(); err != nil {
+		slog.Debug("terminal session close error", "id", id, "err", err)
+	}
 	ls.mgr.pool.Release(ls.node)
 	if cur != nil {
 		_ = cur.conn.Close()

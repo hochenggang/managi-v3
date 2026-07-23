@@ -5,6 +5,7 @@ package sshpool
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log/slog"
 	"net"
@@ -196,19 +197,30 @@ func (p *Pool) CloseAll() {
 }
 
 // StartCleaner 启动后台清理协程，回收空闲超时连接。
-func (p *Pool) StartCleaner() {
+// 修复 B10：接收 done channel，进程退出时停止协程，避免 goroutine 泄漏。
+func (p *Pool) StartCleaner(done ...<-chan struct{}) {
+	var d <-chan struct{}
+	if len(done) > 0 {
+		d = done[0]
+	}
 	go func() {
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
-		for range ticker.C {
-			p.cleanIdle()
+		for {
+			select {
+			case <-d:
+				return
+			case <-ticker.C:
+				p.cleanIdle()
+			}
 		}
 	}()
 }
 
 // Execute 在指定连接上执行命令，返回按行拆分的 stdout 与 stderr。
 // 调用方负责 Get/Release；Execute 本身不释放连接。
-func (p *Pool) Execute(node model.Node, cmds []string) (output []string, errs []string, err error) {
+// 修复 B11：支持 ctx 取消，客户端断开时终止 SSH 命令执行。
+func (p *Pool) Execute(ctx context.Context, node model.Node, cmds []string) (output []string, errs []string, err error) {
 	if len(cmds) == 0 {
 		return nil, nil, nil
 	}
@@ -227,14 +239,28 @@ func (p *Pool) Execute(node model.Node, cmds []string) (output []string, errs []
 	var stdout, stderr bytes.Buffer
 	session.Stdout = &stdout
 	session.Stderr = &stderr
-	runErr := session.Run(joinLines(cmds))
 
-	output = splitLines(stdout.String())
-	errs = splitLines(stderr.String())
-	if runErr != nil && len(errs) == 0 {
-		errs = []string{runErr.Error()}
+	// 修复 B11：ctx 取消时关闭 session 终止命令执行
+	if err := session.Start(joinLines(cmds)); err != nil {
+		return nil, nil, err
 	}
-	return output, errs, nil
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- session.Wait()
+	}()
+	select {
+	case runErr := <-waitCh:
+		output = splitLines(stdout.String())
+		errs = splitLines(stderr.String())
+		if runErr != nil && len(errs) == 0 {
+			errs = []string{runErr.Error()}
+		}
+		return output, errs, nil
+	case <-ctx.Done():
+		_ = session.Close() // 终止 Wait
+		<-waitCh            // 等待 goroutine 退出
+		return nil, nil, ctx.Err()
+	}
 }
 
 // dial 建立一条新 SSH 连接（不含 keepalive 启动，由 Get 统一管理生命周期）。

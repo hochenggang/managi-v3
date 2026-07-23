@@ -70,6 +70,7 @@ import { useShortcutsStore } from '@/stores/shortcutsStore';
 import { generateNodeId } from '@/protocol/types';
 import { handleError, handleMsg } from "@/helper";
 import { batchSSH } from '@/api';
+import { useConfirm } from '@/composables/useConfirm';
 import type { CmdsTestResult } from '@/protocol/types';
 import IconSave from '@/components/icons/IconSave.vue';
 
@@ -109,14 +110,22 @@ const handleRenameShortcut = (index: number) => {
   if (name) shortcutsStore.rename(index, name.trim())
 }
 
-const handleDeleteShortcut = (index: number) => {
-  if (confirm(t('cmdPanel.shortcutDeleteConfirm'))) {
+const { confirm } = useConfirm()
+
+const handleDeleteShortcut = async (index: number) => {
+  // 修复 B30：用 Modal 确认对话框替代原生 confirm()
+  if (await confirm(t('cmdPanel.shortcutDeleteConfirm'))) {
     shortcutsStore.remove(index)
   }
 }
 
 const triggerExecute = () => {
-  executeCommand().catch(() => {})
+  // 修复 B3：原 .catch(() => {}) 静默吞掉验证错误（emptyCmd/nothingSelected），用户无反馈
+  executeCommand().catch((e: unknown) => {
+    // executeCommand 内部已对 batchSSH 失败做 try/catch+handleError，
+    // 此处仅处理它主动抛出的验证错误
+    handleError(e)
+  })
 }
 
 const executeCommand = async () => {
@@ -136,9 +145,10 @@ const executeCommand = async () => {
   try {
     const results = await batchSSH(selectedNodes, cmds);
     executionResults.value = results;
-  } catch (error: any) {
-    console.error(error);
-    handleError(error);
+  } catch (error) {
+    // 修复 B1：handleError 已放宽为 unknown，自动归一化 Error 为 message
+    console.error(error)
+    handleError(error)
   } finally {
     isExecuting.value = false;
   }

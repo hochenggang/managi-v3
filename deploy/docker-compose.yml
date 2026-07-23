@@ -15,12 +15,24 @@ services:
       - MANAGI_HOST=0.0.0.0
       - MANAGI_PORT=18001
       - MANAGI_INDEX_HTML=/app/index.html
-      - MANAGI_BASICAUTH_ENABLED=false
-      # - MANAGI_BASICAUTH_USERNAME=admin
-      # - MANAGI_BASICAUTH_PASSWORD=changeme
+      # 修复 B38：安全默认值——默认启用 BasicAuth，避免误暴露在公网成为开放跳板机
+      # 首次启动前必须修改默认用户名/密码
+      - MANAGI_BASICAUTH_ENABLED=true
+      - MANAGI_BASICAUTH_USERNAME=admin
+      - MANAGI_BASICAUTH_PASSWORD=changeme
       - MANAGI_SSH_TIMEOUT=15
       - MANAGI_KEEPALIVE=30
     restart: unless-stopped
+    # 修复 B38：容器硬化——只读根文件系统、最小权限、禁用特权升级
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 512m
+    pids_limit: 200
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:18001/health"]
       interval: 30s

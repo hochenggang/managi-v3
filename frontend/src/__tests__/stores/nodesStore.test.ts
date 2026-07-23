@@ -1,7 +1,27 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
+import { nextTick } from 'vue'
 import { useNodesStore } from '@/stores/nodesStore'
 import type { ApiNode } from '@/protocol/types'
+
+// 修复 B16：mock 缓存写入以验证 debounce 行为
+const { mockSetCachedNodes, mockSetCachedGroups } = vi.hoisted(() => ({
+  mockSetCachedNodes: vi.fn(),
+  mockSetCachedGroups: vi.fn(),
+}))
+
+vi.mock('@/api', () => ({
+  getCachedNodes: vi.fn(() => []),
+  setCachedNodes: mockSetCachedNodes,
+  getCachedGroups: vi.fn(() => []),
+  setCachedGroups: mockSetCachedGroups,
+}))
+
+// mock useTerminal 的 clearSessionId/clearAllSessionIds（nodesStore 导入它们）
+vi.mock('@/composables/useTerminal', () => ({
+  clearSessionId: vi.fn(),
+  clearAllSessionIds: vi.fn(),
+}))
 
 const testNode: ApiNode = {
   name: 'node1',
@@ -20,7 +40,14 @@ const testNode2: ApiNode = {
 
 describe('useNodesStore', () => {
   beforeEach(() => {
+    vi.useFakeTimers()
     setActivePinia(createPinia())
+    mockSetCachedNodes.mockClear()
+    mockSetCachedGroups.mockClear()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   describe('node CRUD', () => {
@@ -120,6 +147,45 @@ describe('useNodesStore', () => {
       expect(store.currentXtremNode).toEqual(testNode)
       store.removeXtremNode()
       expect(store.currentXtremNode).toBeNull()
+    })
+  })
+
+  // 修复 B16：验证 save 被 debounce，连续变更只写一次 localStorage
+  describe('debounced save (B16 fix)', () => {
+    it('rapid changes trigger a single debounced save', async () => {
+      const store = useNodesStore()
+      mockSetCachedNodes.mockClear()
+      mockSetCachedGroups.mockClear()
+      // 连续多次变更，每次都触发 deep watch → scheduleSave
+      store.setNode(testNode)
+      store.setNode(testNode2)
+      store.addToSelectedNodes('1.2.3.4:22')
+      store.addToSelectedNodes('5.6.7.8:22')
+      await nextTick() // 等待 Vue watch 回调入队 scheduleSave
+      // debounce 期间不应写入
+      expect(mockSetCachedNodes).not.toHaveBeenCalled()
+      // 推进 299ms，仍未到 300ms 阈值
+      vi.advanceTimersByTime(299)
+      expect(mockSetCachedNodes).not.toHaveBeenCalled()
+      // 推进到 300ms，debounce 触发，只写一次
+      vi.advanceTimersByTime(1)
+      expect(mockSetCachedNodes).toHaveBeenCalledTimes(1)
+      expect(mockSetCachedGroups).toHaveBeenCalledTimes(1)
+    })
+
+    it('save fires immediately after debounce window', async () => {
+      const store = useNodesStore()
+      mockSetCachedNodes.mockClear()
+      store.setNode(testNode)
+      await nextTick()
+      vi.advanceTimersByTime(300)
+      expect(mockSetCachedNodes).toHaveBeenCalledTimes(1)
+      // 之后再变更，再次 debounce
+      store.setNode(testNode2)
+      await nextTick()
+      expect(mockSetCachedNodes).toHaveBeenCalledTimes(1) // 仍未写入
+      vi.advanceTimersByTime(300)
+      expect(mockSetCachedNodes).toHaveBeenCalledTimes(2)
     })
   })
 })
