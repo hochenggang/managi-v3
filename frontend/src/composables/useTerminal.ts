@@ -15,7 +15,7 @@ import { useSettingsStore } from '@/stores/settingsStore'
 
 // 会话 ID 缓存：按 host:port:username 索引，同节点复用同一 sessionId。
 // 前端断线重连时携带相同 sessionId，后端即可复用已维护的 shell 会话。
-// 修复 E2：模块级 Map 永不清理会导致长期使用后内存泄漏。提供 clearSessionId 供节点删除场景调用。
+// 模块级 Map 永不清理会导致长期使用后内存泄漏。提供 clearSessionId 供节点删除场景调用。
 const sessionIds = new Map<string, string>()
 function getSessionId(node: ApiNode): string {
   const key = `${node.host}:${node.port}:${node.username}`
@@ -43,7 +43,7 @@ export function clearAllSessionIds(): void {
 }
 
 export function useTerminal(container: HTMLElement, node: ApiNode) {
-  // 修复 B6/B7：从设置 store 读取终端字体大小与字体族，并在变化时热更新
+  // 从设置 store 读取终端字体大小与字体族，并在变化时热更新
   const settings = useSettingsStore()
   const term = new Terminal({
     cursorBlink: true,
@@ -59,7 +59,7 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
   term.focus()
 
   const sessionId = getSessionId(node)
-  // 修复 B24：重连期间缓冲用户输入，重连成功后 flush
+  // 重连期间缓冲用户输入，重连成功后 flush
   let inputBuffer = ''
   const { status, connect, send, close, markFailed, markLoginSuccess } = useWebSocket('/ws/ssh', {
     authPayload: loginMessage(node, sessionId, term.cols, term.rows),
@@ -103,14 +103,14 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
     // 终端输出统一走 {type:"msg"} 文本帧，二进制处理为死代码。
   })
 
-  // 修复 B24：用户输入透传，WS 未连接时缓冲，重连后 flush
+  // 用户输入透传，WS 未连接时缓冲，重连后 flush
   term.onData((data) => {
     if (!send(inputMessage(data))) {
       inputBuffer += data
     }
   })
 
-  // 修复 B24：watch status，重连成功后 flush 缓冲的输入
+  // watch status，重连成功后 flush 缓冲的输入
   const stopStatusWatch = watch(status, (s) => {
     if (s === 'connected' && inputBuffer) {
       send(inputMessage(inputBuffer))
@@ -119,7 +119,7 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
   })
 
   // 右键菜单：有选区则复制，无选区则粘贴（屏蔽浏览器默认右键菜单）。
-  // 修复 B14：非安全上下文（HTTP）下 navigator.clipboard 不可用，降级到 execCommand。
+  // 非安全上下文（HTTP）下 navigator.clipboard 不可用，降级到 execCommand。
   const handleContextMenu = async (ev: MouseEvent) => {
     ev.preventDefault()
     const selection = term.getSelection()
@@ -130,7 +130,7 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
     }
     const text = await readFromClipboard()
     if (text) {
-      // 修复 B15：bracketed paste，多行粘贴时用 ESC[200~ ... ESC[201~ 包裹，
+      // bracketed paste，多行粘贴时用 ESC[200~ ... ESC[201~ 包裹，
       // 让 shell 识别为粘贴而非手动输入，避免意外执行命令
       term.paste(`\x1b[200~${text}\x1b[201~`)
     }
@@ -143,12 +143,12 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
     send(resizeMessage(term.cols, term.rows))
   }
 
-  // 修复 B28：移除冗余的 window.addEventListener('resize')，
+  // 移除冗余的 window.addEventListener('resize')，
   // ResizeObserver 已覆盖容器尺寸变化（含 window resize 导致的变化）。
   const resizeObserver = new ResizeObserver(() => onResize())
   resizeObserver.observe(container)
 
-  // 修复 B6/B7：监听终端字体/主题变化，热更新 xterm 实例并重新 fit
+  // 监听终端字体/主题变化，热更新 xterm 实例并重新 fit
   const stopSettingsWatch = watch(
     () => settings.settings,
     (s) => {

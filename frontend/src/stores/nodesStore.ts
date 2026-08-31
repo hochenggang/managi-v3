@@ -29,7 +29,7 @@ export const useNodesStore = defineStore('nodes', () => {
     setCachedGroups(groups.value)
   }
 
-  // 修复 B16：批量操作（setAllNodes/clearNodes/导入）会触发多次 deep watch 回调，
+  // 批量操作（setAllNodes/clearNodes/导入）会触发多次 deep watch 回调，
   // 每次都写 localStorage 同步阻塞主线程。debounce 300ms 合并连续变更，降低 I/O 压力。
   let saveTimer: ReturnType<typeof setTimeout> | null = null
   function scheduleSave(): void {
@@ -130,7 +130,7 @@ export const useNodesStore = defineStore('nodes', () => {
     const node = nodes.value[id]
     delete nodes.value[id]
     removeFromSelectedNodes(id)
-    // 修复 E2：节点删除时清理其终端会话 ID 缓存，避免残留复用到已失效的后端会话
+    // 节点删除时清理其终端会话 ID 缓存，避免残留复用到已失效的后端会话
     if (node) clearSessionId(node)
   }
 
@@ -138,13 +138,13 @@ export const useNodesStore = defineStore('nodes', () => {
     nodes.value = {}
     groups.value = []
     selectedNodes.value = []
-    // M1：清空 sessionId 缓存，避免残留复用到已失效的后端会话
+    // 清空 sessionId 缓存，避免残留复用到已失效的后端会话
     clearAllSessionIds()
   }
 
   function setAllNodes(list: ApiNode[], groupList?: string[]): void {
     nodes.value = {}
-    // M1：导入配置覆盖全部节点，旧 sessionId 不再有效
+    // 导入配置覆盖全部节点，旧 sessionId 不再有效
     clearAllSessionIds()
     list.forEach(setNode)
     groups.value = groupList && groupList.length > 0

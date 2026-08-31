@@ -187,7 +187,7 @@ const cancelPathEdit = (): void => {
   pathEditing.value = false
 }
 
-// 修复 B23：SFTP 连接状态 UI。原 Finder 仅在 status bar 显示节点名，
+// SFTP 连接状态 UI。原 Finder 仅在 status bar 显示节点名，
 // 连接断开/重连/登录失败时用户无感知。补充状态文本与颜色提示。
 const statusText = computed(() => {
   const map: Record<ConnectionStatus, string> = {
@@ -214,7 +214,7 @@ const statusClass = computed(() => {
   return map[status.value]
 })
 
-// 修复 B17：路径规范化。折叠多个连续斜杠、去除尾部斜杠（根 '/' 除外）。
+// 路径规范化。折叠多个连续斜杠、去除尾部斜杠（根 '/' 除外）。
 // navigateTo 原用 join('/') 会产生 '//foo//bar/' 双斜杠；navigateUp 对带尾斜杠的路径会错算层级。
 function normalizePath(p: string): string {
   const collapsed = p.replace(/\/+/g, '/')
@@ -285,7 +285,7 @@ const handleFileUpload = async (event: Event) => {
   const input = event.target as HTMLInputElement
   if (!input.files || input.files.length === 0) return
   isUploading.value = true
-  // M3：隔离单文件错误，失败项记录后继续上传剩余文件
+  // 隔离单文件错误，失败项记录后继续上传剩余文件
   const failedFiles: string[] = []
   try {
     for (const file of Array.from(input.files)) {
@@ -330,7 +330,7 @@ const { confirm } = useConfirm()
 
 const deleteSelected = async () => {
   if (!selectedFile.value) return
-  // 修复 B30：用 Modal 确认对话框替代原生 confirm()
+  // 用 Modal 确认对话框替代原生 confirm()
   if (await confirm(`${t("finder.deleteConfire")}\n${selectedFile.value.filename}`)) {
     const path = getFullPath(selectedFile.value.filename)
     try {
@@ -344,7 +344,7 @@ const deleteSelected = async () => {
 }
 
 const formatFileSize = (bytes: number): string => {
-  // M4：负数/零归一为 0 B；Math.min 防止极大文件越界；sizes 补 PB
+  // 负数/零归一为 0 B；Math.min 防止极大文件越界；sizes 补 PB
   if (bytes <= 0) return '0 B'
   const k = 1024
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']

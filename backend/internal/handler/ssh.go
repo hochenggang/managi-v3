@@ -23,12 +23,12 @@ const maxRequestBodySize = 10 << 20 // 10MB
 // 请求体: {node, cmds}  响应: CmdsTestResult
 func testHandler(pool *sshpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// M5：仅允许 POST，其他方法返回 405
+		// 仅允许 POST，其他方法返回 405
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		// 修复 B12：限制请求体大小
+		// 限制请求体大小
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		var req struct {
 			Node model.Node `json:"node"`
@@ -49,12 +49,12 @@ func testHandler(pool *sshpool.Pool) http.HandlerFunc {
 // v3：errgroup 并发执行，SetLimit 控制并发数。
 func batchHandler(pool *sshpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// M5：仅允许 POST，其他方法返回 405
+		// 仅允许 POST，其他方法返回 405
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		// 修复 B12：限制请求体大小
+		// 限制请求体大小
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		var req model.BatchCmdRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -67,7 +67,7 @@ func batchHandler(pool *sshpool.Pool) http.HandlerFunc {
 		// （由 results[i].Success 表达失败），故闭包仍 return nil。
 		g, ctx := errgroup.WithContext(r.Context())
 		g.SetLimit(10) // 并发上限
-		// 修复 B32：Go 1.22+ 循环变量每次迭代是新变量，无需 i,node := i,node
+		// Go 1.22+ 循环变量每次迭代是新变量，无需 i,node := i,node
 		for i, node := range req.Nodes {
 			g.Go(func() error {
 				results[i] = executeSingle(ctx, pool, node, req.Cmds)
@@ -82,7 +82,7 @@ func batchHandler(pool *sshpool.Pool) http.HandlerFunc {
 }
 
 // executeSingle 单节点命令执行，连接用完 release（修正 v2：release 不关闭）。
-// 修复 B11：接收 ctx，客户端断开时终止 SSH 命令执行。
+// 接收 ctx，客户端断开时终止 SSH 命令执行。
 func executeSingle(ctx context.Context, pool *sshpool.Pool, node model.Node, cmds []string) model.CmdsTestResult {
 	start := time.Now()
 	output, errs, err := pool.Execute(ctx, node, cmds)

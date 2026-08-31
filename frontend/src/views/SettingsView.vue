@@ -157,7 +157,7 @@ function importConfig(): void {
         const inputSettings = isV3Config ? (raw.settings as Partial<Settings> | undefined) : undefined
 
         for (const [key1, rawNode] of Object.entries(inputNodes)) {
-          // M8：先转换为统一 ApiNode 格式，再校验必填字段与类型
+          // 先转换为统一 ApiNode 格式，再校验必填字段与类型
           const n = oldApiNodeConvert(rawNode)
           if (typeof n.host !== 'string' || !n.host ||
             typeof n.username !== 'string' || !n.username ||

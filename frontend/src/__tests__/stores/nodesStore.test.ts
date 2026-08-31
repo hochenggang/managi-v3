@@ -4,7 +4,7 @@ import { nextTick } from 'vue'
 import { useNodesStore } from '@/stores/nodesStore'
 import { generateNodeId, type ApiNode } from '@/protocol/types'
 
-// 修复 B16：mock 缓存写入以验证 debounce 行为
+// mock 缓存写入以验证 debounce 行为
 const { mockSetCachedNodes, mockSetCachedGroups } = vi.hoisted(() => ({
   mockSetCachedNodes: vi.fn(),
   mockSetCachedGroups: vi.fn(),
@@ -139,7 +139,7 @@ describe('useNodesStore', () => {
     })
   })
 
-  // 修复 B16：验证 save 被 debounce，连续变更只写一次 localStorage
+  // 验证 save 被 debounce，连续变更只写一次 localStorage
   describe('debounced save (B16 fix)', () => {
     it('rapid changes trigger a single debounced save', async () => {
       const store = useNodesStore()

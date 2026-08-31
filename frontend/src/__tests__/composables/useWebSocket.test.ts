@@ -135,7 +135,7 @@ describe('useWebSocket', () => {
   })
 
   it('reconnects with exponential backoff on unexpected close, stops at maxReconnect', async () => {
-    // 修复 B21：Math.random 被 mock 为 0，消除 jitter 对定时的干扰
+    // Math.random 被 mock 为 0，消除 jitter 对定时的干扰
     vi.spyOn(Math, 'random').mockReturnValue(0)
     const onClose = vi.fn()
     const { result } = withSetup(() => useWebSocket('/ws', { maxReconnect: 2, onClose }))
@@ -161,7 +161,7 @@ describe('useWebSocket', () => {
     expect(MockWebSocket.instances).toHaveLength(3)
   })
 
-  // 修复 B21：验证重连延迟包含 jitter（base + 0~500ms 随机抖动）
+  // 验证重连延迟包含 jitter（base + 0~500ms 随机抖动）
   it('reconnect delay includes random jitter (B21 fix)', async () => {
     vi.spyOn(Math, 'random').mockReturnValue(0.5) // jitter = 250ms
     const { result } = withSetup(() => useWebSocket('/ws', { maxReconnect: 1 }))
@@ -175,7 +175,7 @@ describe('useWebSocket', () => {
     expect(MockWebSocket.instances).toHaveLength(2)
   })
 
-  // 修复 B25：onerror 在已登录状态下更新为 reconnecting
+  // onerror 在已登录状态下更新为 reconnecting
   it('onerror updates status from connected to reconnecting (B25 fix)', () => {
     const { result } = withSetup(() => useWebSocket('/ws'))
     result.connect()
@@ -189,7 +189,7 @@ describe('useWebSocket', () => {
   })
 
   it('close() cancels pending reconnect timer (A9 fix)', async () => {
-    // N4：验证 close() 在已调度重连定时器后调用会 clearTimeout，避免连接"复活"
+    // 验证 close() 在已调度重连定时器后调用会 clearTimeout，避免连接"复活"
     const { result } = withSetup(() => useWebSocket('/ws', { maxReconnect: 5 }))
     result.connect()
     MockWebSocket.LAST!.fireOpen()
@@ -214,7 +214,7 @@ describe('useWebSocket', () => {
   })
 
   it('fires onReconnectFailed before onClose when reconnects exhausted (T3 fix)', async () => {
-    // 修复 B21：Math.random 被 mock 为 0，消除 jitter 对定时的干扰
+    // Math.random 被 mock 为 0，消除 jitter 对定时的干扰
     vi.spyOn(Math, 'random').mockReturnValue(0)
     const onReconnectFailed = vi.fn()
     const onClose = vi.fn()

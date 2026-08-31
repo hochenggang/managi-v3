@@ -86,7 +86,7 @@ func (m *sessionManager) AttachOrCreate(id string, node model.Node, wc *wsConn, 
 			ls.closeTimer = nil
 		}
 		// 回放 scrollback（持锁保证回放先于后续实时输出）
-		// 修复 B13：分块发送，避免单个超大 WS 帧导致前端卡顿/内存峰值
+		// 分块发送，避免单个超大 WS 帧导致前端卡顿/内存峰值
 		for pos := 0; pos < len(ls.buf); pos += scrollbackChunk {
 			end := pos + scrollbackChunk
 			if end > len(ls.buf) {
@@ -190,7 +190,7 @@ func (m *sessionManager) close(id string) {
 	ls.cur = nil
 	ls.mu.Unlock()
 
-	// 修复 B22：记录 sess.Close 错误，便于诊断 shell 已关闭等场景
+	// 记录 sess.Close 错误，便于诊断 shell 已关闭等场景
 	if err := ls.sess.Close(); err != nil {
 		slog.Debug("terminal session close error", "id", id, "err", err)
 	}
@@ -202,7 +202,7 @@ func (m *sessionManager) close(id string) {
 }
 
 // outputLoop 持续读取 shell stdout，追加 scrollback 并转发给当前客户端。
-// 修复 S6：select 仅在 Read 阻塞前检查退出信号；Read 阻塞期间由 close() 调用
+// select 仅在 Read 阻塞前检查退出信号；Read 阻塞期间由 close() 调用
 // sess.Close() 解除阻塞（PTY 关闭后 Read 返回 EOF/error），随后 err 分支触发 close。
 func (ls *liveSession) outputLoop(ctx context.Context) {
 	buf := make([]byte, 4096)
@@ -225,7 +225,7 @@ func (ls *liveSession) outputLoop(ctx context.Context) {
 			}
 			ls.appendScrollbackLocked(data)
 			cur := ls.cur
-			// H7：复制 cur 引用后释放锁，避免 writeMsg 网络阻塞时持锁卡死 Detach/close 等操作
+			// 复制 cur 引用后释放锁，避免 writeMsg 网络阻塞时持锁卡死 Detach/close 等操作
 			ls.mu.Unlock()
 			if cur != nil {
 				_ = cur.writeMsg(string(data))

@@ -43,7 +43,7 @@ func terminalWSHandler(mgr *sessionManager, cfg *config.Config) http.HandlerFunc
 			return
 		}
 		defer func() { _ = conn.Close() }()
-		// H3：限制 WS 消息大小，防止恶意客户端发送超大消息导致 OOM
+		// 限制 WS 消息大小，防止恶意客户端发送超大消息导致 OOM
 		conn.SetReadLimit(64 * 1024) // 64KB，终端消息足够
 		wc := newWSConn(conn)
 
@@ -140,7 +140,7 @@ func forwardInput(wc *wsConn, sess *terminal.Session, cancel context.CancelFunc,
 		case msgTypeMsg:
 			var s string
 			if json.Unmarshal(env.Data, &s) == nil {
-				// 修复 T1：stdin 写入失败记录日志，便于诊断 shell 已关闭等场景
+				// stdin 写入失败记录日志，便于诊断 shell 已关闭等场景
 				if _, err := stdin.Write([]byte(s)); err != nil {
 					slog.Debug("terminal stdin write failed", "err", err)
 				}

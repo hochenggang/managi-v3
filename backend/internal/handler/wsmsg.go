@@ -139,7 +139,7 @@ func (w *wsConn) writePong() error {
 }
 
 func (w *wsConn) writePing() error {
-	// 修复 B1：WriteControl 亦属写操作，gorilla/websocket 要求所有写（含控制帧）串行，
+	// WriteControl 亦属写操作，gorilla/websocket 要求所有写（含控制帧）串行，
 	// 必须复用 w.mu 与 writeJSON/writeRaw 互斥，否则并发写会破坏连接。
 	w.mu.Lock()
 	defer w.mu.Unlock()

@@ -274,7 +274,7 @@ func TestUploadComplete_RenameFailure_PreservesState(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "rename .part to final")
 
-	// 修复 B34：upload 状态应保留（不会返回 unknown upload_id）
+	// upload 状态应保留（不会返回 unknown upload_id）
 	sc.mu.Lock()
 	_, exists := sc.uploads[uploadID]
 	sc.mu.Unlock()

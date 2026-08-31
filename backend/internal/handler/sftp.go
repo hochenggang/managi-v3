@@ -70,7 +70,7 @@ func sftpWSHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 			return
 		}
 		defer func() { _ = conn.Close() }()
-		// H3：限制 WS 消息大小，防止恶意客户端发送超大消息导致 OOM
+		// 限制 WS 消息大小，防止恶意客户端发送超大消息导致 OOM
 		conn.SetReadLimit(2 * 1024 * 1024) // 2MB，覆盖 1MB chunk + 帧头
 		wc := newWSConn(conn)
 
@@ -107,7 +107,7 @@ func sftpWSHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 		// 服务端 WS 心跳：控制帧 Ping
 		go startPingLoop(ctx, wc, deadline, cfg.WSPingInterval)
 
-		// C1：下载串行化锁，确保同一 WS 连接同一时刻只有一个下载 goroutine，
+		// 下载串行化锁，确保同一 WS 连接同一时刻只有一个下载 goroutine，
 		// 避免多个并发下载的二进制帧交错导致文件内容损坏。
 		var downloadMu sync.Mutex
 
@@ -219,8 +219,8 @@ func handleSftpOp(ctx context.Context, wc *wsConn, sc *sftp.Client, env wsEnvelo
 		_ = writeResp(msgTypeOk, nil)
 
 	case msgTypeDownload:
-		// T2：异步下载，避免大文件阻塞 WS 读循环（心跳/其他操作）
-		// C1/H8：传 ctx 与 downloadMu，串行化下载并在 WS 断开时取消
+		// 异步下载，避免大文件阻塞 WS 读循环（心跳/其他操作）
+		// 传 ctx 与 downloadMu，串行化下载并在 WS 断开时取消
 		go handleDownload(ctx, wc, sc, req, downloadMu, env.Seq)
 
 	default:
@@ -230,8 +230,8 @@ func handleSftpOp(ctx context.Context, wc *wsConn, sc *sftp.Client, env wsEnvelo
 
 // handleDownload 异步处理下载：推送 download_start → 二进制流 → complete。
 // wc 写操作有互斥锁保护，可与主循环并发安全写入。
-// C1：downloadMu 串行化同一 WS 连接的并发下载，避免二进制帧交错损坏文件。
-// H8：ctx 控制下载生命周期，WS 断开时取消 reader 解除 Read 阻塞。
+// downloadMu 串行化同一 WS 连接的并发下载，避免二进制帧交错损坏文件。
+// ctx 控制下载生命周期，WS 断开时取消 reader 解除 Read 阻塞。
 // seq 回填到 download_start/complete/错误响应，前端据此匹配。
 func handleDownload(ctx context.Context, wc *wsConn, sc *sftp.Client, req sftpRequestData, downloadMu *sync.Mutex, seq int64) {
 	downloadMu.Lock()
@@ -244,7 +244,7 @@ func handleDownload(ctx context.Context, wc *wsConn, sc *sftp.Client, req sftpRe
 	}
 	defer func() { _ = reader.Close() }()
 
-	// H8：ctx 取消时关闭 reader，解除 reader.Read 阻塞，使 goroutine 及时退出
+	// ctx 取消时关闭 reader，解除 reader.Read 阻塞，使 goroutine 及时退出
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
@@ -336,7 +336,7 @@ type sftpDownloadRequest struct {
 // v3 新增：HTTP Range 下载，支持断点续传。设计见 design-v3.md §6.5。
 func sftpDownloadHandler(pool *sshpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// M5：仅允许 POST，其他方法返回 405
+		// 仅允许 POST，其他方法返回 405
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -407,7 +407,7 @@ func parseRangeOffset(rangeHeader string) int64 {
 	if err != nil {
 		return 0
 	}
-	// L1：负数 offset 无意义，归零避免 Seek 到负偏移
+	// 负数 offset 无意义，归零避免 Seek 到负偏移
 	if offset < 0 {
 		return 0
 	}

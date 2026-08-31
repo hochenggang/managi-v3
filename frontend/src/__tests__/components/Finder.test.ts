@@ -80,7 +80,7 @@ describe('Finder', () => {
     mockList.mockResolvedValue(undefined)
   })
 
-  // 修复 B17：navigateTo 不再产生双斜杠路径
+  // navigateTo 不再产生双斜杠路径
   describe('path navigation (B17 fix)', () => {
     it('navigateTo builds normalized path without double slashes', async () => {
       mockCurrentPath.value = '/foo/bar'
@@ -163,7 +163,7 @@ describe('Finder', () => {
     })
   })
 
-  // 修复 B23：SFTP 连接状态在状态栏显示
+  // SFTP 连接状态在状态栏显示
   describe('connection status UI (B23 fix)', () => {
     it('shows connected status text', async () => {
       mockStatus.value = 'connected'

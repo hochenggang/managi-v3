@@ -54,7 +54,7 @@ function defaultShouldRetry(err: unknown): boolean {
     return err.status >= 500
   }
   if (err instanceof Error) {
-    // L5：用正则精确匹配 "Error code NNN"，替代脆弱的 startsWith + replace
+    // 用正则精确匹配 "Error code NNN"，替代脆弱的 startsWith + replace
     const m = err.message.match(/^Error code (\d+)$/)
     if (m) return parseInt(m[1]) >= 500
   }

@@ -15,15 +15,16 @@ services:
       - MANAGI_HOST=0.0.0.0
       - MANAGI_PORT=18001
       - MANAGI_INDEX_HTML=/app/index.html
-      # 修复 B38：安全默认值——默认启用 BasicAuth，避免误暴露在公网成为开放跳板机
-      # 首次启动前必须修改默认用户名/密码
+      # 安全默认值：默认启用 BasicAuth，避免误暴露在公网成为开放跳板机。
+      # 密码留空时服务端自动生成随机强口令并从日志提示获取方式；
+      # 生产部署建议显式设置 MANAGI_BASICAUTH_PASSWORD。
       - MANAGI_BASICAUTH_ENABLED=true
       - MANAGI_BASICAUTH_USERNAME=admin
-      - MANAGI_BASICAUTH_PASSWORD=changeme
+      - MANAGI_BASICAUTH_PASSWORD=
       - MANAGI_SSH_TIMEOUT=15
       - MANAGI_KEEPALIVE=30
     restart: unless-stopped
-    # 修复 B38：容器硬化——只读根文件系统、最小权限、禁用特权升级
+    # 容器硬化：只读根文件系统、最小权限、禁用特权升级
     read_only: true
     tmpfs:
       - /tmp:size=64m

@@ -80,7 +80,7 @@ const props = defineProps({
 const newNode = ref<ApiNode>({ ...props.node });
 
 const handleSubmit = () => {
-  // M7：校验端口范围 1-65535
+  // 校验端口范围 1-65535
   const port = Number(newNode.value.port)
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     handleError(t('addNode.invalidPort'))

@@ -78,7 +78,7 @@ const handleClick = async () => {
         handleMsg(sucess_message)
       }
     } catch (error) {
-      // 修复 B2：handleError 已放宽为 unknown，无需 as string 强转
+      // handleError 已放宽为 unknown，无需 as string 强转
       handleError(error)
     } finally {
       isLoading.value = false;

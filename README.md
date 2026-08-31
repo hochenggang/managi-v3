@@ -10,10 +10,10 @@
 
 ## 特性
 
-- **SSH 终端**：基于 xterm.js 的 Web 终端，支持多会话、窗口大小调整
+- **SSH 终端**：基于 xterm.js 的 Web 终端，支持多会话、窗口大小调整、断线重连恢复会话
 - **SFTP 文件管理**：浏览、上传（断点续传）、下载（Range 请求）、重命名、删除
 - **批量命令**：跨多节点并行执行命令，实时查看输出
-- **多平台**：后端 Go 静态二进制（Linux/macOS/Windows, glibc/musl），前端单 HTML 文件，桌面端为托盘网页启动器
+- **多平台**：后端 Go 静态二进制（Linux/macOS/Windows, glibc/musl），前端单 HTML 文件，桌面端为 Go 托盘启动器
 
 ## 快速开始
 
@@ -45,9 +45,33 @@ sudo ./install.sh
 | `MANAGI_INDEX_HTML` | `index.html` | 前端单页文件路径 |
 | `MANAGI_BASICAUTH_ENABLED` | `false` | 是否启用 Basic Auth |
 | `MANAGI_BASICAUTH_USERNAME` | `admin` | Basic Auth 用户名 |
-| `MANAGI_BASICAUTH_PASSWORD` | 随机 | Basic Auth 密码 |
+| `MANAGI_BASICAUTH_PASSWORD` | 随机 | Basic Auth 密码（启用但未配置时自动生成） |
 | `MANAGI_SSH_TIMEOUT` | `15` | SSH 连接超时（秒） |
 | `MANAGI_KEEPALIVE` | `30` | SSH 保活间隔（秒） |
+| `MANAGI_SSH_IDLE_TIMEOUT` | `120` | SSH 连接池空闲清理时间（秒） |
+| `MANAGI_WS_READ_DEADLINE` | `90` | WebSocket 读超时（秒） |
+| `MANAGI_WS_PING_INTERVAL` | `30` | WebSocket Ping 间隔（秒） |
+| `MANAGI_SESSION_IDLE_TIMEOUT` | `60` | 终端会话空闲保留时间（秒），前端断开后保留 shell 的时长 |
+| `MANAGI_SFTP_CHUNK_SIZE` | `1048576` | SFTP 上传分片大小（字节，默认 1MB） |
+| `MANAGI_SFTP_DOWNLOAD_CHUNK` | `65536` | SFTP 下载分片大小（字节，默认 64KB） |
+
+## 行为说明
+
+### 终端会话复用
+
+后端维护到目标服务器的 shell 会话，前端断开后保留 `MANAGI_SESSION_IDLE_TIMEOUT`（默认 60 秒）。期间前端重连可复用同一会话（保留工作目录、运行中进程、scrollback）。超时后会话关闭。
+
+### SFTP 下载路径
+
+小文件（≤100MB）通过 WebSocket 下载，大文件自动切换为 HTTP Range 流式下载（`POST /api/sftp/download`），避免浏览器内存溢出。断点续传通过 Range 请求头实现。
+
+### 主机密钥校验（TOFU）
+
+首次连接某主机时记录其公钥（Trust On First Use），后续连接比对公钥，不匹配则拒绝（防中间人攻击）。主机密钥仅进程内有效，重启后重新信任。这是简约设计取舍：持久化主机密钥需引入额外存储与用户交互，当前场景（内网跳板机）可接受。
+
+### 凭据存储
+
+节点配置（含 SSH 密码/私钥）明文存储于浏览器 localStorage。这是工具定位（本机/内网管理端）的取舍：若需更高安全性，建议使用 SSH 密钥认证而非密码。
 
 ## 服务管理
 
@@ -64,9 +88,9 @@ rc-service managi restart
 
 ## 技术栈
 
-- **后端**：Go 1.22 + gorilla/websocket + golang.org/x/crypto/ssh
+- **后端**：Go 1.25 + gorilla/websocket + golang.org/x/crypto/ssh
 - **前端**：Vue 3 + TypeScript + Vite + xterm.js
-- **桌面端**：go system tray
+- **桌面端**：Go system tray（单二进制内嵌服务与前端）
 - **CI/CD**：GitHub Actions（自动构建、测试、发布）
 
 ## 开发

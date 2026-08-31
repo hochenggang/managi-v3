@@ -73,7 +73,7 @@ onMounted(() => {
     })
     standaloneTerm.open(terminalContainer.value)
     standaloneTerm.writeln(generateGreenText(t('xtermPanel.hello')))
-    // 修复 B7：空状态终端也需响应主题变化
+    // 空状态终端也需响应主题变化
     cleanup = watch(
       () => settings.settings,
       () => {

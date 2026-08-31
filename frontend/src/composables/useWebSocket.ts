@@ -113,7 +113,7 @@ export function useWebSocket(path: string, opts: WSOptions = {}) {
 
     ws.onerror = () => {
       stopHeartbeat()
-      // 修复 B25：onerror 时更新状态，避免 UI 卡在 connecting/connected
+      // onerror 时更新状态，避免 UI 卡在 connecting/connected
       // onclose 会随后设置最终状态（reconnecting/reconnect_failed）
       // 改用 hasLoginSucceeded 判断（onopen 不再置 connected，status 可能仍是 connecting）
       if (!manualClose && hasLoginSucceeded) {
@@ -127,13 +127,13 @@ export function useWebSocket(path: string, opts: WSOptions = {}) {
   function scheduleReconnect(): void {
     if (reconnectAttempts < (opts.maxReconnect ?? 3)) {
       status.value = 'reconnecting'
-      // 修复 B21：指数退避 + 随机 jitter，避免多客户端同时重连导致服务端惊群
+      // 指数退避 + 随机 jitter，避免多客户端同时重连导致服务端惊群
       const base = Math.min(1000 * 2 ** reconnectAttempts, 16000)
       const jitter = Math.random() * 500 // 0~500ms 随机抖动
       reconnectAttempts++
       reconnectTimer = setTimeout(doConnect, base + jitter)
     } else {
-      // 修复 T3：重连耗尽时通知调用方做可视化提示，避免用户体感「卡住」
+      // 重连耗尽时通知调用方做可视化提示，避免用户体感「卡住」
       status.value = hasLoginSucceeded ? 'reconnect_failed' : 'first_failed'
       opts.onReconnectFailed?.()
       opts.onClose?.()

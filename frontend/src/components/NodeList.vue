@@ -177,7 +177,7 @@ function editNode(node: ApiNode): void {
 const { confirm } = useConfirm()
 
 async function confirmDeleteNode(node: ApiNode): Promise<void> {
-  // 修复 B30：用 Modal 确认对话框替代原生 confirm()
+  // 用 Modal 确认对话框替代原生 confirm()
   if (await confirm(`${t('header.actions.delete')} ${node.name}?`)) {
     nodesStore.removeNode(generateNodeId(node))
   }
@@ -201,7 +201,7 @@ function showGroupMenu(event: MouseEvent, group: string): void {
     })
     items.push({
       label: t('sidebar.deleteGroup'), danger: true, action: async () => {
-        // 修复 B30：用 Modal 确认对话框替代原生 confirm()
+        // 用 Modal 确认对话框替代原生 confirm()
         if (await confirm(`${t('sidebar.deleteGroupConfirm')} ${group}?`)) nodesStore.removeGroup(group)
       }
     })

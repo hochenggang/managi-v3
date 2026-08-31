@@ -18,7 +18,7 @@ describe('useRetry', () => {
 
   it('retries then succeeds', async () => {
     const { retrying, withRetry } = useRetry()
-    // D8：在 fn 内捕获 retrying.value，验证首次调用=false、重试调用=true
+    // 在 fn 内捕获 retrying.value，验证首次调用=false、重试调用=true
     const retryingDuringCall: boolean[] = []
     const fn = vi.fn()
       .mockImplementationOnce(async () => {

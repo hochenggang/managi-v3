@@ -271,7 +271,7 @@ describe('useSFTP', () => {
     withSetup(() => useSFTP(node))
     respond({ type: 'login', data: { success: false, message: 'auth failed' } })
     expect(mockHandleError).toHaveBeenCalledWith('登录失败：auth failed')
-    // 修复 B4：应调用 markFailed 而非 close，UI 可区分"登录失败"与"主动关闭"
+    // 应调用 markFailed 而非 close，UI 可区分"登录失败"与"主动关闭"
     expect(mockMarkFailed).toHaveBeenCalledTimes(1)
     expect(mockClose).not.toHaveBeenCalled()
   })
@@ -287,7 +287,7 @@ describe('useSFTP', () => {
     await p1
   })
 
-  // 修复 B5：手动 close 应 reject pending Promise，避免组件卸载时泄漏
+  // 手动 close 应 reject pending Promise，避免组件卸载时泄漏
   it('close() rejects pending Promise (B5 fix)', async () => {
     const s = withSetup(() => useSFTP(node))
     // 发起 list 但不响应 → pendingResolve 占用
@@ -298,7 +298,7 @@ describe('useSFTP', () => {
     expect(mockClose).toHaveBeenCalledTimes(1)
   })
 
-  // 修复 B6：未激活下载时二进制帧应被忽略，避免前次下载延迟帧污染新下载
+  // 未激活下载时二进制帧应被忽略，避免前次下载延迟帧污染新下载
   it('onBinary ignores chunks when download not active (B6 fix)', async () => {
     const s = withSetup(() => useSFTP(node))
     // 直接发二进制帧，未经过 download_start，downloadActive=false
@@ -307,13 +307,13 @@ describe('useSFTP', () => {
     expect(s.downloadProgress.value).toBe(0)
   })
 
-  // 修复 B9：maxReconnect 从 3 提高到 10，与终端一致
+  // maxReconnect 从 3 提高到 10，与终端一致
   it('uses maxReconnect=10 (B9 fix)', () => {
     withSetup(() => useSFTP(node))
     expect(capturedOpts?.maxReconnect).toBe(10)
   })
 
-  // 修复 B29：downloadViaHTTP 在流读取错误时重置进度，避免残留非零值
+  // downloadViaHTTP 在流读取错误时重置进度，避免残留非零值
   it('downloadViaHTTP resets progress on stream error (B29 fix)', async () => {
     const s = withSetup(() => useSFTP(node))
     // 构造一个先产出 50 字节再抛错的流
@@ -331,7 +331,7 @@ describe('useSFTP', () => {
     expect(s.downloadProgress.value).toBe(0)
   })
 
-  // 修复 B29：downloadViaHTTP 正常完成后进度保持 100（succeeded 不重置）
+  // downloadViaHTTP 正常完成后进度保持 100（succeeded 不重置）
   it('downloadViaHTTP keeps progress at completion (B29 fix)', async () => {
     const s = withSetup(() => useSFTP(node))
     const stream = new ReadableStream<Uint8Array>({

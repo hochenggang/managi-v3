@@ -1,5 +1,5 @@
 // useConfirm：全局确认对话框 composable。
-// 修复 B30：替代原生 confirm()，提供与应用主题一致的 Modal 确认对话框。
+// 替代原生 confirm()，提供与应用主题一致的 Modal 确认对话框。
 // 调用方使用 const { confirm } = useConfirm()，await confirm(message) 返回 boolean。
 
 import { ref } from 'vue'

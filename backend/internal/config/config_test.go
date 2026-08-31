@@ -34,7 +34,7 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, "admin", cfg.BasicAuthUser)
 	// 空表示未显式配置；启用 BasicAuth 时由服务入口生成随机强口令
 	assert.Equal(t, "", cfg.BasicAuthPassword)
-	// 修复 B36：IndexHTMLPath 现在在 Load 中转为绝对路径
+	// IndexHTMLPath 现在在 Load 中转为绝对路径
 	assert.True(t, filepath.IsAbs(cfg.IndexHTMLPath), "IndexHTMLPath should be absolute")
 	assert.True(t, filepath.Base(cfg.IndexHTMLPath) == "index.html", "IndexHTMLPath base should be index.html")
 }

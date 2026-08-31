@@ -73,7 +73,7 @@ export async function downloadWithRange(
   path: string,
   offset = 0,
 ): Promise<{ total: number; stream: ReadableStream<Uint8Array> }> {
-  // M6：加 AbortController 超时，防止连接挂起时无限等待（仅控制首字节响应）
+  // 加 AbortController 超时，防止连接挂起时无限等待（仅控制首字节响应）
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 60000)
   try {
@@ -87,7 +87,7 @@ export async function downloadWithRange(
       signal: controller.signal,
     })
     if (!resp.ok && resp.status !== 206) throw new Error(`Error code ${resp.status}`)
-    // T4：body 可能为 null（服务端错误/网络中断），显式检查避免后续 getReader() 崩溃
+    // body 可能为 null（服务端错误/网络中断），显式检查避免后续 getReader() 崩溃
     if (!resp.body) throw new Error('download: response body is null')
     const total = parseTotalFromRange(resp.headers.get('Content-Range') ?? '')
     return { total, stream: resp.body }

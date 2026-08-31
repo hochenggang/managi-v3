@@ -22,7 +22,7 @@ vi.mock('@/stores/settingsStore', () => ({
 // 捕获 Terminal 实例回调
 let onDataCb: ((data: string) => void) | null = null
 let onSelectionChangeCb: (() => void) | null = null
-// 修复 B6/B7：捕获 Terminal 构造参数以断言字体设置
+// 捕获 Terminal 构造参数以断言字体设置
 let terminalCtorOpts: any = null
 const mockTerminal = {
   options: {} as Record<string, unknown>,
@@ -67,7 +67,7 @@ const mockConnect = vi.fn()
 const mockClose = vi.fn()
 const mockMarkFailed = vi.fn()
 const mockMarkLoginSuccess = vi.fn()
-// 修复 B24：用真实 ref 模拟 status，支持 watch 触发
+// 用真实 ref 模拟 status，支持 watch 触发
 let mockStatus: ReturnType<typeof ref<string>>
 
 vi.mock('@/composables/useWebSocket', () => ({
@@ -135,7 +135,7 @@ describe('useTerminal', () => {
     terminalCtorOpts = null
     // 每次测试重置 reactive settings 到默认值
     mockSettingsHolder.settings = makeSettings()
-    // 修复 B24：每次测试创建新的 status ref，默认 connected
+    // 每次测试创建新的 status ref，默认 connected
     mockStatus = ref('connected')
     // mockSend 默认返回 true（WS 已连接），模拟正常发送
     mockSend.mockReturnValue(true)
@@ -202,14 +202,14 @@ describe('useTerminal', () => {
     expect(mockTerminal.write).not.toHaveBeenCalled()
   })
 
-  // 修复 B8：onBinary 已移除（后端仅发文本帧），不应注册 onBinary 回调
+  // onBinary 已移除（后端仅发文本帧），不应注册 onBinary 回调
   it('does NOT register onBinary callback (B8 fix)', () => {
     const container = document.createElement('div')
     withSetup(() => useTerminal(container, node))
     expect(onBinaryCb).toBeFalsy()
   })
 
-  // 修复 B6：Terminal 构造时应使用 settings 中的字体大小与字体族
+  // Terminal 构造时应使用 settings 中的字体大小与字体族
   it('Terminal constructor uses fontSize/fontFamily from settings (B6 fix)', () => {
     mockSettingsHolder.settings = makeSettings({
       terminalFontSize: 18,
@@ -221,7 +221,7 @@ describe('useTerminal', () => {
     expect(terminalCtorOpts.fontFamily).toBe("'Fira Code', monospace")
   })
 
-  // 修复 B7：settings 变化时热更新 Terminal options（fontSize/fontFamily/theme）
+  // settings 变化时热更新 Terminal options（fontSize/fontFamily/theme）
   it('settings change hot-updates Terminal options (B7 fix)', async () => {
     const container = document.createElement('div')
     withSetup(() => useTerminal(container, node))
@@ -238,7 +238,7 @@ describe('useTerminal', () => {
     expect(mockSend).toHaveBeenCalledWith(inputMessage('ls -la\n'))
   })
 
-  // 修复 B24：WS 未连接时缓冲输入，重连成功后 flush
+  // WS 未连接时缓冲输入，重连成功后 flush
   it('buffers input when WS not connected, flushes on reconnect (B24 fix)', async () => {
     const container = document.createElement('div')
     mockStatus = ref('reconnecting')
@@ -259,7 +259,7 @@ describe('useTerminal', () => {
     })
   })
 
-  // 修复 B28：不应注册 window resize 监听器（ResizeObserver 已覆盖）
+  // 不应注册 window resize 监听器（ResizeObserver 已覆盖）
   it('does NOT add window resize listener (B28 fix)', () => {
     const spy = vi.spyOn(window, 'addEventListener')
     const container = document.createElement('div')

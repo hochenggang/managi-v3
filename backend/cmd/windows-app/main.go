@@ -56,7 +56,7 @@ func onReady() {
 
 	go runServer()
 
-	// 修复 B33：用 strconv.Itoa + 字符串拼接替代 fmt.Sprintf，减少反射开销
+	// 用 strconv.Itoa + 字符串拼接替代 fmt.Sprintf，减少反射开销
 	url := "http://" + host + ":" + strconv.Itoa(port)
 	if err := waitForHealth(); err != nil {
 		slog.Error("server health check failed", "err", err)
@@ -121,7 +121,7 @@ func onExit() {
 
 func waitForHealth() error {
 	client := http.Client{Timeout: 200 * time.Millisecond}
-	// 修复 B33：用 strconv.Itoa + 字符串拼接替代 fmt.Sprintf
+	// 用 strconv.Itoa + 字符串拼接替代 fmt.Sprintf
 	url := "http://" + host + ":" + strconv.Itoa(port) + "/health"
 	deadline := time.Now().Add(30 * time.Second)
 

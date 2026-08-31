@@ -113,14 +113,14 @@ const handleRenameShortcut = (index: number) => {
 const { confirm } = useConfirm()
 
 const handleDeleteShortcut = async (index: number) => {
-  // 修复 B30：用 Modal 确认对话框替代原生 confirm()
+  // 用 Modal 确认对话框替代原生 confirm()
   if (await confirm(t('cmdPanel.shortcutDeleteConfirm'))) {
     shortcutsStore.remove(index)
   }
 }
 
 const triggerExecute = () => {
-  // 修复 B3：原 .catch(() => {}) 静默吞掉验证错误（emptyCmd/nothingSelected），用户无反馈
+  // 原 .catch(() => {}) 静默吞掉验证错误（emptyCmd/nothingSelected），用户无反馈
   executeCommand().catch((e: unknown) => {
     // executeCommand 内部已对 batchSSH 失败做 try/catch+handleError，
     // 此处仅处理它主动抛出的验证错误
@@ -146,7 +146,7 @@ const executeCommand = async () => {
     const results = await batchSSH(selectedNodes, cmds);
     executionResults.value = results;
   } catch (error) {
-    // 修复 B1：handleError 已放宽为 unknown，自动归一化 Error 为 message
+    // handleError 已放宽为 unknown，自动归一化 Error 为 message
     console.error(error)
     handleError(error)
   } finally {

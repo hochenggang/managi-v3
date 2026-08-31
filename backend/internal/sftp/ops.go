@@ -160,8 +160,8 @@ func (c *Client) UploadInit(remotePath, filename string, totalSize int64, chunkS
 }
 
 // UploadChunk 写入一个分片到指定 offset。
-// 修复 B5：全程持锁访问 st.file，避免与 closeUpload/UploadComplete 竞态写已关闭句柄。
-// H6：校验客户端传入的 offset 与服务端维护的 st.offset 一致，防止恶意客户端写任意位置。
+// 全程持锁访问 st.file，避免与 closeUpload/UploadComplete 竞态写已关闭句柄。
+// 校验客户端传入的 offset 与服务端维护的 st.offset 一致，防止恶意客户端写任意位置。
 func (c *Client) UploadChunk(uploadID string, chunkIndex int, offset int64, data []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -170,7 +170,7 @@ func (c *Client) UploadChunk(uploadID string, chunkIndex int, offset int64, data
 		return fmt.Errorf("unknown upload_id: %s", uploadID)
 	}
 
-	// H6：校验客户端 offset 与服务端期望一致，忽略客户端值做 Seek
+	// 校验客户端 offset 与服务端期望一致，忽略客户端值做 Seek
 	if offset != st.offset {
 		return fmt.Errorf("chunk offset mismatch: got %d, expected %d", offset, st.offset)
 	}
@@ -205,7 +205,7 @@ func (c *Client) closeUpload(uploadID string) {
 }
 
 // UploadComplete 完成上传：.part → final。
-// 修复 B34：Rename 失败时保留 upload 状态，允许客户端重试 UploadComplete（句柄已关闭，
+// Rename 失败时保留 upload 状态，允许客户端重试 UploadComplete（句柄已关闭，
 // 重试只需 stat + rename，无需重新上传分片）。仅在 stat 校验失败（大小不符）时清理状态，
 // 因为此时客户端需 re-init 以获取正确的续传 offset。
 func (c *Client) UploadComplete(uploadID string) error {
@@ -222,7 +222,7 @@ func (c *Client) UploadComplete(uploadID string) error {
 		st.file = nil
 	}
 
-	// C5：校验 .part 文件大小 == totalSize，不符则报错保留 .part 允许续传
+	// 校验 .part 文件大小 == totalSize，不符则报错保留 .part 允许续传
 	if st.totalSize > 0 {
 		info, statErr := c.sc.Stat(st.partPath)
 		if statErr != nil {
@@ -236,7 +236,7 @@ func (c *Client) UploadComplete(uploadID string) error {
 	}
 
 	if err := c.sc.Rename(st.partPath, st.finalPath); err != nil {
-		// 修复 B34：Rename 失败时保留 upload 状态，允许客户端重试 UploadComplete
+		// Rename 失败时保留 upload 状态，允许客户端重试 UploadComplete
 		return fmt.Errorf("rename .part to final: %w", err)
 	}
 

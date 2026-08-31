@@ -26,7 +26,7 @@ import { handleError } from '@/helper'
 const CHUNK_SIZE = 1 << 20 // 1MB
 const DEFAULT_TIMEOUT_MS = 30000
 const CHUNK_TIMEOUT_MS = 5 * 60 * 1000 // 分片写入可能跨慢网/慢盘，给 5 分钟
-// 修复 B8：WS 下载缓冲上限。超此大小中止并提示走 HTTP Range 流式下载，避免浏览器 OOM。
+// WS 下载缓冲上限。超此大小中止并提示走 HTTP Range 流式下载，避免浏览器 OOM。
 const DOWNLOAD_BUFFER_LIMIT = 256 * 1024 * 1024 // 256MB
 // 超过此大小的文件应改走 HTTP Range 流式下载，而非 WS 缓冲。导出供调用方统一判定。
 export const LARGE_FILE_THRESHOLD = 100 * 1024 * 1024 // 100MB
@@ -54,7 +54,7 @@ export function useSFTP(node: ApiNode) {
   let downloadBuffer: Uint8Array[] = []
   let downloadTotalSize = 0
   let downloadReceivedSize = 0
-  // B6：下载激活标志，仅在 download_start → complete 期间为 true，避免前次下载的延迟二进制帧污染新下载
+  // 下载激活标志，仅在 download_start → complete 期间为 true，避免前次下载的延迟二进制帧污染新下载
   let downloadActive = false
 
   /** rejectPending 拒绝并清理 pending Promise。供 close/onClose/超时调用。 */
@@ -94,13 +94,13 @@ export function useSFTP(node: ApiNode) {
 
   const { status, connected, connect, send, close: wsClose, markFailed, markLoginSuccess } = useWebSocket('/ws/sftp', {
     authPayload: sftpLogin(node),
-    // 修复 B9：原 maxReconnect:3 过低，网络抖动时 SFTP 早早放弃。后端 SSH 连接池维持会话，
+    // 原 maxReconnect:3 过低，网络抖动时 SFTP 早早放弃。后端 SSH 连接池维持会话，
     // 提高到 10 与终端一致。登录失败由 markFailed 抑制重连。
     maxReconnect: 10,
     onClose: () => {
       loading.value = false
       downloadActive = false
-      // H2：WS 断开时 reject pending Promise，避免用户卡住等待超时
+      // WS 断开时 reject pending Promise，避免用户卡住等待超时
       rejectPending(new Error('WebSocket closed'))
     },
     onText: (data) => {
@@ -112,7 +112,7 @@ export function useSFTP(node: ApiNode) {
           if (r && !r.success) {
             loading.value = false
             handleError(`登录失败：${r.message ?? 'unknown'}`)
-            // 修复 B4：用 markFailed 替代 close，设置 first_failed 状态而非 disconnected，
+            // 用 markFailed 替代 close，设置 first_failed 状态而非 disconnected，
             // UI 可区分"登录失败"与"主动关闭"
             markFailed()
           } else if (r && r.success) {
@@ -134,7 +134,7 @@ export function useSFTP(node: ApiNode) {
         }
         case 'download_start':
           downloadTotalSize = (msg.data as SFTPDownloadStartData)?.total ?? 0
-          // B6：标记下载激活，后续二进制帧才会被接纳
+          // 标记下载激活，后续二进制帧才会被接纳
           downloadActive = true
           return
         case 'complete': {
@@ -151,7 +151,7 @@ export function useSFTP(node: ApiNode) {
           return
         case 'error':
           loading.value = false
-          // B6：错误时关闭下载激活标志，避免后续二进制帧误纳入
+          // 错误时关闭下载激活标志，避免后续二进制帧误纳入
           downloadActive = false
           handleError((msg.data as WSError)?.message ?? 'SFTP error')
           resolvePending(msg)
@@ -166,9 +166,9 @@ export function useSFTP(node: ApiNode) {
       }
     },
     onBinary: (data) => {
-      // B6：仅在被激活的下载期间接纳二进制帧，避免前次下载延迟帧污染新下载
+      // 仅在被激活的下载期间接纳二进制帧，避免前次下载延迟帧污染新下载
       if (!downloadActive) return
-      // 修复 B8：缓冲上限保护，超限中止并提示走 HTTP Range，避免浏览器 OOM
+      // 缓冲上限保护，超限中止并提示走 HTTP Range，避免浏览器 OOM
       if (downloadReceivedSize + data.byteLength > DOWNLOAD_BUFFER_LIMIT) {
         handleError(`文件超过 ${DOWNLOAD_BUFFER_LIMIT / 1024 / 1024}MB，请使用 downloadViaHTTP 流式下载`)
         downloadBuffer = []
@@ -324,7 +324,7 @@ export function useSFTP(node: ApiNode) {
       succeeded = true
     } finally {
       reader.releaseLock()
-      // 修复 B29：失败/超限时重置进度，避免残留值影响下次下载显示
+      // 失败/超限时重置进度，避免残留值影响下次下载显示
       if (!succeeded) downloadProgress.value = 0
     }
     const blob = new Blob(chunks as BlobPart[])
