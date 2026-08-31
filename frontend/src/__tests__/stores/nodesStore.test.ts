@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 import { useNodesStore } from '@/stores/nodesStore'
-import type { ApiNode } from '@/protocol/types'
+import { generateNodeId, type ApiNode } from '@/protocol/types'
 
 // 修复 B16：mock 缓存写入以验证 debounce 行为
 const { mockSetCachedNodes, mockSetCachedGroups } = vi.hoisted(() => ({
@@ -54,7 +54,7 @@ describe('useNodesStore', () => {
     it('setNode + getNodeById roundtrip', () => {
       const store = useNodesStore()
       store.setNode(testNode)
-      expect(store.getNodeById('1.2.3.4:22')).toEqual(testNode)
+      expect(store.getNodeById(generateNodeId(testNode))).toEqual(testNode)
     })
 
     it('getNodeById returns undefined for unknown id', () => {
@@ -65,16 +65,16 @@ describe('useNodesStore', () => {
     it('removeNode removes from nodes and selection', () => {
       const store = useNodesStore()
       store.setNode(testNode)
-      store.addToSelectedNodes('1.2.3.4:22')
-      store.removeNode('1.2.3.4:22')
-      expect(store.getNodeById('1.2.3.4:22')).toBeUndefined()
-      expect(store.selectedNodes).not.toContain('1.2.3.4:22')
+      store.addToSelectedNodes(generateNodeId(testNode))
+      store.removeNode(generateNodeId(testNode))
+      expect(store.getNodeById(generateNodeId(testNode))).toBeUndefined()
+      expect(store.selectedNodes).not.toContain(generateNodeId(testNode))
     })
 
     it('clearNodes clears nodes and selection', () => {
       const store = useNodesStore()
       store.setNode(testNode)
-      store.addToSelectedNodes('1.2.3.4:22')
+      store.addToSelectedNodes(generateNodeId(testNode))
       store.clearNodes()
       expect(store.allNodes).toHaveLength(0)
       expect(store.selectedNodes).toHaveLength(0)
@@ -91,8 +91,8 @@ describe('useNodesStore', () => {
     it('addToSelectedNodes deduplicates', () => {
       const store = useNodesStore()
       store.setNode(testNode)
-      store.addToSelectedNodes('1.2.3.4:22')
-      store.addToSelectedNodes('1.2.3.4:22')
+      store.addToSelectedNodes(generateNodeId(testNode))
+      store.addToSelectedNodes(generateNodeId(testNode))
       expect(store.selectedNodes).toHaveLength(1)
     })
 
@@ -100,16 +100,16 @@ describe('useNodesStore', () => {
       const store = useNodesStore()
       store.setNode(testNode)
       store.setNode(testNode2)
-      store.addToSelectedNodes('1.2.3.4:22')
-      store.addToSelectedNodes('5.6.7.8:22')
-      store.removeFromSelectedNodes('1.2.3.4:22')
-      expect(store.selectedNodes).toEqual(['5.6.7.8:22'])
+      store.addToSelectedNodes(generateNodeId(testNode))
+      store.addToSelectedNodes(generateNodeId(testNode2))
+      store.removeFromSelectedNodes(generateNodeId(testNode))
+      expect(store.selectedNodes).toEqual([generateNodeId(testNode2)])
     })
 
     it('clearSelectedNodes empties selection', () => {
       const store = useNodesStore()
       store.setNode(testNode)
-      store.addToSelectedNodes('1.2.3.4:22')
+      store.addToSelectedNodes(generateNodeId(testNode))
       store.clearSelectedNodes()
       expect(store.selectedNodes).toHaveLength(0)
     })
@@ -120,14 +120,14 @@ describe('useNodesStore', () => {
       store.setNode(testNode2)
       store.selectAllNodes()
       expect(store.selectedNodes).toHaveLength(2)
-      expect(store.selectedNodes).toContain('1.2.3.4:22')
-      expect(store.selectedNodes).toContain('5.6.7.8:22')
+      expect(store.selectedNodes).toContain(generateNodeId(testNode))
+      expect(store.selectedNodes).toContain(generateNodeId(testNode2))
     })
 
     it('getSelectedNodes returns node objects', () => {
       const store = useNodesStore()
       store.setNode(testNode)
-      store.addToSelectedNodes('1.2.3.4:22')
+      store.addToSelectedNodes(generateNodeId(testNode))
       expect(store.getSelectedNodes).toEqual([testNode])
     })
 
@@ -136,17 +136,6 @@ describe('useNodesStore', () => {
       store.setNode(testNode)
       store.setNode(testNode2)
       expect(store.allNodes).toHaveLength(2)
-    })
-  })
-
-  describe('xterm node', () => {
-    it('setXtremNode + removeXtremNode', () => {
-      const store = useNodesStore()
-      expect(store.currentXtremNode).toBeNull()
-      store.setXtremNode(testNode)
-      expect(store.currentXtremNode).toEqual(testNode)
-      store.removeXtremNode()
-      expect(store.currentXtremNode).toBeNull()
     })
   })
 
@@ -159,8 +148,8 @@ describe('useNodesStore', () => {
       // 连续多次变更，每次都触发 deep watch → scheduleSave
       store.setNode(testNode)
       store.setNode(testNode2)
-      store.addToSelectedNodes('1.2.3.4:22')
-      store.addToSelectedNodes('5.6.7.8:22')
+      store.addToSelectedNodes(generateNodeId(testNode))
+      store.addToSelectedNodes(generateNodeId(testNode2))
       await nextTick() // 等待 Vue watch 回调入队 scheduleSave
       // debounce 期间不应写入
       expect(mockSetCachedNodes).not.toHaveBeenCalled()

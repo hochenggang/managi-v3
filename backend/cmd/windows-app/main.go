@@ -11,7 +11,6 @@ import (
 	_ "embed"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -21,7 +20,8 @@ import (
 	"github.com/pkg/browser"
 
 	"managi/internal/config"
-	"managi/internal/handler"
+	"managi/internal/server"
+	"managi/internal/sshpool"
 )
 
 const (
@@ -36,7 +36,9 @@ var indexHTML []byte
 var iconICO []byte
 
 var srv *http.Server
-// done 用于通知后台 goroutine 退出（修复 B10）
+var pool *sshpool.Pool
+
+// done 用于通知后台 goroutine 退出
 var done = make(chan struct{})
 
 func main() {
@@ -87,28 +89,8 @@ func runServer() {
 	cfg.Port = port
 	cfg.IndexHTML = indexHTML
 
-	// 与服务器端入口一致：启用 BasicAuth 但未配置密码时生成随机强口令
-	if cfg.BasicAuthEnabled && cfg.BasicAuthPassword == "" {
-		cfg.BasicAuthPassword = handler.RandomBasicAuthPassword()
-		slog.Warn("BasicAuth 已启用但未配置密码，已生成随机口令", "generated_password", cfg.BasicAuthPassword)
-	}
-
-	mux := http.NewServeMux()
-	handler.Register(mux, cfg, done)
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
-
-	// 与服务器端入口一致，应用 BasicAuth 中间件（cfg.BasicAuthEnabled=false 时透传），最外层再套基础安全响应头
-	finalHandler := handler.SecurityHeaders(handler.BasicAuthMiddleware(cfg, done)(mux))
-
-	srv = &http.Server{
-		// 修复 B20：用 strconv.Itoa 替代自实现的 itoa，去除冗余代码
-		Addr:              net.JoinHostPort(host, strconv.Itoa(port)),
-		Handler:           finalHandler,
-		ReadHeaderTimeout: 10 * time.Second, // G112: 防 Slowloris 攻击
-	}
+	// 与服务器端入口共用同一套装配（路由 / 探活 / 鉴权 / 安全头 / 超时）
+	srv, pool = server.New(cfg, done)
 
 	slog.Info("managi windows app starting", "addr", srv.Addr)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -118,7 +100,7 @@ func runServer() {
 }
 
 func onExit() {
-	// 修复 B10：通知后台 goroutine 退出
+	// 通知后台 goroutine 退出
 	select {
 	case <-done:
 		// already closed
@@ -131,6 +113,9 @@ func onExit() {
 		if err := srv.Shutdown(ctx); err != nil {
 			slog.Error("server shutdown failed", "err", err)
 		}
+	}
+	if pool != nil {
+		pool.CloseAll()
 	}
 }
 

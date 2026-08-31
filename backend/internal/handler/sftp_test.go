@@ -41,7 +41,7 @@ func TestSftpDownloadHandler_Full(t *testing.T) {
 
 	pool := sshpool.New(testutil.TestConfig())
 	defer pool.CloseAll()
-	h := sftpDownloadHandler(pool, testutil.TestConfig())
+	h := sftpDownloadHandler(pool)
 
 	req := httptest.NewRequest("POST", "/api/sftp/download",
 		downloadBody(t, testutil.TestNode(srv.Host(), srv.Port()), "/test.txt"))
@@ -57,7 +57,7 @@ func TestSftpDownloadHandler_Full(t *testing.T) {
 func TestSftpDownloadHandler_RejectGET(t *testing.T) {
 	pool := sshpool.New(testutil.TestConfig())
 	defer pool.CloseAll()
-	h := sftpDownloadHandler(pool, testutil.TestConfig())
+	h := sftpDownloadHandler(pool)
 
 	req := httptest.NewRequest("GET", "/api/sftp/download?node={}&path=/test.txt", nil)
 	rec := httptest.NewRecorder()
@@ -76,7 +76,7 @@ func TestSftpDownloadHandler_Range(t *testing.T) {
 
 	pool := sshpool.New(testutil.TestConfig())
 	defer pool.CloseAll()
-	h := sftpDownloadHandler(pool, testutil.TestConfig())
+	h := sftpDownloadHandler(pool)
 
 	req := httptest.NewRequest("POST", "/api/sftp/download",
 		downloadBody(t, testutil.TestNode(srv.Host(), srv.Port()), "/test.txt"))
@@ -96,7 +96,7 @@ func TestSftpDownloadHandler_MissingParams(t *testing.T) {
 
 	pool := sshpool.New(testutil.TestConfig())
 	defer pool.CloseAll()
-	h := sftpDownloadHandler(pool, testutil.TestConfig())
+	h := sftpDownloadHandler(pool)
 	node := testutil.TestNode(srv.Host(), srv.Port())
 
 	// 缺 path
@@ -119,7 +119,7 @@ func TestSftpDownloadHandler_InvalidBody(t *testing.T) {
 
 	pool := sshpool.New(testutil.TestConfig())
 	defer pool.CloseAll()
-	h := sftpDownloadHandler(pool, testutil.TestConfig())
+	h := sftpDownloadHandler(pool)
 
 	req := httptest.NewRequest("POST", "/api/sftp/download", bytes.NewReader([]byte("notjson")))
 	rec := httptest.NewRecorder()
@@ -134,7 +134,7 @@ func TestSftpDownloadHandler_AuthFailure(t *testing.T) {
 
 	pool := sshpool.New(testutil.TestConfig())
 	defer pool.CloseAll()
-	h := sftpDownloadHandler(pool, testutil.TestConfig())
+	h := sftpDownloadHandler(pool)
 
 	req := httptest.NewRequest("POST", "/api/sftp/download",
 		downloadBody(t, testutil.BadPasswordNode(srv.Host(), srv.Port()), "/test.txt"))

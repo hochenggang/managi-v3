@@ -15,7 +15,6 @@ export const useNodesStore = defineStore('nodes', () => {
   const groups = ref<string[]>([])
   const selectedNodes = ref<string[]>([])
   const collapsedGroups = ref<Record<string, boolean>>({})
-  const currentXtremNode = ref<ApiNode | null>(null)
 
   function load(): void {
     nodes.value = {}
@@ -196,24 +195,15 @@ export const useNodesStore = defineStore('nodes', () => {
     return !!collapsedGroups.value[group]
   }
 
-  function setXtremNode(node: ApiNode): void {
-    currentXtremNode.value = node
-  }
-
-  function removeXtremNode(): void {
-    currentXtremNode.value = null
-  }
-
   load()
 
   return {
-    nodes, groups, selectedNodes, collapsedGroups, currentXtremNode,
+    nodes, groups, selectedNodes, collapsedGroups,
     allNodes, getSelectedNodes, groupSet,
     ensureGroup, addGroup, renameGroup, removeGroup, setGroupOrder,
     nodesInGroup, nodeIdsInGroup, isGroupSelected, isGroupPartiallySelected, toggleGroupSelection,
     setNode, getNodeById, removeNode, clearNodes, setAllNodes, moveNodeToGroup,
     addToSelectedNodes, removeFromSelectedNodes, clearSelectedNodes, selectAllNodes, toggleNodeSelection,
     toggleGroupCollapsed, isGroupCollapsed,
-    setXtremNode, removeXtremNode,
   }
 })

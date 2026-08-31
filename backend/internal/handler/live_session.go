@@ -113,7 +113,7 @@ func (m *sessionManager) AttachOrCreate(id string, node model.Node, wc *wsConn, 
 	if err != nil {
 		return nil, false, err
 	}
-	sess := terminal.New(node, sshConn.Client())
+	sess := terminal.New(sshConn.Client())
 	if cols <= 0 {
 		cols = 80
 	}

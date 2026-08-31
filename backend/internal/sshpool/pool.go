@@ -25,11 +25,10 @@ import (
 // 仅由 Pool 内部构造与生命周期管理，外部仅通过 Client() 获取底层 *ssh.Client，
 // 不应直接创建或关闭本类型（修复 E3：明确封装边界）。
 type Connection struct {
-	key      string
 	refs     int
 	lastUsed time.Time
 	client   *ssh.Client
-	done     chan struct{} // M2：close 时通知 keepalive goroutine 退出，避免短暂泄漏
+	done     chan struct{} // close 时通知 keepalive goroutine 退出，避免短暂泄漏
 }
 
 // Client 返回底层 SSH 客户端（供 sftp/terminal 复用）。
@@ -150,7 +149,7 @@ func (p *Pool) Get(node model.Node) (*Connection, error) {
 		return nil, err
 	}
 	done := make(chan struct{})
-	cNew := &Connection{key: key, refs: 1, lastUsed: time.Now(), client: client, done: done}
+	cNew := &Connection{refs: 1, lastUsed: time.Now(), client: client, done: done}
 	// 修复 B2：dial 在锁外，并发同 key 可能他人已先入池。
 	// 此时复用既有连接（持锁 refs++），关闭新建连接避免泄漏。
 	p.mu.Lock()

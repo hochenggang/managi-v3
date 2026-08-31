@@ -24,7 +24,7 @@ func TestTestHandler_Success(t *testing.T) {
 	pool := sshpool.New(testutil.TestConfig())
 	defer pool.CloseAll()
 
-	h := testHandler(pool, testutil.TestConfig())
+	h := testHandler(pool)
 
 	body, _ := json.Marshal(map[string]any{
 		"node": testutil.TestNode(srv.Host(), srv.Port()),
@@ -49,7 +49,7 @@ func TestTestHandler_BadJSON(t *testing.T) {
 	pool := sshpool.New(testutil.TestConfig())
 	defer pool.CloseAll()
 
-	h := testHandler(pool, testutil.TestConfig())
+	h := testHandler(pool)
 	req := httptest.NewRequest("POST", "/api/ssh/test", bytes.NewReader([]byte("not json")))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -65,7 +65,7 @@ func TestTestHandler_AuthFailure(t *testing.T) {
 	pool := sshpool.New(testutil.TestConfig())
 	defer pool.CloseAll()
 
-	h := testHandler(pool, testutil.TestConfig())
+	h := testHandler(pool)
 
 	body, _ := json.Marshal(map[string]any{
 		"node": testutil.BadPasswordNode(srv.Host(), srv.Port()),
@@ -90,7 +90,7 @@ func TestBatchHandler_Success(t *testing.T) {
 	pool := sshpool.New(testutil.TestConfig())
 	defer pool.CloseAll()
 
-	h := batchHandler(pool, testutil.TestConfig())
+	h := batchHandler(pool)
 
 	req := model.BatchCmdRequest{
 		Nodes: []model.Node{
@@ -124,7 +124,7 @@ func TestBatchHandler_PartialFailure(t *testing.T) {
 	pool := sshpool.New(testutil.TestConfig())
 	defer pool.CloseAll()
 
-	h := batchHandler(pool, testutil.TestConfig())
+	h := batchHandler(pool)
 
 	// 两个节点须身份不同：连接池键为 host:port:username，若仅密码不同则键相同，
 	// 并发执行时坏节点可能复用已建立的好连接而「假成功」，导致结果非确定。
@@ -160,7 +160,7 @@ func TestBatchHandler_BadJSON(t *testing.T) {
 	pool := sshpool.New(testutil.TestConfig())
 	defer pool.CloseAll()
 
-	h := batchHandler(pool, testutil.TestConfig())
+	h := batchHandler(pool)
 	req := httptest.NewRequest("POST", "/api/ssh/batch", bytes.NewReader([]byte("bad")))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

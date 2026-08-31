@@ -8,13 +8,10 @@ import (
 	"io"
 
 	"golang.org/x/crypto/ssh"
-
-	"managi/internal/model"
 )
 
 // Session 一次终端会话。
 type Session struct {
-	node    model.Node
 	client  *ssh.Client
 	session *ssh.Session
 	stdin   io.WriteCloser
@@ -22,8 +19,8 @@ type Session struct {
 }
 
 // New 创建终端会话。
-func New(node model.Node, sshc *ssh.Client) *Session {
-	return &Session{node: node, client: sshc}
+func New(sshc *ssh.Client) *Session {
+	return &Session{client: sshc}
 }
 
 // Open 申请 PTY 并启动 Shell。

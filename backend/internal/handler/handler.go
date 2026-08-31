@@ -22,8 +22,8 @@ func Register(mux *http.ServeMux, cfg *config.Config, done <-chan struct{}) *ssh
 	mux.HandleFunc("/", indexHandler(cfg))
 
 	// SSH 命令执行
-	mux.HandleFunc("/api/ssh/test", testHandler(pool, cfg))
-	mux.HandleFunc("/api/ssh/batch", batchHandler(pool, cfg))
+	mux.HandleFunc("/api/ssh/test", testHandler(pool))
+	mux.HandleFunc("/api/ssh/batch", batchHandler(pool))
 
 	// WebSocket 端点
 	mgr := newSessionManager(pool, cfg)
@@ -31,7 +31,7 @@ func Register(mux *http.ServeMux, cfg *config.Config, done <-chan struct{}) *ssh
 	mux.HandleFunc("/ws/sftp", sftpWSHandler(pool, cfg))
 
 	// v3 新增：SFTP 下载（HTTP Range，断点续传）
-	mux.HandleFunc("/api/sftp/download", sftpDownloadHandler(pool, cfg))
+	mux.HandleFunc("/api/sftp/download", sftpDownloadHandler(pool))
 
 	return pool
 }

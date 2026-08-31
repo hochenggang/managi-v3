@@ -1,5 +1,5 @@
 // Package main 是 Managi v3 后端入口。
-// 对应 v2 的 app.py，启动 HTTP 服务并注册路由。
+// 对应 v2 的 app.py，解析命令行参数后交由 server 包装配并启动 HTTP 服务。
 // 设计见 ../design-v3.md 第四章。
 package main
 
@@ -7,19 +7,17 @@ import (
 	"context"
 	"flag"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
 
 	"managi/internal/config"
-	"managi/internal/handler"
+	"managi/internal/server"
 )
 
-// 默认监听参数（修复 S4：提取常量，避免字面量重复）。
+// 默认监听参数（提取常量，避免字面量重复）。
 const (
 	defaultPort = 18001
 	defaultHost = "0.0.0.0"
@@ -31,8 +29,8 @@ func main() {
 	flag.Parse()
 
 	cfg := config.Load()
-	// 修复 B35：用 flag.Visit 检测 flag 是否被显式设置，而非值比较。
-	// 原逻辑 *port != defaultPort 会在用户显式传 -port 18001 时漏覆盖 cfg。
+	// 用 flag.Visit 检测 flag 是否被显式设置，而非值比较。
+	// 值比较会在用户显式传 -port 18001（恰为默认值）时漏覆盖。
 	flag.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "port":
@@ -42,41 +40,13 @@ func main() {
 		}
 	})
 
-	// 启用 BasicAuth 但未显式配置密码时，生成随机强口令（取代固定弱默认值）。
-	// 密码仅能从启动日志获取，故同时提醒用户显式配置 MANAGI_BASICAUTH_PASSWORD。
-	if cfg.BasicAuthEnabled && cfg.BasicAuthPassword == "" {
-		cfg.BasicAuthPassword = handler.RandomBasicAuthPassword()
-		slog.Warn("BasicAuth 已启用但未配置密码，已生成随机口令（建议用 MANAGI_BASICAUTH_PASSWORD 显式设置）",
-			"generated_password", cfg.BasicAuthPassword)
-	}
-
-	// 修复 B9/B10：done channel 用于通知所有后台 goroutine 退出
+	// done channel 用于通知所有后台 goroutine 退出
 	done := make(chan struct{})
+	srv, pool := server.New(cfg, done)
 
-	mux := http.NewServeMux()
-	pool := handler.Register(mux, cfg, done)
+	slog.Info("managi v3 starting", "addr", srv.Addr, "basicAuth", cfg.BasicAuthEnabled)
 
-	// 健康检查端点（供 Tauri sidecar 与 Docker healthcheck 使用）
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
-
-	// BasicAuth 中间件包裹全部路由（内部对 /health 放行），最外层再套基础安全响应头
-	finalHandler := handler.SecurityHeaders(basicAuthWrap(cfg, mux, done))
-
-	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
-	slog.Info("managi v3 starting", "addr", addr, "basicAuth", cfg.BasicAuthEnabled)
-	server := &http.Server{
-		Addr:              addr,
-		Handler:           finalHandler,
-		ReadHeaderTimeout: 10 * time.Second, // 防 Slowloris 慢速头攻击
-		ReadTimeout:       60 * time.Second,
-		IdleTimeout:       120 * time.Second,
-		// WriteTimeout 不设：WS / SFTP 下载为长连接，设写超时会误杀
-	}
-
-	// 修复 B9：信号驱动的优雅关闭
+	// 信号驱动的优雅关闭
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -86,7 +56,7 @@ func main() {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := server.Shutdown(ctx); err != nil {
+		if err := srv.Shutdown(ctx); err != nil {
 			slog.Error("server shutdown error", "err", err)
 		}
 		if pool != nil {
@@ -94,15 +64,9 @@ func main() {
 		}
 	}()
 
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("server failed", "err", err)
 		os.Exit(1)
 	}
 	slog.Info("managi v3 stopped")
-}
-
-// basicAuthWrap 引入 handler 包的 BasicAuth 中间件。
-// 独立函数避免 main 包直接依赖中间件实现细节。
-func basicAuthWrap(cfg *config.Config, h http.Handler, done <-chan struct{}) http.Handler {
-	return handler.BasicAuthMiddleware(cfg, done)(h)
 }

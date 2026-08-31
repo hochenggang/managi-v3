@@ -11,8 +11,7 @@
     "type-check": "vue-tsc --build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage",
-    "lint": "eslint src --ext .ts,.vue"
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@formkit/auto-animate": "^0.8.2",
@@ -22,8 +21,7 @@
     "@xterm/xterm": "^5.5.0",
     "pinia": "^3.0.2",
     "vue": "^3.5.13",
-    "vue-i18n": "^10.0.7",
-    "vue-router": "^4.5.0"
+    "vue-i18n": "^10.0.7"
   },
   "devDependencies": {
     "@tsconfig/node22": "^22.0.0",

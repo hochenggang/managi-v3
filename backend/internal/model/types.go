@@ -55,22 +55,6 @@ type BatchCmdRequest struct {
 	Cmds  []string `json:"cmds"`
 }
 
-// FileOperationType SFTP 操作类型。
-type FileOperationType string
-
-const (
-	OpUpload      FileOperationType = "upload"
-	OpUploadInit  FileOperationType = "upload_init"     // v3 新增：断点续传
-	OpUploadChunk FileOperationType = "upload_chunk"    // v3 新增
-	OpUploadDone  FileOperationType = "upload_complete" // v3 新增
-	OpDownload    FileOperationType = "download"
-	OpDelete      FileOperationType = "delete"
-	OpList        FileOperationType = "list"
-	OpMkdir       FileOperationType = "mkdir"
-	OpRename      FileOperationType = "rename"
-	OpMove        FileOperationType = "move"
-)
-
 // FileItem 目录项。
 type FileItem struct {
 	Filename string `json:"filename"`
@@ -78,18 +62,4 @@ type FileItem struct {
 	Mode     string `json:"mode"`
 	IsDir    bool   `json:"is_dir"`
 	Mtime    int64  `json:"mtime"`
-}
-
-// FileOperationRequest SFTP 操作请求。
-type FileOperationRequest struct {
-	Operation  FileOperationType `json:"operation"`
-	RemotePath string            `json:"remote_path"`
-	NewPath    string            `json:"new_path,omitempty"`
-	// v3 断点续传扩展
-	UploadID   string `json:"upload_id,omitempty"`
-	Filename   string `json:"filename,omitempty"`
-	TotalSize  int64  `json:"total_size,omitempty"`
-	ChunkSize  int    `json:"chunk_size,omitempty"`
-	ChunkIndex int    `json:"chunk_index,omitempty"`
-	Offset     int64  `json:"offset,omitempty"`
 }

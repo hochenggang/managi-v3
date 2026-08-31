@@ -27,8 +27,3 @@ require (
 	golang.org/x/sys v0.45.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-// TODO(design-v3 §4): 依赖将在实现阶段通过 go mod tidy 补全
-// Web 框架: net/http (标准库) + gorilla/websocket
-// SSH: golang.org/x/crypto/ssh
-// SFTP: github.com/pkg/sftp

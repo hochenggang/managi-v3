@@ -54,7 +54,10 @@ export interface AppConfig {
   settings?: Partial<import('@/stores/settingsStore').Settings>
 }
 
-/** 节点唯一 ID：host:port。 */
+/** 节点唯一 ID：host:port:username。
+ *  与后端连接池键（model.ConnectionKey）保持一致：同主机同端口但不同用户名的节点
+ *  是不同节点，若 ID 不含 username 会在前端互相覆盖、静默丢数据。
+ */
 export function generateNodeId(node: ApiNode): string {
-  return `${node.host}:${node.port}`
+  return `${node.host}:${node.port}:${node.username}`
 }

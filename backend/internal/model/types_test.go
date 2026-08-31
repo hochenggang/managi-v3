@@ -87,17 +87,3 @@ func TestAuthType_Constants(t *testing.T) {
 	assert.Equal(t, AuthType("password"), AuthPassword)
 	assert.Equal(t, AuthType("key"), AuthKey)
 }
-
-// TestFileOperationType_Constants 验证 SFTP 操作类型常量。
-func TestFileOperationType_Constants(t *testing.T) {
-	assert.Equal(t, FileOperationType("upload"), OpUpload)
-	assert.Equal(t, FileOperationType("upload_init"), OpUploadInit)
-	assert.Equal(t, FileOperationType("upload_chunk"), OpUploadChunk)
-	assert.Equal(t, FileOperationType("upload_complete"), OpUploadDone)
-	assert.Equal(t, FileOperationType("download"), OpDownload)
-	assert.Equal(t, FileOperationType("delete"), OpDelete)
-	assert.Equal(t, FileOperationType("list"), OpList)
-	assert.Equal(t, FileOperationType("mkdir"), OpMkdir)
-	assert.Equal(t, FileOperationType("rename"), OpRename)
-	assert.Equal(t, FileOperationType("move"), OpMove)
-}

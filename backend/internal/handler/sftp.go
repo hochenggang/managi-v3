@@ -318,9 +318,7 @@ type sftpDownloadRequest struct {
 
 // sftpDownloadHandler POST /api/sftp/download，请求体 {node, path}
 // v3 新增：HTTP Range 下载，支持断点续传。设计见 design-v3.md §6.5。
-//
-//nolint:unparam // cfg 保留供未来扩展（下载限速/权限校验），并与同包 handler 签名一致
-func sftpDownloadHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
+func sftpDownloadHandler(pool *sshpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// M5：仅允许 POST，其他方法返回 405
 		if r.Method != http.MethodPost {
