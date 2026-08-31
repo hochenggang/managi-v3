@@ -308,28 +308,37 @@ func parseChunkFrame(data []byte) (uploadID string, chunkIndex int, offset int64
 	return uploadID, chunkIndex, offset, chunkData, nil
 }
 
-// sftpDownloadHandler GET /api/sftp/download?node=...&path=...
+// sftpDownloadRequest 是 POST /api/sftp/download 的请求体。
+// 节点凭据（auth_value）必须走请求体而非 URL：URL 会被浏览器历史、
+// 代理日志与服务端访问日志记录下来。
+type sftpDownloadRequest struct {
+	Node model.Node `json:"node"`
+	Path string     `json:"path"`
+}
+
+// sftpDownloadHandler POST /api/sftp/download，请求体 {node, path}
 // v3 新增：HTTP Range 下载，支持断点续传。设计见 design-v3.md §6.5。
 //
 //nolint:unparam // cfg 保留供未来扩展（下载限速/权限校验），并与同包 handler 签名一致
 func sftpDownloadHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// M5：仅允许 GET，其他方法返回 405
-		if r.Method != http.MethodGet {
+		// M5：仅允许 POST，其他方法返回 405
+		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		nodeStr := r.URL.Query().Get("node")
-		remotePath := r.URL.Query().Get("path")
-		if nodeStr == "" || remotePath == "" {
+		// 限制请求体大小，防止超大 body 导致 OOM
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+		var req sftpDownloadRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.Node.Host == "" || req.Path == "" {
 			http.Error(w, "missing node or path", http.StatusBadRequest)
 			return
 		}
-		var node model.Node
-		if err := json.Unmarshal([]byte(nodeStr), &node); err != nil {
-			http.Error(w, "invalid node json: "+err.Error(), http.StatusBadRequest)
-			return
-		}
+		node, remotePath := req.Node, req.Path
 
 		sshConn, err := pool.Get(node)
 		if err != nil {

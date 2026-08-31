@@ -1,11 +1,21 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import {
+  downloadWithRange,
   parseTotalFromRange,
   oldApiNodeConvert,
   getCachedNodes,
   setCachedNodes,
 } from '@/api'
 import type { ApiNode, OldApiNode } from '@/protocol/types'
+
+const nodeWithSecret: ApiNode = {
+  name: 'n',
+  host: '1.2.3.4',
+  port: 22,
+  username: 'root',
+  auth_type: 'password',
+  auth_value: 'super-secret',
+}
 
 describe('parseTotalFromRange', () => {
   it('parses total from Content-Range header', () => {
@@ -99,5 +109,65 @@ describe('getCachedNodes / setCachedNodes', () => {
     expect(result).toHaveLength(1)
     expect(result[0].host).toBe('1.2.3.4')
     expect(result[0].username).toBe('root')
+  })
+})
+
+describe('downloadWithRange', () => {
+  const originalFetch = globalThis.fetch
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  function stubFetch(resp: Partial<Response>) {
+    const mock = vi.fn().mockResolvedValue(resp)
+    globalThis.fetch = mock as unknown as typeof fetch
+    return mock
+  }
+
+  it('sends credentials in POST body, never in the URL', async () => {
+    const mock = stubFetch({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'Content-Range': 'bytes 0-9/10' }),
+      body: { getReader: () => ({}) } as unknown as ReadableStream<Uint8Array>,
+    })
+
+    await downloadWithRange(nodeWithSecret, '/tmp/a.txt', 0)
+
+    const [url, init] = mock.mock.calls[0] as [string, RequestInit]
+    expect(url).not.toContain('super-secret')
+    expect(url).not.toContain('node=')
+    expect(init.method).toBe('POST')
+    const body = JSON.parse(init.body as string)
+    expect(body.path).toBe('/tmp/a.txt')
+    expect(body.node.auth_value).toBe('super-secret')
+  })
+
+  it('carries resume offset in the Range header', async () => {
+    const mock = stubFetch({
+      ok: false,
+      status: 206,
+      headers: new Headers({ 'Content-Range': 'bytes 100-199/200' }),
+      body: { getReader: () => ({}) } as unknown as ReadableStream<Uint8Array>,
+    })
+
+    const { total } = await downloadWithRange(nodeWithSecret, '/tmp/a.txt', 100)
+
+    const init = (mock.mock.calls[0] as [string, RequestInit])[1]
+    expect((init.headers as Record<string, string>).Range).toBe('bytes=100-')
+    expect(total).toBe(200)
+  })
+
+  it('rejects on error status', async () => {
+    stubFetch({ ok: false, status: 404, headers: new Headers(), body: null })
+    await expect(downloadWithRange(nodeWithSecret, '/missing.txt', 0)).rejects.toThrow('404')
+  })
+
+  it('rejects when response body is null on success', async () => {
+    stubFetch({ ok: true, status: 200, headers: new Headers(), body: null })
+    await expect(downloadWithRange(nodeWithSecret, '/tmp/a.txt', 0)).rejects.toThrow(
+      'response body is null',
+    )
   })
 })

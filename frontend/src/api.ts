@@ -66,18 +66,24 @@ export async function batchSSH(nodes: ApiNode[], cmds: string[]): Promise<CmdsTe
 }
 
 // v3 新增：HTTP Range 下载（断点续传）。设计见 design-v3.md §6.5。
+// 节点凭据走 POST body 而非 URL 查询串：URL 会被浏览器历史与各级访问日志记录。
+// 续传偏移用 Range 请求头表达，不进入 URL。
 export async function downloadWithRange(
   node: ApiNode,
   path: string,
   offset = 0,
 ): Promise<{ total: number; stream: ReadableStream<Uint8Array> }> {
-  const params = new URLSearchParams({ node: JSON.stringify(node), path })
   // M6：加 AbortController 超时，防止连接挂起时无限等待（仅控制首字节响应）
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 60000)
   try {
-    const resp = await fetch(`${getApiUrl()}${API_URI.sftpDownload}?${params}`, {
-      headers: { Range: `bytes=${offset}-` },
+    const resp = await fetch(`${getApiUrl()}${API_URI.sftpDownload}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Range: `bytes=${offset}-`,
+      },
+      body: JSON.stringify({ node, path }),
       signal: controller.signal,
     })
     if (!resp.ok && resp.status !== 206) throw new Error(`Error code ${resp.status}`)

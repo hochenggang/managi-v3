@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"managi/internal/config"
+	"managi/internal/keylock"
 	"managi/internal/model"
 	"managi/internal/sshpool"
 	"managi/internal/terminal"
@@ -24,13 +25,15 @@ const scrollbackChunk = 32 * 1024
 
 // sessionManager 维护按 sessionID 索引的活跃终端会话。
 type sessionManager struct {
-	mu          sync.Mutex
-	sessions    map[string]*liveSession
-	pool        *sshpool.Pool
-	cfg         *config.Config
-	idleTTL     time.Duration
-	perKeyLocks map[string]*sync.Mutex // C2：per-sessionID 锁，串行化同 id 的 AttachOrCreate
-	perKeyLock  sync.Mutex             // 保护 perKeyLocks 字典
+	mu       sync.Mutex
+	sessions map[string]*liveSession
+	pool     *sshpool.Pool
+	cfg      *config.Config
+	idleTTL  time.Duration
+	// keyLocks 按会话 ID 串行化同一 ID 的 AttachOrCreate，避免并发创建竞态。
+	// 条目在无持有者无等待者时自动回收：会话 ID 由前端每次打开标签页新生成，
+	// 旧实现的锁字典只增不删，长期运行必然累积。
+	keyLocks *keylock.Map
 }
 
 func newSessionManager(pool *sshpool.Pool, cfg *config.Config) *sessionManager {
@@ -39,24 +42,12 @@ func newSessionManager(pool *sshpool.Pool, cfg *config.Config) *sessionManager {
 		ttl = 60 * time.Second
 	}
 	return &sessionManager{
-		sessions:    make(map[string]*liveSession),
-		pool:        pool,
-		cfg:         cfg,
-		idleTTL:     ttl,
-		perKeyLocks: make(map[string]*sync.Mutex),
+		sessions: make(map[string]*liveSession),
+		pool:     pool,
+		cfg:      cfg,
+		idleTTL:  ttl,
+		keyLocks: keylock.New(),
 	}
-}
-
-// keyLock 获取指定 sessionID 的 per-key 锁（C2：串行化同 id 的 AttachOrCreate，避免竞态创建）。
-func (m *sessionManager) keyLock(id string) *sync.Mutex {
-	m.perKeyLock.Lock()
-	defer m.perKeyLock.Unlock()
-	if l, ok := m.perKeyLocks[id]; ok {
-		return l
-	}
-	l := &sync.Mutex{}
-	m.perKeyLocks[id] = l
-	return l
 }
 
 // liveSession 一个后端维护的终端会话：SSH shell + scrollback + 当前挂载的 WS 客户端。
@@ -76,16 +67,14 @@ type liveSession struct {
 
 // AttachOrCreate 查找或创建会话。
 // 返回 (会话, 是否复用已存在的)。失败返回 error。
-// C2：使用 per-key 锁串行化同一 sessionID 的并发创建，避免竞态导致 SSH 连接与 goroutine 泄漏。
+// 使用 keyLocks 串行化同一 sessionID 的并发创建，避免竞态导致 SSH 连接与 goroutine 泄漏。
 func (m *sessionManager) AttachOrCreate(id string, node model.Node, wc *wsConn, cols, rows int) (*liveSession, bool, error) {
 	if id == "" {
 		id = node.ConnectionKey()
 	}
 
-	// C2：per-key 锁保证同一 sessionID 的 AttachOrCreate 串行执行
-	perKey := m.keyLock(id)
-	perKey.Lock()
-	defer perKey.Unlock()
+	m.keyLocks.Lock(id)
+	defer m.keyLocks.Unlock(id)
 
 	// 1. 尝试复用已有会话
 	m.mu.Lock()

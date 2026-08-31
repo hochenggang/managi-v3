@@ -28,7 +28,8 @@ const DEFAULT_TIMEOUT_MS = 30000
 const CHUNK_TIMEOUT_MS = 5 * 60 * 1000 // 分片写入可能跨慢网/慢盘，给 5 分钟
 // 修复 B8：WS 下载缓冲上限。超此大小中止并提示走 HTTP Range 流式下载，避免浏览器 OOM。
 const DOWNLOAD_BUFFER_LIMIT = 256 * 1024 * 1024 // 256MB
-const LARGE_FILE_THRESHOLD = 100 * 1024 * 1024 // 100MB，超此值建议走 HTTP Range
+// 超过此大小的文件应改走 HTTP Range 流式下载，而非 WS 缓冲。导出供调用方统一判定。
+export const LARGE_FILE_THRESHOLD = 100 * 1024 * 1024 // 100MB
 
 interface SFTPOperationResult {
   success: boolean

@@ -42,9 +42,12 @@ func main() {
 		}
 	})
 
-	// 启用 BasicAuth 且使用默认弱口令时告警
-	if cfg.BasicAuthEnabled && cfg.BasicAuthUser == "admin" && cfg.BasicAuthPassword == "admin123" {
-		slog.Warn("BasicAuth 启用但使用默认弱口令 admin/admin123，请通过 MANAGI_BASICAUTH_USERNAME/PASSWORD 修改")
+	// 启用 BasicAuth 但未显式配置密码时，生成随机强口令（取代固定弱默认值）。
+	// 密码仅能从启动日志获取，故同时提醒用户显式配置 MANAGI_BASICAUTH_PASSWORD。
+	if cfg.BasicAuthEnabled && cfg.BasicAuthPassword == "" {
+		cfg.BasicAuthPassword = handler.RandomBasicAuthPassword()
+		slog.Warn("BasicAuth 已启用但未配置密码，已生成随机口令（建议用 MANAGI_BASICAUTH_PASSWORD 显式设置）",
+			"generated_password", cfg.BasicAuthPassword)
 	}
 
 	// 修复 B9/B10：done channel 用于通知所有后台 goroutine 退出
@@ -59,8 +62,8 @@ func main() {
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	// BasicAuth 中间件包裹全部路由（内部对 /health 放行）
-	finalHandler := basicAuthWrap(cfg, mux, done)
+	// BasicAuth 中间件包裹全部路由（内部对 /health 放行），最外层再套基础安全响应头
+	finalHandler := handler.SecurityHeaders(basicAuthWrap(cfg, mux, done))
 
 	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
 	slog.Info("managi v3 starting", "addr", addr, "basicAuth", cfg.BasicAuthEnabled)

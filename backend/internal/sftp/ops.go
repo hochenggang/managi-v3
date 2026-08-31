@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"strings"
 	"sync"
 
 	"github.com/pkg/sftp"
@@ -121,6 +122,9 @@ func (c *Client) Rename(oldPath, newPath string) error {
 // 返回 uploadID 与当前 offset（已有 .part 文件则续传，否则 0）。
 // 父目录不存在时自动递归创建（对应 v2 _ensure_remote_directory_exists）。
 func (c *Client) UploadInit(remotePath, filename string, totalSize int64, chunkSize int) (uploadID string, offset int64, err error) {
+	if err := validateFilename(filename); err != nil {
+		return "", 0, err
+	}
 	finalPath := path.Join(remotePath, filename)
 	partPath := finalPath + ".part"
 
@@ -276,6 +280,19 @@ func (c *Client) Close() error {
 	c.mu.Unlock()
 	if c.sc != nil {
 		return c.sc.Close()
+	}
+	return nil
+}
+
+// validateFilename 校验上传文件名为纯文件名（不含路径成分）。
+// path.Join 会 Clean 掉 "../"，因此不校验时 filename="../../etc/x"
+// 可让写入路径越出调用方指定的目标目录。
+func validateFilename(filename string) error {
+	if filename == "" {
+		return fmt.Errorf("invalid filename: empty")
+	}
+	if strings.ContainsAny(filename, `/\`) || filename == "." || filename == ".." {
+		return fmt.Errorf("invalid filename: %q must be a plain file name", filename)
 	}
 	return nil
 }

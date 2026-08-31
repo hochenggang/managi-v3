@@ -3,10 +3,13 @@
 package handler
 
 import (
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -167,4 +170,15 @@ func checkOrigin(r *http.Request) bool {
 		return false
 	}
 	return u.Host == r.Host
+}
+
+// RandomBasicAuthPassword 生成随机 BasicAuth 密码（16 字节 → 32 字符十六进制）。
+// 供启用 BasicAuth 但未显式配置密码的部署自动生成强口令，取代固定弱默认值。
+func RandomBasicAuthPassword() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// crypto/rand 在受支持平台上实际不会失败；极端情况下退化为时间戳派生，仍优于固定弱口令
+		return "managi-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return hex.EncodeToString(b)
 }

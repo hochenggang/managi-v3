@@ -134,3 +134,13 @@ func TestClientIP(t *testing.T) {
 	req.RemoteAddr = "1.2.3.4"
 	assert.Equal(t, "1.2.3.4", clientIP(req))
 }
+
+// TestRandomBasicAuthPassword 验证随机口令为 32 位十六进制且两次生成不同。
+func TestRandomBasicAuthPassword(t *testing.T) {
+	a := RandomBasicAuthPassword()
+	b := RandomBasicAuthPassword()
+	assert.Len(t, a, 32)
+	assert.Len(t, b, 32)
+	assert.NotEqual(t, a, b, "consecutive passwords must differ")
+	assert.Regexp(t, `^[0-9a-f]{32}$`, a)
+}

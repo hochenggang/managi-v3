@@ -165,6 +165,44 @@ func TestUploadInit_Resume(t *testing.T) {
 	assert.Equal(t, int64(1024), offset) // 断点续传核心
 }
 
+// TestUploadInit_RejectsPathEscapeFilenames 验证含路径成分的文件名被拒绝。
+// path.Join 会 Clean 掉 "../"，不校验即可越出目标目录，故必须在入口挡住。
+func TestUploadInit_RejectsPathEscapeFilenames(t *testing.T) {
+	sc, _, _, cleanup := newClient(t)
+	defer cleanup()
+
+	cases := []struct {
+		name     string
+		filename string
+	}{
+		{"parent traversal", "../evil.bin"},
+		{"nested traversal", "sub/../../evil.bin"},
+		{"absolute path", "/etc/passwd"},
+		{"windows separator", `..\evil.bin`},
+		{"dot", "."},
+		{"dotdot", ".."},
+		{"empty", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := sc.UploadInit("/upload", tc.filename, 1024, 512)
+			assert.Error(t, err, "filename %q must be rejected", tc.filename)
+		})
+	}
+}
+
+// TestUploadInit_TraversalFilenameWritesNowhere 验证恶意文件名不会在目标目录外留下文件。
+func TestUploadInit_TraversalFilenameWritesNowhere(t *testing.T) {
+	sc, srv, _, cleanup := newClient(t)
+	defer cleanup()
+
+	_, _, err := sc.UploadInit("/upload", "../escaped.bin", 1024, 512)
+	require.Error(t, err)
+
+	_, statErr := os.Stat(filepath.Join(srv.RootDir(), "escaped.bin"))
+	assert.True(t, os.IsNotExist(statErr), "escape attempt must not create a file outside target dir")
+}
+
 // TestUploadChunk_WriteAtOffset 验证分片写入到指定 offset。
 func TestUploadChunk_WriteAtOffset(t *testing.T) {
 	sc, srv, _, cleanup := newClient(t)

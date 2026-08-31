@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
+	"managi/internal/model"
 	"managi/internal/testutil"
 )
 
@@ -239,4 +240,29 @@ func TestPool_HardCap(t *testing.T) {
 	// 第 3 个连接触达 hardCap，应返回 errPoolFull
 	_, err = pool.Get(node3)
 	assert.ErrorIs(t, err, errPoolFull)
+}
+
+// TestGet_KeyLocksReclaimed 验证 per-key 锁字典随使用回收而非累积：
+// 成功获取/释放后、以及大量失败节点依次尝试后，字典都应归零。
+// 回归旧实现「锁字典只增不删」的内存增长缺陷。
+func TestGet_KeyLocksReclaimed(t *testing.T) {
+	srv := testutil.Start(t)
+	defer srv.Close()
+
+	pool := New(testutil.TestConfig())
+	defer pool.CloseAll()
+
+	node := testutil.TestNode(srv.Host(), srv.Port())
+	c, err := pool.Get(node)
+	require.NoError(t, err)
+	require.NotNil(t, c)
+	pool.Release(node)
+	assert.Equal(t, 0, pool.keyLocks.Len(), "entry must be reclaimed after Get/Release")
+
+	// 大量拨号必然失败的节点（关闭的端口），每次 Get 走完加解锁后条目须被回收
+	for i := 0; i < 50; i++ {
+		bad := model.Node{Host: "127.0.0.1", Port: 1, Username: "x", AuthType: model.AuthPassword, AuthValue: "p"}
+		_, _ = pool.Get(bad)
+	}
+	assert.Equal(t, 0, pool.keyLocks.Len(), "entries must be reclaimed even when dial fails")
 }

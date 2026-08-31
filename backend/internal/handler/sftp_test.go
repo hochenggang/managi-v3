@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"net/http"
@@ -22,12 +23,12 @@ import (
 
 // ===== sftpDownloadHandler 测试 =====
 
-// nodeQuery 编码 node 为 URL query 参数值。
-func nodeQuery(t *testing.T, node model.Node) string {
+// downloadBody 构造 POST /api/sftp/download 的 JSON 请求体。
+func downloadBody(t *testing.T, node model.Node, path string) *bytes.Reader {
 	t.Helper()
-	b, err := json.Marshal(node)
+	b, err := json.Marshal(sftpDownloadRequest{Node: node, Path: path})
 	require.NoError(t, err)
-	return url.QueryEscape(string(b))
+	return bytes.NewReader(b)
 }
 
 // TestSftpDownloadHandler_Full 验证完整下载：200 + 完整内容 + Accept-Ranges。
@@ -42,14 +43,27 @@ func TestSftpDownloadHandler_Full(t *testing.T) {
 	defer pool.CloseAll()
 	h := sftpDownloadHandler(pool, testutil.TestConfig())
 
-	target := "/api/sftp/download?node=" + nodeQuery(t, testutil.TestNode(srv.Host(), srv.Port())) + "&path=/test.txt"
-	req := httptest.NewRequest("GET", target, nil)
+	req := httptest.NewRequest("POST", "/api/sftp/download",
+		downloadBody(t, testutil.TestNode(srv.Host(), srv.Port()), "/test.txt"))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "bytes", rec.Header().Get("Accept-Ranges"))
 	assert.Equal(t, content, rec.Body.Bytes())
+}
+
+// TestSftpDownloadHandler_RejectGET 验证 GET 被拒绝：凭据不得出现在 URL 查询串中。
+func TestSftpDownloadHandler_RejectGET(t *testing.T) {
+	pool := sshpool.New(testutil.TestConfig())
+	defer pool.CloseAll()
+	h := sftpDownloadHandler(pool, testutil.TestConfig())
+
+	req := httptest.NewRequest("GET", "/api/sftp/download?node={}&path=/test.txt", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
 }
 
 // TestSftpDownloadHandler_Range 验证 Range 下载：206 + Content-Range + 部分内容。
@@ -64,8 +78,8 @@ func TestSftpDownloadHandler_Range(t *testing.T) {
 	defer pool.CloseAll()
 	h := sftpDownloadHandler(pool, testutil.TestConfig())
 
-	target := "/api/sftp/download?node=" + nodeQuery(t, testutil.TestNode(srv.Host(), srv.Port())) + "&path=/test.txt"
-	req := httptest.NewRequest("GET", target, nil)
+	req := httptest.NewRequest("POST", "/api/sftp/download",
+		downloadBody(t, testutil.TestNode(srv.Host(), srv.Port()), "/test.txt"))
 	req.Header.Set("Range", "bytes=10-")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -86,20 +100,20 @@ func TestSftpDownloadHandler_MissingParams(t *testing.T) {
 	node := testutil.TestNode(srv.Host(), srv.Port())
 
 	// 缺 path
-	req := httptest.NewRequest("GET", "/api/sftp/download?node="+nodeQuery(t, node), nil)
+	req := httptest.NewRequest("POST", "/api/sftp/download", downloadBody(t, node, ""))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 
-	// 缺 node
-	req = httptest.NewRequest("GET", "/api/sftp/download?path=/test.txt", nil)
+	// 缺 node（host 为空）
+	req = httptest.NewRequest("POST", "/api/sftp/download", downloadBody(t, model.Node{}, "/test.txt"))
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-// TestSftpDownloadHandler_InvalidNodeJSON 验证非法 node JSON 返回 400。
-func TestSftpDownloadHandler_InvalidNodeJSON(t *testing.T) {
+// TestSftpDownloadHandler_InvalidBody 验证非法请求体返回 400。
+func TestSftpDownloadHandler_InvalidBody(t *testing.T) {
 	srv := testutil.Start(t)
 	defer srv.Close()
 
@@ -107,7 +121,7 @@ func TestSftpDownloadHandler_InvalidNodeJSON(t *testing.T) {
 	defer pool.CloseAll()
 	h := sftpDownloadHandler(pool, testutil.TestConfig())
 
-	req := httptest.NewRequest("GET", "/api/sftp/download?node=notjson&path=/test.txt", nil)
+	req := httptest.NewRequest("POST", "/api/sftp/download", bytes.NewReader([]byte("notjson")))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -122,8 +136,8 @@ func TestSftpDownloadHandler_AuthFailure(t *testing.T) {
 	defer pool.CloseAll()
 	h := sftpDownloadHandler(pool, testutil.TestConfig())
 
-	target := "/api/sftp/download?node=" + nodeQuery(t, testutil.BadPasswordNode(srv.Host(), srv.Port())) + "&path=/test.txt"
-	req := httptest.NewRequest("GET", target, nil)
+	req := httptest.NewRequest("POST", "/api/sftp/download",
+		downloadBody(t, testutil.BadPasswordNode(srv.Host(), srv.Port()), "/test.txt"))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusBadGateway, rec.Code)

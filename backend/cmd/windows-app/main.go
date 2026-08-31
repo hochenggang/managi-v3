@@ -87,6 +87,12 @@ func runServer() {
 	cfg.Port = port
 	cfg.IndexHTML = indexHTML
 
+	// 与服务器端入口一致：启用 BasicAuth 但未配置密码时生成随机强口令
+	if cfg.BasicAuthEnabled && cfg.BasicAuthPassword == "" {
+		cfg.BasicAuthPassword = handler.RandomBasicAuthPassword()
+		slog.Warn("BasicAuth 已启用但未配置密码，已生成随机口令", "generated_password", cfg.BasicAuthPassword)
+	}
+
 	mux := http.NewServeMux()
 	handler.Register(mux, cfg, done)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -94,8 +100,8 @@ func runServer() {
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	// H9：与服务器端入口一致，应用 BasicAuth 中间件（cfg.BasicAuthEnabled=false 时透传）
-	finalHandler := handler.BasicAuthMiddleware(cfg, done)(mux)
+	// 与服务器端入口一致，应用 BasicAuth 中间件（cfg.BasicAuthEnabled=false 时透传），最外层再套基础安全响应头
+	finalHandler := handler.SecurityHeaders(handler.BasicAuthMiddleware(cfg, done)(mux))
 
 	srv = &http.Server{
 		// 修复 B20：用 strconv.Itoa 替代自实现的 itoa，去除冗余代码

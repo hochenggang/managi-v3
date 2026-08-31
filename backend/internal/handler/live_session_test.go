@@ -1,9 +1,14 @@
 package handler
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"managi/internal/model"
+	"managi/internal/sshpool"
+	"managi/internal/testutil"
 )
 
 // TestAppendScrollback_Truncation 验证 scrollback 超限时截断头部保留尾部。
@@ -50,4 +55,22 @@ func TestLiveSession_IsClosedLocked(t *testing.T) {
 	ls.mu.Lock()
 	assert.True(t, ls.isClosedLocked())
 	ls.mu.Unlock()
+}
+
+// TestSessionManager_KeyLocksReclaimed 验证 per-sessionID 锁字典随使用回收：
+// 会话 ID 由前端每次打开标签页新生成，旧实现的锁字典只增不删会累积，
+// 此处用大量必然拨号失败的 ID 依次 AttachOrCreate，断言结束后字典归零。
+// 失败路径在触碰 wsConn 之前即返回，故传 nil 安全。
+func TestSessionManager_KeyLocksReclaimed(t *testing.T) {
+	pool := sshpool.New(testutil.TestConfig())
+	defer pool.CloseAll()
+	mgr := newSessionManager(pool, testutil.TestConfig())
+
+	bad := model.Node{Host: "127.0.0.1", Port: 1, Username: "x", AuthType: model.AuthPassword, AuthValue: "p"}
+	for i := 0; i < 50; i++ {
+		id := "sess-" + strconv.Itoa(i)
+		_, _, err := mgr.AttachOrCreate(id, bad, nil, 80, 24)
+		assert.Error(t, err)
+	}
+	assert.Equal(t, 0, mgr.keyLocks.Len(), "per-session lock entries must be reclaimed")
 }

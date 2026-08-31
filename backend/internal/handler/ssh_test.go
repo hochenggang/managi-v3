@@ -126,10 +126,17 @@ func TestBatchHandler_PartialFailure(t *testing.T) {
 
 	h := batchHandler(pool, testutil.TestConfig())
 
+	// 两个节点须身份不同：连接池键为 host:port:username，若仅密码不同则键相同，
+	// 并发执行时坏节点可能复用已建立的好连接而「假成功」，导致结果非确定。
+	// 故失败节点用独立用户名（凭据仍不匹配 → 认证失败），确保键不同、结果确定。
+	failingNode := testutil.TestNode(srv.Host(), srv.Port())
+	failingNode.Username = "denied"
+	failingNode.AuthValue = "wrong-password"
+
 	req := model.BatchCmdRequest{
 		Nodes: []model.Node{
-			testutil.TestNode(srv.Host(), srv.Port()),        // 成功
-			testutil.BadPasswordNode(srv.Host(), srv.Port()), // 失败
+			testutil.TestNode(srv.Host(), srv.Port()), // 成功
+			failingNode,                               // 失败
 		},
 		Cmds: []string{"echo ok"},
 	}

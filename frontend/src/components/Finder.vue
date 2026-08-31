@@ -135,7 +135,7 @@
 import { ref, computed, nextTick, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import CirclePercent from '@/components/CirclePercent.vue'
-import { useSFTP } from '@/composables/useSFTP'
+import { useSFTP, LARGE_FILE_THRESHOLD } from '@/composables/useSFTP'
 import { useConfirm } from '@/composables/useConfirm'
 import { handleError, handleMsg } from '@/helper'
 import type { ApiNode } from '@/protocol/types'
@@ -312,8 +312,8 @@ const downloadSelected = async () => {
   isDownloading.value = true
   const path = getFullPath(selectedFile.value.filename)
   try {
-    // H1：大文件走 HTTP Range 流式下载，避免 WS 缓冲超限
-    if (selectedFile.value.size > 100 * 1024 * 1024) {
+    // 大文件走 HTTP Range 流式下载，避免 WS 缓冲超限
+    if (selectedFile.value.size > LARGE_FILE_THRESHOLD) {
       await downloadViaHTTP(path)
     } else {
       await download(path)

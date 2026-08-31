@@ -17,6 +17,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"managi/internal/config"
+	"managi/internal/keylock"
 	"managi/internal/model"
 )
 
@@ -46,17 +47,18 @@ const hostKeyTTL = 24 * time.Hour
 
 // Pool SSH 连接池，进程内单例。
 type Pool struct {
-	mu          sync.Mutex
-	conns       map[string]*Connection
-	perKeyLocks map[string]*sync.Mutex
-	perKeyLock  sync.Mutex // 保护 perKeyLocks 字典
-	cfg         *config.Config
-	maxSize     int
+	mu      sync.Mutex
+	conns   map[string]*Connection
+	cfg     *config.Config
+	maxSize int
+	// keyLocks 按连接键串行化「探测 → 创建 → 入池」流程，不同节点之间保持并行。
+	// 引用计数式回收，避免旧实现中锁字典随历史节点数无限增长。
+	keyLocks *keylock.Map
 	// hardCap 兜底上限，防止 evictOldestLocked 在「全部 refs>0」时无法淘汰导致池无限增长。
 	// 触达 hardCap 时 Get 返回 errPoolFull，由调用方降级。
 	hardCap     int
 	idleTimeout time.Duration
-	hostKeys    map[string]hostKeyEntry // TOFU: addr → 首次记录的主机公钥（含 lastSeen）
+	hostKeys    map[string]hostKeyEntry // TOFU: host:port → 首次记录的主机公钥（含 lastSeen）
 }
 
 // errPoolFull 连接池触达硬上限且无空闲连接可淘汰。
@@ -70,7 +72,7 @@ func New(cfg *config.Config) *Pool {
 	}
 	return &Pool{
 		conns:       make(map[string]*Connection),
-		perKeyLocks: make(map[string]*sync.Mutex),
+		keyLocks:    keylock.New(),
 		cfg:         cfg,
 		maxSize:     20,
 		hardCap:     40, // 修复 B3：硬上限为 maxSize 2 倍，防止全部占用时无限增长
@@ -92,9 +94,8 @@ func NewWithSize(cfg *config.Config, maxSize int) *Pool {
 // 修复 A10：isAlive 是阻塞网络调用，移出 p.mu.Lock() 范围，避免慢节点卡死全池。
 func (p *Pool) Get(node model.Node) (*Connection, error) {
 	key := node.ConnectionKey()
-	perKey := p.keyLock(key)
-	perKey.Lock()
-	defer perKey.Unlock()
+	p.keyLocks.Lock(key)
+	defer p.keyLocks.Unlock(key)
 
 	// 第一阶段：锁内取引用，锁外做 isAlive 网络探测
 	p.mu.Lock()
@@ -386,15 +387,27 @@ func (p *Pool) cleanIdle() {
 			delete(p.conns, k)
 		}
 	}
-	// H5：清理长期未使用的主机密钥条目，防止 map 无限增长。
+	// 清理长期未使用的主机密钥条目，防止 map 无限增长。
 	// 仅删除超过 hostKeyTTL 且当前无活跃连接的条目。
+	// 注意键格式差异：hostKeys 以 host:port 记录，conns 以 host:port:username 记录，
+	// 故须按「host:port:」前缀匹配判断是否仍有任意用户的活跃连接。
 	for addr, entry := range p.hostKeys {
-		if now.Sub(entry.lastSeen) > hostKeyTTL {
-			if _, inUse := p.conns[addr]; !inUse {
-				delete(p.hostKeys, addr)
-			}
+		if now.Sub(entry.lastSeen) > hostKeyTTL && !p.hasActiveConnLocked(addr) {
+			delete(p.hostKeys, addr)
 		}
 	}
+}
+
+// hasActiveConnLocked 判断指定 host:port 是否仍有任意用户的连接在池中。
+// 调用方需持 p.mu。连接键为 host:port:username，用前缀匹配。
+func (p *Pool) hasActiveConnLocked(addr string) bool {
+	prefix := addr + ":"
+	for k := range p.conns {
+		if strings.HasPrefix(k, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Pool) evictOldestLocked() {
@@ -415,17 +428,6 @@ func (p *Pool) evictOldestLocked() {
 			delete(p.conns, oldestKey)
 		}
 	}
-}
-
-func (p *Pool) keyLock(key string) *sync.Mutex {
-	p.perKeyLock.Lock()
-	defer p.perKeyLock.Unlock()
-	if l, ok := p.perKeyLocks[key]; ok {
-		return l
-	}
-	l := &sync.Mutex{}
-	p.perKeyLocks[key] = l
-	return l
 }
 
 // joinLines 将多条命令用换行拼接（对应 v2 "\n".join）。
