@@ -151,11 +151,20 @@ func listRoot(wc *wsConn, sc *sftp.Client, p string) {
 }
 
 // handleSftpOp 分发单个 SFTP 操作。
+// 所有响应（含错误）回填请求的 seq，前端据此丢弃迟到的旧响应。
 func handleSftpOp(ctx context.Context, wc *wsConn, sc *sftp.Client, env wsEnvelope, downloadMu *sync.Mutex) {
+	// 局部辅助：响应统一回填请求的 seq，避免每处重复传 env.Seq
+	writeResp := func(msgType string, data any) error {
+		return wc.writeEnvelopeSeq(msgType, data, env.Seq)
+	}
+	writeErr := func(msg string) error {
+		return wc.writeEnvelopeSeq(msgTypeError, wsErrorData{Message: msg}, env.Seq)
+	}
+
 	var req sftpRequestData
 	if len(env.Data) > 0 {
 		if err := json.Unmarshal(env.Data, &req); err != nil {
-			_ = wc.writeError("invalid request data: " + err.Error())
+			_ = writeErr("invalid request data: " + err.Error())
 			return
 		}
 	}
@@ -163,31 +172,31 @@ func handleSftpOp(ctx context.Context, wc *wsConn, sc *sftp.Client, env wsEnvelo
 	case msgTypeList:
 		items, err := sc.List(req.Path)
 		if err != nil {
-			_ = wc.writeError(err.Error())
+			_ = writeErr(err.Error())
 			return
 		}
-		_ = wc.writeEnvelope(msgTypeList, map[string]any{"files": items, "path": req.Path})
+		_ = writeResp(msgTypeList, map[string]any{"files": items, "path": req.Path})
 
 	case msgTypeMkdir:
 		if err := sc.Mkdir(req.Path); err != nil {
-			_ = wc.writeError(err.Error())
+			_ = writeErr(err.Error())
 			return
 		}
-		_ = wc.writeEnvelope(msgTypeOk, nil)
+		_ = writeResp(msgTypeOk, nil)
 
 	case msgTypeDelete:
 		if err := sc.Delete(req.Path); err != nil {
-			_ = wc.writeError(err.Error())
+			_ = writeErr(err.Error())
 			return
 		}
-		_ = wc.writeEnvelope(msgTypeOk, nil)
+		_ = writeResp(msgTypeOk, nil)
 
 	case msgTypeRename:
 		if err := sc.Rename(req.OldPath, req.NewPath); err != nil {
-			_ = wc.writeError(err.Error())
+			_ = writeErr(err.Error())
 			return
 		}
-		_ = wc.writeEnvelope(msgTypeOk, nil)
+		_ = writeResp(msgTypeOk, nil)
 
 	case msgTypeUploadInit:
 		// upload_init 用 remote_path 字段表示目标目录（与历史协议兼容）
@@ -197,25 +206,25 @@ func handleSftpOp(ctx context.Context, wc *wsConn, sc *sftp.Client, env wsEnvelo
 		}
 		uploadID, offset, err := sc.UploadInit(targetDir, req.Filename, req.TotalSize, req.ChunkSize)
 		if err != nil {
-			_ = wc.writeError(err.Error())
+			_ = writeErr(err.Error())
 			return
 		}
-		_ = wc.writeEnvelope(msgTypeUploadInit, map[string]any{"upload_id": uploadID, "offset": offset})
+		_ = writeResp(msgTypeUploadInit, map[string]any{"upload_id": uploadID, "offset": offset})
 
 	case msgTypeUploadDone:
 		if err := sc.UploadComplete(req.UploadID); err != nil {
-			_ = wc.writeError(err.Error())
+			_ = writeErr(err.Error())
 			return
 		}
-		_ = wc.writeEnvelope(msgTypeOk, nil)
+		_ = writeResp(msgTypeOk, nil)
 
 	case msgTypeDownload:
 		// T2：异步下载，避免大文件阻塞 WS 读循环（心跳/其他操作）
 		// C1/H8：传 ctx 与 downloadMu，串行化下载并在 WS 断开时取消
-		go handleDownload(ctx, wc, sc, req, downloadMu)
+		go handleDownload(ctx, wc, sc, req, downloadMu, env.Seq)
 
 	default:
-		_ = wc.writeError("unknown operation: " + env.Type)
+		_ = writeErr("unknown operation: " + env.Type)
 	}
 }
 
@@ -223,13 +232,14 @@ func handleSftpOp(ctx context.Context, wc *wsConn, sc *sftp.Client, env wsEnvelo
 // wc 写操作有互斥锁保护，可与主循环并发安全写入。
 // C1：downloadMu 串行化同一 WS 连接的并发下载，避免二进制帧交错损坏文件。
 // H8：ctx 控制下载生命周期，WS 断开时取消 reader 解除 Read 阻塞。
-func handleDownload(ctx context.Context, wc *wsConn, sc *sftp.Client, req sftpRequestData, downloadMu *sync.Mutex) {
+// seq 回填到 download_start/complete/错误响应，前端据此匹配。
+func handleDownload(ctx context.Context, wc *wsConn, sc *sftp.Client, req sftpRequestData, downloadMu *sync.Mutex, seq int64) {
 	downloadMu.Lock()
 	defer downloadMu.Unlock()
 
 	reader, total, err := sc.DownloadStream(req.Path, req.Offset)
 	if err != nil {
-		_ = wc.writeError(err.Error())
+		_ = wc.writeEnvelopeSeq(msgTypeError, wsErrorData{Message: err.Error()}, seq)
 		return
 	}
 	defer func() { _ = reader.Close() }()
@@ -245,7 +255,7 @@ func handleDownload(ctx context.Context, wc *wsConn, sc *sftp.Client, req sftpRe
 		}
 	}()
 
-	_ = wc.writeEnvelope(msgTypeDownloadStart, map[string]any{"total": total})
+	_ = wc.writeEnvelopeSeq(msgTypeDownloadStart, map[string]any{"total": total}, seq)
 	buf := make([]byte, 32*1024)
 	for {
 		n, rerr := reader.Read(buf)
@@ -258,41 +268,47 @@ func handleDownload(ctx context.Context, wc *wsConn, sc *sftp.Client, req sftpRe
 			break
 		}
 		if rerr != nil {
-			_ = wc.writeError("read file: " + rerr.Error())
+			_ = wc.writeEnvelopeSeq(msgTypeError, wsErrorData{Message: "read file: " + rerr.Error()}, seq)
 			return
 		}
 	}
-	_ = wc.writeEnvelope(msgTypeComplete, map[string]any{"filename": path.Base(req.Path)})
+	_ = wc.writeEnvelopeSeq(msgTypeComplete, map[string]any{"filename": path.Base(req.Path)}, seq)
 }
 
 // handleBinaryChunk 解析二进制分片帧并写入远程 .part 文件，回 chunk_ack。
-// 帧格式（大端序）：[4字节 upload_id_len][upload_id][4字节 chunk_index][8字节 offset][8字节 data_len][data]
+// 帧格式（大端序）：[8字节 seq][4字节 upload_id_len][upload_id][4字节 chunk_index][8字节 offset][8字节 data_len][data]
+// seq 用于前端匹配 chunk_ack，丢弃迟到的旧响应。
 func handleBinaryChunk(wc *wsConn, sc *sftp.Client, data []byte) {
-	uploadID, chunkIndex, offset, chunkData, err := parseChunkFrame(data)
+	seq, uploadID, chunkIndex, offset, chunkData, err := parseChunkFrame(data)
 	if err != nil {
 		_ = wc.writeError("parse binary frame: " + err.Error())
 		return
 	}
 	if err := sc.UploadChunk(uploadID, chunkIndex, offset, chunkData); err != nil {
-		_ = wc.writeError(err.Error())
+		_ = wc.writeEnvelopeSeq(msgTypeError, wsErrorData{Message: err.Error()}, seq)
 		return
 	}
-	_ = wc.writeEnvelope(msgTypeChunkAck, map[string]any{"chunk_index": chunkIndex})
+	_ = wc.writeEnvelopeSeq(msgTypeChunkAck, map[string]any{"chunk_index": chunkIndex}, seq)
 }
 
-// parseChunkFrame 解析二进制分片帧头。
+// parseChunkFrame 解析二进制分片帧头。首 8 字节为请求 seq，前端据此匹配 chunk_ack。
 //
 //nolint:gosec // G115: 帧长度已通过 headerLen 校验，转换值远小于 int 上限
-func parseChunkFrame(data []byte) (uploadID string, chunkIndex int, offset int64, chunkData []byte, err error) {
-	if len(data) < 4 {
-		return "", 0, 0, nil, fmt.Errorf("frame too short: need header")
+func parseChunkFrame(data []byte) (seq int64, uploadID string, chunkIndex int, offset int64, chunkData []byte, err error) {
+	if len(data) < 8 {
+		return 0, "", 0, 0, nil, fmt.Errorf("frame too short: need seq")
 	}
-	idLen := binary.BigEndian.Uint32(data[:4])
-	headerLen := 4 + int(idLen) + 4 + 8 + 8
+	seq = int64(binary.BigEndian.Uint64(data[:8]))
+	pos := 8
+	if len(data) < pos+4 {
+		return 0, "", 0, 0, nil, fmt.Errorf("frame too short: need id length")
+	}
+	idLen := binary.BigEndian.Uint32(data[pos:])
+	headerLen := pos + 4 + int(idLen) + 4 + 8 + 8
 	if len(data) < headerLen {
-		return "", 0, 0, nil, fmt.Errorf("frame header incomplete: need %d, got %d", headerLen, len(data))
+		return 0, "", 0, 0, nil, fmt.Errorf("frame header incomplete: need %d, got %d", headerLen, len(data))
 	}
-	pos := 4
+	pos += 4
 	uploadID = string(data[pos : pos+int(idLen)])
 	pos += int(idLen)
 	chunkIndex = int(binary.BigEndian.Uint32(data[pos:]))
@@ -302,10 +318,10 @@ func parseChunkFrame(data []byte) (uploadID string, chunkIndex int, offset int64
 	dataLen := binary.BigEndian.Uint64(data[pos:])
 	pos += 8
 	if uint64(len(data)-pos) < dataLen {
-		return "", 0, 0, nil, fmt.Errorf("frame data incomplete: need %d, got %d", dataLen, len(data)-pos)
+		return 0, "", 0, 0, nil, fmt.Errorf("frame data incomplete: need %d, got %d", dataLen, len(data)-pos)
 	}
 	chunkData = data[pos : pos+int(dataLen)]
-	return uploadID, chunkIndex, offset, chunkData, nil
+	return seq, uploadID, chunkIndex, offset, chunkData, nil
 }
 
 // sftpDownloadRequest 是 POST /api/sftp/download 的请求体。

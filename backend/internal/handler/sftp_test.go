@@ -279,7 +279,7 @@ func TestSftpWSHandler_UploadFlow(t *testing.T) {
 
 	// upload_chunk：发二进制帧（帧头协议，design-v3.md §6.4）
 	chunkData := []byte("hello world")
-	frame := buildChunkFrame(uploadID, 0, 0, chunkData)
+	frame := buildChunkFrame(1, uploadID, 0, 0, chunkData)
 	require.NoError(t, conn.WriteMessage(websocket.BinaryMessage, frame))
 	msg = readWSJSON(t, conn)
 	assert.Equal(t, "chunk_ack", msg["type"])
@@ -318,15 +318,16 @@ func TestSftpWSHandler_BadAuthFrame(t *testing.T) {
 }
 
 // buildChunkFrame 构造二进制分片帧（与 parseChunkFrame 对齐）。
-// 帧格式（大端序）：[4字节 upload_id_len][upload_id][4字节 chunk_index][8字节 offset][8字节 data_len][data]
-func buildChunkFrame(uploadID string, chunkIndex int, offset int64, data []byte) []byte {
+// 帧格式（大端序）：[8字节 seq][4字节 upload_id_len][upload_id][4字节 chunk_index][8字节 offset][8字节 data_len][data]
+func buildChunkFrame(seq int64, uploadID string, chunkIndex int, offset int64, data []byte) []byte {
 	idBytes := []byte(uploadID)
-	buf := make([]byte, 4+len(idBytes)+4+8+8+len(data))
-	binary.BigEndian.PutUint32(buf[0:], uint32(len(idBytes)))
-	copy(buf[4:], idBytes)
-	binary.BigEndian.PutUint32(buf[4+len(idBytes):], uint32(chunkIndex))
-	binary.BigEndian.PutUint64(buf[4+len(idBytes)+4:], uint64(offset))
-	binary.BigEndian.PutUint64(buf[4+len(idBytes)+4+8:], uint64(len(data)))
-	copy(buf[4+len(idBytes)+4+8+8:], data)
+	buf := make([]byte, 8+4+len(idBytes)+4+8+8+len(data))
+	binary.BigEndian.PutUint64(buf[0:], uint64(seq))
+	binary.BigEndian.PutUint32(buf[8:], uint32(len(idBytes)))
+	copy(buf[8+4:], idBytes)
+	binary.BigEndian.PutUint32(buf[8+4+len(idBytes):], uint32(chunkIndex))
+	binary.BigEndian.PutUint64(buf[8+4+len(idBytes)+4:], uint64(offset))
+	binary.BigEndian.PutUint64(buf[8+4+len(idBytes)+4+8:], uint64(len(data)))
+	copy(buf[8+4+len(idBytes)+4+8+8:], data)
 	return buf
 }

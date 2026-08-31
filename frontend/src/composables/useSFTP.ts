@@ -47,9 +47,10 @@ export function useSFTP(node: ApiNode) {
   let pendingResolve: ((r: SFTPOperationResult) => void) | null = null
   let pendingReject: ((e: Error) => void) | null = null
   let pendingTimer: ReturnType<typeof setTimeout> | null = null
-  // C4：超时后标记丢弃下一个响应（延迟到达的旧响应），防止其错误 resolve 新请求
-  let discardNextResponse = false
-  let discardTimer: ReturnType<typeof setTimeout> | null = null
+  // seq 关联：每个请求分配递增序号，响应按 seq 匹配；迟到的旧响应（seq 不匹配）被丢弃。
+  // 取代原 discardNextResponse 兜底（C4），根因修复请求-响应错配风险。
+  let seqCounter = 0
+  let pendingSeq = 0
   let downloadBuffer: Uint8Array[] = []
   let downloadTotalSize = 0
   let downloadReceivedSize = 0
@@ -73,15 +74,9 @@ export function useSFTP(node: ApiNode) {
   }
 
   function resolvePending(msg: WSMessage): void {
-    // C4：丢弃超时后延迟到达的旧响应
-    if (discardNextResponse) {
-      discardNextResponse = false
-      if (discardTimer) {
-        clearTimeout(discardTimer)
-        discardTimer = null
-      }
-      return
-    }
+    // seq 关联：响应必须匹配当前等待的请求序号，否则是迟到的旧响应，丢弃。
+    // 旧后端不带 seq 时回退按到达顺序 resolve（向后兼容）。
+    if (msg.seq !== undefined && msg.seq !== pendingSeq) return
     if (!pendingResolve) return
     const fn = pendingResolve
     pendingResolve = null
@@ -207,32 +202,29 @@ export function useSFTP(node: ApiNode) {
   /** sendAndAwait 发送并等待服务端响应（resolve 时 clear 超时，避免泄漏）。
    *  @param timeoutMs 等待响应的超时时间，分片上传等耗时操作可传入更大值。
    *
-   *  修复 B7：SFTP 协议响应不带 seq，单 pendingResolve 槽位在并发调用时后者会覆盖前者，
-   *  导致前者 Promise 永不 resolve + 计时器悬挂。此处 fail-fast：前序未完成再发请求直接抛错，
-   *  由调用方保证串行（SFTP 操作天然串行，业务层无并发场景）。
+   *  每个请求分配递增 seq 并注入到消息（文本 JSON 注入，二进制分片帧前置 8 字节），
+   *  响应按 seq 匹配；迟到的旧响应（seq 不匹配）被 resolvePending 丢弃。
+   *  串行语义保留：前序未完成再发请求直接抛错。
    */
   function sendAndAwait(sendData: string | ArrayBuffer, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<SFTPOperationResult> {
     if (pendingResolve) {
       return Promise.reject(new Error('SFTP busy: previous operation pending'))
     }
+    const seq = ++seqCounter
+    pendingSeq = seq
+    const payload = typeof sendData === 'string'
+      ? injectTextSeq(sendData, seq)
+      : prependChunkSeq(sendData, seq)
     return new Promise((resolve, reject) => {
       pendingResolve = resolve
-      pendingReject = reject // C4+H2：记录 reject 供 onClose/超时使用
+      pendingReject = reject
       pendingTimer = setTimeout(() => {
         pendingResolve = null
         pendingReject = null
         pendingTimer = null
-        // C4：标记丢弃下一个延迟到达的旧响应，防止其错误 resolve 新请求
-        discardNextResponse = true
-        if (discardTimer) clearTimeout(discardTimer)
-        // 安全兜底：5s 后自动清 flag，避免延迟响应永远不到导致后续请求被误丢
-        discardTimer = setTimeout(() => {
-          discardNextResponse = false
-          discardTimer = null
-        }, 5000)
         reject(new Error('SFTP request timeout'))
       }, timeoutMs)
-      if (!send(sendData)) {
+      if (!send(payload)) {
         pendingResolve = null
         pendingReject = null
         if (pendingTimer) {
@@ -242,6 +234,21 @@ export function useSFTP(node: ApiNode) {
         reject(new Error('WebSocket not connected'))
       }
     })
+  }
+
+  // injectTextSeq 把 seq 注入到已序列化的文本 envelope（JSON 解析 + 重序列化）。
+  function injectTextSeq(s: string, seq: number): string {
+    const env = JSON.parse(s) as Record<string, unknown>
+    env.seq = seq
+    return JSON.stringify(env)
+  }
+
+  // prependChunkSeq 在二进制分片帧前置 8 字节大端序 seq，与后端 parseChunkFrame 对齐。
+  function prependChunkSeq(frame: ArrayBuffer, seq: number): ArrayBuffer {
+    const out = new ArrayBuffer(8 + frame.byteLength)
+    new DataView(out).setBigUint64(0, BigInt(seq))
+    new Uint8Array(out, 8).set(new Uint8Array(frame))
+    return out
   }
 
   async function list(path: string): Promise<void> {

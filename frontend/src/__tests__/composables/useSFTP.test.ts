@@ -81,8 +81,10 @@ function sentPayloadAt(i: number): any {
   return JSON.parse(call[0] as string)
 }
 
-// parseChunkFrame 解析二进制分片帧（与 useSFTP.buildChunkFrame 对齐）。
+// parseChunkFrame 解析二进制分片帧（与 sendAndAwait 注入的新帧格式对齐）。
+// 帧格式（大端序）：[8字节 seq][4字节 upload_id_len][upload_id][4字节 chunk_index][8字节 offset][8字节 data_len][data]
 function parseChunkFrame(frame: ArrayBuffer): {
+  seq: number
   uploadId: string
   chunkIndex: number
   offset: number
@@ -90,6 +92,7 @@ function parseChunkFrame(frame: ArrayBuffer): {
 } {
   const view = new DataView(frame)
   let pos = 0
+  const seq = Number(view.getBigUint64(pos)); pos += 8
   const idLen = view.getUint32(pos); pos += 4
   const idBytes = new Uint8Array(frame, pos, idLen); pos += idLen
   const uploadId = new TextDecoder().decode(idBytes)
@@ -97,7 +100,7 @@ function parseChunkFrame(frame: ArrayBuffer): {
   const offset = Number(view.getBigUint64(pos)); pos += 8
   const dataLen = Number(view.getBigUint64(pos)); pos += 8
   const data = new Uint8Array(frame, pos, dataLen)
-  return { uploadId, chunkIndex, offset, data }
+  return { seq, uploadId, chunkIndex, offset, data }
 }
 
 describe('useSFTP', () => {
@@ -117,7 +120,7 @@ describe('useSFTP', () => {
   it('list sends type=list and updates files/currentPath on success', async () => {
     const s = withSetup(() => useSFTP(node))
     const p = s.list('/home')
-    expect(sentPayloadAt(0)).toEqual({ type: 'list', data: { path: '/home' } })
+    expect(sentPayloadAt(0)).toEqual({ type: 'list', data: { path: '/home' }, seq: 1 })
     respond({
       type: 'list',
       data: {
@@ -135,7 +138,7 @@ describe('useSFTP', () => {
   it('mkdir sends type=mkdir', async () => {
     const s = withSetup(() => useSFTP(node))
     const p = s.mkdir('/new')
-    expect(sentPayloadAt(0)).toEqual({ type: 'mkdir', data: { path: '/new' } })
+    expect(sentPayloadAt(0)).toEqual({ type: 'mkdir', data: { path: '/new' }, seq: 1 })
     respond({ type: 'ok' })
     await p
   })
@@ -143,7 +146,7 @@ describe('useSFTP', () => {
   it('del sends type=delete', async () => {
     const s = withSetup(() => useSFTP(node))
     const p = s.del('/file')
-    expect(sentPayloadAt(0)).toEqual({ type: 'delete', data: { path: '/file' } })
+    expect(sentPayloadAt(0)).toEqual({ type: 'delete', data: { path: '/file' }, seq: 1 })
     respond({ type: 'ok' })
     await p
   })
@@ -245,7 +248,7 @@ describe('useSFTP', () => {
     const s = withSetup(() => useSFTP(node))
     s.downloadProgress.value = 50
     const p = s.download('/file')
-    expect(sentPayloadAt(0)).toEqual({ type: 'download', data: { path: '/file', offset: 0 } })
+    expect(sentPayloadAt(0)).toEqual({ type: 'download', data: { path: '/file', offset: 0 }, seq: 1 })
     expect(s.downloadProgress.value).toBe(0)
     respond({ type: 'ok' })
     await p

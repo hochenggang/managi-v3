@@ -35,10 +35,13 @@ const (
 	msgTypeDownload      = "download"
 )
 
-// wsEnvelope 统一消息信封 {type, data}。
+// wsEnvelope 统一消息信封 {type, data, seq?}。
+// seq 用于 SFTP 请求-响应关联：响应回填请求的 seq，前端据此丢弃迟到的旧响应；
+// 无请求-响应语义的消息（终端输出/登录/心跳）保持 0，序列化时省略。
 type wsEnvelope struct {
 	Type string          `json:"type"`
 	Data json.RawMessage `json:"data,omitempty"`
+	Seq  int64           `json:"seq,omitempty"`
 }
 
 // wsLoginResult 登录结果 data 负载。
@@ -101,6 +104,12 @@ func (w *wsConn) writeRaw(msgType int, data []byte) error {
 
 // writeEnvelope 写入 {type, data} 消息。data 为 nil 时不带 data 字段。
 func (w *wsConn) writeEnvelope(msgType string, data any) error {
+	return w.writeEnvelopeSeq(msgType, data, 0)
+}
+
+// writeEnvelopeSeq 写入带 seq 的消息：SFTP 响应回填请求的 seq，前端据此丢弃迟到的旧响应。
+// seq=0 时序列化省略，与旧协议兼容。
+func (w *wsConn) writeEnvelopeSeq(msgType string, data any, seq int64) error {
 	var dataBytes json.RawMessage
 	if data != nil {
 		b, err := json.Marshal(data)
@@ -109,7 +118,7 @@ func (w *wsConn) writeEnvelope(msgType string, data any) error {
 		}
 		dataBytes = b
 	}
-	return w.writeJSON(wsEnvelope{Type: msgType, Data: dataBytes})
+	return w.writeJSON(wsEnvelope{Type: msgType, Data: dataBytes, Seq: seq})
 }
 
 func (w *wsConn) writeError(message string) error {

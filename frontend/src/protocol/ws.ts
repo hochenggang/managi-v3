@@ -21,10 +21,11 @@ export type WSMessageType =
   | 'rename'
   | 'download'
 
-/** 统一消息信封。 */
+/** 统一消息信封。seq 用于 SFTP 请求-响应关联，其余消息省略。 */
 export interface WSMessage<T = unknown> {
   type: WSMessageType
   data?: T
+  seq?: number
 }
 
 /** 登录结果 data 负载。 */
@@ -45,9 +46,10 @@ export interface WSResize {
   rows: number
 }
 
-/** 构造 envelope 消息字符串。 */
-export function wsMessage<T>(type: WSMessageType, data?: T): string {
+/** 构造 envelope 消息字符串。可选 seq 用于 SFTP 请求-响应关联。 */
+export function wsMessage<T>(type: WSMessageType, data?: T, seq?: number): string {
   const msg: WSMessage<T> = data === undefined ? { type } : { type, data }
+  if (seq !== undefined) msg.seq = seq
   return JSON.stringify(msg)
 }
 
