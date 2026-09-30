@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,6 +76,18 @@ func TestList(t *testing.T) {
 	}
 }
 
+// TestHome 验证起始目录解析：返回绝对路径且可直接列目录（拿不到 cwd 时回退 "/"）。
+func TestHome(t *testing.T) {
+	sc, _, _, cleanup := newClient(t)
+	defer cleanup()
+
+	home := sc.Home()
+	assert.True(t, strings.HasPrefix(home, "/"), "必须是绝对路径，实际 %q", home)
+
+	_, err := sc.List(home)
+	require.NoError(t, err)
+}
+
 // TestMkdir 验证递归创建目录。
 func TestMkdir(t *testing.T) {
 	sc, srv, _, cleanup := newClient(t)
@@ -120,6 +133,62 @@ func TestDelete_Dir(t *testing.T) {
 	assert.True(t, os.IsNotExist(err))
 }
 
+// TestDelete_SymlinkToFile 验证删除文件软链接只删链接本身，目标内容完好。
+func TestDelete_SymlinkToFile(t *testing.T) {
+	sc, srv, _, cleanup := newClient(t)
+	defer cleanup()
+
+	target := filepath.Join(srv.RootDir(), "victim.txt")
+	require.NoError(t, os.WriteFile(target, []byte("precious"), 0644))
+	link := filepath.Join(srv.RootDir(), "link.txt")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("平台不支持创建软链接: %v", err)
+	}
+
+	require.NoError(t, sc.Delete("/link.txt"))
+
+	_, err := os.Lstat(link)
+	assert.True(t, os.IsNotExist(err), "链接本身应被删除")
+	info, err := os.Stat(target)
+	require.NoError(t, err, "目标文件不得被删除")
+	assert.Equal(t, int64(len("precious")), info.Size(), "目标文件不得被截断")
+}
+
+// TestDelete_SymlinkedDir 验证目录软链接不会被当成目录递归删除，
+// 无论直接删链接，还是删包含该链接的父目录，链接目标都必须存活。
+func TestDelete_SymlinkedDir(t *testing.T) {
+	sc, srv, _, cleanup := newClient(t)
+	defer cleanup()
+
+	root := srv.RootDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "victim"), 0755))
+	inner := filepath.Join(root, "victim", "keep.txt")
+	require.NoError(t, os.WriteFile(inner, []byte("data"), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "parent"), 0755))
+
+	link := filepath.Join(root, "parent", "shortcut")
+	if err := os.Symlink(filepath.Join(root, "victim"), link); err != nil {
+		t.Skipf("平台不支持创建软链接: %v", err)
+	}
+
+	// 1) 直接删链接
+	require.NoError(t, sc.Delete("/parent/shortcut"))
+	_, err := os.Lstat(link)
+	assert.True(t, os.IsNotExist(err), "链接本身应被删除")
+	assert.FileExists(t, inner, "链接目标目录内容不得被删除")
+
+	// 2) 重建链接后删父目录：遍历目录项时按 Lstat 判软链接，只摘链接
+	if err := os.Symlink(filepath.Join(root, "victim"), link); err != nil {
+		t.Skipf("平台不支持创建软链接: %v", err)
+	}
+	require.NoError(t, sc.Delete("/parent"))
+	_, err = os.Stat(filepath.Join(root, "parent"))
+	assert.True(t, os.IsNotExist(err), "父目录应已删除")
+	assert.FileExists(t, inner, "链接目标目录内容不得被删除")
+	_, err = os.Stat(filepath.Join(root, "victim"))
+	assert.NoError(t, err, "链接目标目录本身应存活")
+}
+
 // TestRename 验证重命名。
 func TestRename(t *testing.T) {
 	sc, srv, _, cleanup := newClient(t)
@@ -143,7 +212,7 @@ func TestUploadInit_Fresh(t *testing.T) {
 	sc, _, _, cleanup := newClient(t)
 	defer cleanup()
 
-	uploadID, offset, err := sc.UploadInit("/upload", "test.bin", 1024, 512)
+	uploadID, offset, err := sc.UploadInit("/upload", "test.bin", 1024)
 	require.NoError(t, err)
 	assert.NotEmpty(t, uploadID)
 	assert.Equal(t, int64(0), offset)
@@ -159,10 +228,46 @@ func TestUploadInit_Resume(t *testing.T) {
 	partPath := filepath.Join(srv.RootDir(), "upload", "test.bin.part")
 	require.NoError(t, os.WriteFile(partPath, make([]byte, 1024), 0644))
 
-	uploadID, offset, err := sc.UploadInit("/upload", "test.bin", 4096, 512)
+	uploadID, offset, err := sc.UploadInit("/upload", "test.bin", 4096)
 	require.NoError(t, err)
 	assert.NotEmpty(t, uploadID)
 	assert.Equal(t, int64(1024), offset) // 断点续传核心
+}
+
+// TestUploadInit_DiscardsOversizedStalePart 验证脏 .part 被丢弃：
+// 残留 .part 比本次要传的文件还大时，续传点永远追不上客户端 offset，
+// 每个分片都会 mismatch，上传彻底卡死，只能从头传。
+func TestUploadInit_DiscardsOversizedStalePart(t *testing.T) {
+	sc, srv, _, cleanup := newClient(t)
+	defer cleanup()
+
+	require.NoError(t, os.MkdirAll(filepath.Join(srv.RootDir(), "upload"), 0755))
+	partPath := filepath.Join(srv.RootDir(), "upload", "stale.bin.part")
+	require.NoError(t, os.WriteFile(partPath, make([]byte, 4096), 0644))
+
+	uploadID, offset, err := sc.UploadInit("/upload", "stale.bin", 1024)
+	require.NoError(t, err)
+	assert.NotEmpty(t, uploadID)
+	assert.Equal(t, int64(0), offset, "stale .part larger than the payload must restart from 0")
+	// 脏内容必须真正丢弃（重开后为 0 字节），否则客户端会续到错误数据之上
+	info, err := os.Stat(partPath)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), info.Size())
+}
+
+// TestUploadInit_KeepsUsablePart 验证正常续传点不会被误删（.part 小于总大小）。
+func TestUploadInit_KeepsUsablePart(t *testing.T) {
+	sc, srv, _, cleanup := newClient(t)
+	defer cleanup()
+
+	require.NoError(t, os.MkdirAll(filepath.Join(srv.RootDir(), "upload"), 0755))
+	partPath := filepath.Join(srv.RootDir(), "upload", "ok.bin.part")
+	require.NoError(t, os.WriteFile(partPath, make([]byte, 512), 0644))
+
+	_, offset, err := sc.UploadInit("/upload", "ok.bin", 1024)
+	require.NoError(t, err)
+	assert.Equal(t, int64(512), offset)
+	require.FileExists(t, partPath)
 }
 
 // TestUploadInit_RejectsPathEscapeFilenames 验证含路径成分的文件名被拒绝。
@@ -185,7 +290,7 @@ func TestUploadInit_RejectsPathEscapeFilenames(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, err := sc.UploadInit("/upload", tc.filename, 1024, 512)
+			_, _, err := sc.UploadInit("/upload", tc.filename, 1024)
 			assert.Error(t, err, "filename %q must be rejected", tc.filename)
 		})
 	}
@@ -196,7 +301,7 @@ func TestUploadInit_TraversalFilenameWritesNowhere(t *testing.T) {
 	sc, srv, _, cleanup := newClient(t)
 	defer cleanup()
 
-	_, _, err := sc.UploadInit("/upload", "../escaped.bin", 1024, 512)
+	_, _, err := sc.UploadInit("/upload", "../escaped.bin", 1024)
 	require.Error(t, err)
 
 	_, statErr := os.Stat(filepath.Join(srv.RootDir(), "escaped.bin"))
@@ -208,7 +313,7 @@ func TestUploadChunk_WriteAtOffset(t *testing.T) {
 	sc, srv, _, cleanup := newClient(t)
 	defer cleanup()
 
-	uploadID, _, err := sc.UploadInit("/upload", "chunk.bin", 100, 50)
+	uploadID, _, err := sc.UploadInit("/upload", "chunk.bin", 100)
 	require.NoError(t, err)
 
 	// 写入第一块到 offset 0
@@ -230,7 +335,7 @@ func TestUploadComplete_Rename(t *testing.T) {
 	sc, srv, _, cleanup := newClient(t)
 	defer cleanup()
 
-	uploadID, _, err := sc.UploadInit("/upload", "done.bin", 10, 4)
+	uploadID, _, err := sc.UploadInit("/upload", "done.bin", 10)
 	require.NoError(t, err)
 
 	require.NoError(t, sc.UploadChunk(uploadID, 0, 0, []byte(" Completed")))
@@ -262,7 +367,7 @@ func TestUploadComplete_RenameFailure_PreservesState(t *testing.T) {
 	defer cleanup()
 
 	// totalSize=0 跳过 stat 校验，直接到 Rename 步骤
-	uploadID, _, err := sc.UploadInit("/upload", "retry.bin", 0, 4)
+	uploadID, _, err := sc.UploadInit("/upload", "retry.bin", 0)
 	require.NoError(t, err)
 	require.NoError(t, sc.UploadChunk(uploadID, 0, 0, []byte("data")))
 
@@ -302,6 +407,60 @@ func TestUploadChunk_UnknownID(t *testing.T) {
 
 	err := sc.UploadChunk("nonexistent-id", 0, 0, []byte("data"))
 	assert.Error(t, err)
+}
+
+// TestUploadChunk_OffsetMismatch 验证客户端 offset 与服务端期望不符时分片被拒：
+// 否则客户端可把数据写到 .part 的任意位置，得到一份内容错乱却「成功」的文件。
+func TestUploadChunk_OffsetMismatch(t *testing.T) {
+	sc, srv, _, cleanup := newClient(t)
+	defer cleanup()
+
+	uploadID, _, err := sc.UploadInit("/upload", "mismatch.bin", 100)
+	require.NoError(t, err)
+
+	err = sc.UploadChunk(uploadID, 0, 9, []byte("AAAA"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "chunk offset mismatch")
+
+	// 未写入任何内容
+	info, err := os.Stat(filepath.Join(srv.RootDir(), "upload", "mismatch.bin.part"))
+	require.NoError(t, err)
+	assert.Zero(t, info.Size())
+}
+
+// TestUploadChunk_RejectsAfterFinalize 验证句柄已关闭后写入分片返回错误而非 panic：
+// UploadComplete 的 rename 失败路径会保留状态但把 st.file 置 nil（供重试 Complete）。
+func TestUploadChunk_RejectsAfterFinalize(t *testing.T) {
+	sc, _, _, cleanup := newClient(t)
+	defer cleanup()
+
+	// totalSize=0 跳过 stat 校验，直连 rename
+	uploadID, _, err := sc.UploadInit("/upload", "finalized.bin", 0)
+	require.NoError(t, err)
+	require.NoError(t, sc.UploadChunk(uploadID, 0, 0, []byte("data")))
+
+	// 关闭 SFTP 连接使 rename 失败，走「保留状态 + 句柄置 nil」分支
+	require.NoError(t, sc.sc.Close())
+	require.Error(t, sc.UploadComplete(uploadID))
+
+	err = sc.UploadChunk(uploadID, 1, 4, []byte("more"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already finalized")
+}
+
+// TestUploadChunk_RejectsOversized 验证超出声明 totalSize 的分片被拒：
+// 否则一直发分片的客户端能把 .part 撑爆远端磁盘。
+func TestUploadChunk_RejectsOversized(t *testing.T) {
+	sc, _, _, cleanup := newClient(t)
+	defer cleanup()
+
+	uploadID, _, err := sc.UploadInit("/upload", "oversize.bin", 4)
+	require.NoError(t, err)
+	require.NoError(t, sc.UploadChunk(uploadID, 0, 0, []byte("data")))
+
+	err = sc.UploadChunk(uploadID, 1, 4, []byte("x"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "chunk exceeds file size")
 }
 
 // TestDownloadStream_Full 验证完整下载（offset=0）。

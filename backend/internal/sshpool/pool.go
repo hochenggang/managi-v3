@@ -6,6 +6,7 @@ package sshpool
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 
 	"managi/internal/config"
 	"managi/internal/keylock"
@@ -58,26 +60,56 @@ type Pool struct {
 	hardCap     int
 	idleTimeout time.Duration
 	hostKeys    map[string]hostKeyEntry // TOFU: host:port → 首次记录的主机公钥（含 lastSeen）
+	// knownHosts 非 nil 时启用严格主机密钥校验（MANAGI_KNOWN_HOSTS 指向 OpenSSH known_hosts）。
+	knownHosts ssh.HostKeyCallback
+	// hostKeyErr：配置了 known_hosts 却加载失败。此时拒绝所有连接而不是退回 TOFU——
+	// 用户要的是严格校验，静默降级成「首次遇到谁都信」比直接报错更危险。
+	hostKeyErr error
 }
 
 // errPoolFull 连接池触达硬上限且无空闲连接可淘汰。
-var errPoolFull = fmt.Errorf("ssh pool full: no idle connection to evict")
+// 必须给出下一步动作：只说 "pool full" 用户无从下手（关窗口还是改配置）。
+var errPoolFull = fmt.Errorf("SSH 连接池已满且无空闲连接：请关闭部分终端/文件标签后重试，或调大 MANAGI_SSH_POOL_SIZE")
 
-// New 创建连接池。
+// New 创建连接池。容量取 MANAGI_SSH_POOL_SIZE（≤0 时用默认值，覆盖测试直构的 Config）。
 func New(cfg *config.Config) *Pool {
 	idleTimeout := time.Duration(cfg.SSHIdleTimeout) * time.Second
 	if idleTimeout <= 0 {
 		idleTimeout = 120 * time.Second
 	}
-	return &Pool{
+	maxSize := cfg.SSHPoolSize
+	if maxSize <= 0 {
+		maxSize = config.DefaultSSHPoolSize
+	}
+	p := &Pool{
 		conns:       make(map[string]*Connection),
 		keyLocks:    keylock.New(),
 		cfg:         cfg,
-		maxSize:     20,
-		hardCap:     40, // 硬上限为 maxSize 2 倍，防止全部占用时无限增长
+		maxSize:     maxSize,
+		hardCap:     maxSize * 2, // 硬上限为 maxSize 2 倍，防止全部占用时无限增长
 		idleTimeout: idleTimeout,
 		hostKeys:    make(map[string]hostKeyEntry),
 	}
+	p.initHostKeyVerification()
+	return p
+}
+
+// initHostKeyVerification 按 MANAGI_KNOWN_HOSTS 选择主机密钥校验方式：
+// 配了且能加载 → 严格校验；配了但加载失败 → 记录错误并拒绝连接；没配 → 进程内 TOFU。
+func (p *Pool) initHostKeyVerification() {
+	path := p.cfg.KnownHostsFile
+	if path == "" {
+		slog.Info("ssh host key verification: TOFU（首次信任）。严格校验请设置 MANAGI_KNOWN_HOSTS")
+		return
+	}
+	cb, err := knownhosts.New(path)
+	if err != nil {
+		p.hostKeyErr = fmt.Errorf("MANAGI_KNOWN_HOSTS=%s 无法解析: %w", path, err)
+		slog.Error("known_hosts 加载失败，将拒绝所有 SSH 连接（未退回 TOFU）", "path", path, "err", err)
+		return
+	}
+	p.knownHosts = cb
+	slog.Info("ssh host key verification: known_hosts", "path", path)
 }
 
 // NewWithSize 创建指定容量的连接池（测试用）。
@@ -92,6 +124,10 @@ func NewWithSize(cfg *config.Config, maxSize int) *Pool {
 // 不存在或失效则新建并入池。
 // isAlive 是阻塞网络调用，移出 p.mu.Lock() 范围，避免慢节点卡死全池。
 func (p *Pool) Get(node model.Node) (*Connection, error) {
+	// 所有入口（HTTP 执行/下载、WS 终端、WS SFTP）都经过这里，校验放一处即全覆盖
+	if err := node.Validate(); err != nil {
+		return nil, err
+	}
 	key := node.ConnectionKey()
 	p.keyLocks.Lock(key)
 	defer p.keyLocks.Unlock(key)
@@ -169,12 +205,16 @@ func (p *Pool) Get(node model.Node) (*Connection, error) {
 	return cNew, nil
 }
 
-// Release 引用计数 -1，不立即关闭（修正 v2 release 即关闭的缺陷）。
-func (p *Pool) Release(node model.Node) {
-	key := node.ConnectionKey()
+// Release 归还一次引用（与 Get 的 +1 配对），不立即关闭（修正 v2 release 即关闭的缺陷）。
+// 按连接对象身份归还而非按 key：失效连接被剔除、同 key 新连接入池后，
+// 按 key 归还会误减新连接的 refs，正在使用的连接随即被 cleanIdle 当空闲回收。
+func (p *Pool) Release(c *Connection) {
+	if c == nil {
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if c, ok := p.conns[key]; ok && c.refs > 0 {
+	if c.refs > 0 {
 		c.refs--
 		c.lastUsed = time.Now()
 	}
@@ -197,18 +237,14 @@ func (p *Pool) CloseAll() {
 }
 
 // StartCleaner 启动后台清理协程，回收空闲超时连接。
-// 接收 done channel，进程退出时停止协程，避免 goroutine 泄漏。
-func (p *Pool) StartCleaner(done ...<-chan struct{}) {
-	var d <-chan struct{}
-	if len(done) > 0 {
-		d = done[0]
-	}
+// done 为必填：清理协程必须可被停止，否则进程退出时泄漏。
+func (p *Pool) StartCleaner(done <-chan struct{}) {
 	go func() {
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-d:
+			case <-done:
 				return
 			case <-ticker.C:
 				p.cleanIdle()
@@ -228,7 +264,7 @@ func (p *Pool) Execute(ctx context.Context, node model.Node, cmds []string) (out
 	if err != nil {
 		return nil, nil, err
 	}
-	defer p.Release(node)
+	defer p.Release(conn)
 
 	session, err := conn.client.NewSession()
 	if err != nil {
@@ -287,11 +323,17 @@ func (p *Pool) dial(node model.Node) (*ssh.Client, error) {
 	return client, nil
 }
 
-// hostKeyCallback 返回 TOFU（Trust On First Use）主机密钥校验回调。
-// 首次连接：记录公钥并接受；后续连接：比对公钥，不匹配则拒绝（防 MITM）。
-// 进程内有效，重启后重新信任（简约优先；持久化可后续迭代）。
-// 每次连接更新 lastSeen，供 cleanIdle 清理长期未使用的主机密钥。
+// hostKeyCallback 返回主机密钥校验回调。
+// 优先 MANAGI_KNOWN_HOSTS（严格、可持久化、可离线核对指纹）；配置加载失败时拒绝连接，
+// 绝不退回 TOFU——否则「配了严格校验」的部署会在文件写坏那一刻静默变成首次即信任。
+// 未配置时才是进程内 TOFU：首次记录公钥并接受，后续比对，不匹配即拒绝（防 MITM）。
 func (p *Pool) hostKeyCallback(node model.Node) ssh.HostKeyCallback {
+	if p.knownHosts != nil {
+		return p.knownHosts
+	}
+	if p.hostKeyErr != nil {
+		return func(string, net.Addr, ssh.PublicKey) error { return p.hostKeyErr }
+	}
 	addr := net.JoinHostPort(node.Host, strconv.Itoa(node.Port))
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		p.mu.Lock()
@@ -349,19 +391,20 @@ func (p *Pool) keepalive(key string, client *ssh.Client, done <-chan struct{}) {
 func authMethods(node model.Node) ([]ssh.AuthMethod, error) {
 	switch node.AuthType {
 	case model.AuthKey:
-		signer, err := parsePrivateKey([]byte(node.AuthValue))
+		// ssh.ParsePrivateKey 已覆盖 RSA/Ed25519/ECDSA/PKCS8 等常见格式
+		signer, err := ssh.ParsePrivateKey([]byte(node.AuthValue))
 		if err != nil {
-			return nil, fmt.Errorf("parse private key: %w", err)
+			var ppm *ssh.PassphraseMissingError
+			if errors.As(err, &ppm) {
+				// 当前没有口令输入口，故给出可操作的绕开方式，而不是 "ssh: no key found"
+				return nil, errors.New("私钥带口令保护，暂不支持解锁：请用 ssh-keygen -p 去掉口令后重新粘贴，或改用密码认证")
+			}
+			return nil, fmt.Errorf("私钥解析失败（请确认粘贴的是完整私钥，含 BEGIN/END 行）: %w", err)
 		}
 		return []ssh.AuthMethod{ssh.PublicKeys(signer)}, nil
 	default: // password
 		return []ssh.AuthMethod{ssh.Password(node.AuthValue)}, nil
 	}
-}
-
-// parsePrivateKey 解析私钥（ssh.ParsePrivateKey 已支持 RSA/Ed25519/ECDSA/PKCS8 等常见格式）。
-func parsePrivateKey(pem []byte) (ssh.Signer, error) {
-	return ssh.ParsePrivateKey(pem)
 }
 
 // isAlive 判断连接 transport 是否活跃。
@@ -388,8 +431,9 @@ func (p *Pool) cleanIdle() {
 	}
 	// 清理长期未使用的主机密钥条目，防止 map 无限增长。
 	// 仅删除超过 hostKeyTTL 且当前无活跃连接的条目。
-	// 注意键格式差异：hostKeys 以 host:port 记录，conns 以 host:port:username 记录，
-	// 故须按「host:port:」前缀匹配判断是否仍有任意用户的活跃连接。
+	// 注意键格式差异：hostKeys 以 host:port 记录，conns 以完整 ConnectionKey
+	// （host:port:username:凭据指纹）记录，故须按「host:port:」前缀匹配
+	// 判断该主机上是否还有任意用户/任意凭据的活跃连接。
 	for addr, entry := range p.hostKeys {
 		if now.Sub(entry.lastSeen) > hostKeyTTL && !p.hasActiveConnLocked(addr) {
 			delete(p.hostKeys, addr)
@@ -398,7 +442,8 @@ func (p *Pool) cleanIdle() {
 }
 
 // hasActiveConnLocked 判断指定 host:port 是否仍有任意用户的连接在池中。
-// 调用方需持 p.mu。连接键为 host:port:username，用前缀匹配。
+// 调用方需持 p.mu。连接键为 Node.ConnectionKey()（host:port:username:凭据指纹），
+// 以 host:port 打头，故用「addr:」前缀匹配即可覆盖同一主机端口的全部条目。
 func (p *Pool) hasActiveConnLocked(addr string) bool {
 	prefix := addr + ":"
 	for k := range p.conns {
@@ -435,16 +480,20 @@ func joinLines(cmds []string) string {
 	return strings.Join(cmds, "\n")
 }
 
-// splitLines 按行拆分，去掉空行。
-// 复用 strings.Split + TrimRight，删除手写 trimCR。
+// splitLines 按行拆分命令输出：保留中间空行（cat/df/awk 等输出里的空行是内容的一部分，
+// 丢掉会让前端显示串行错位），只去掉行尾 \r 与末尾换行产生的空尾行。
 func splitLines(s string) []string {
-	parts := strings.Split(s, "\n")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		line := strings.TrimRight(p, "\r")
-		if line != "" {
-			out = append(out, line)
-		}
+	if s == "" {
+		return nil
+	}
+	raw := strings.Split(strings.TrimSuffix(s, "\n"), "\n")
+	out := make([]string, 0, len(raw))
+	for _, line := range raw {
+		out = append(out, strings.TrimRight(line, "\r"))
+	}
+	// 尾部空行不携带信息（多数命令以换行收尾），整体即空 ⇒ 返回空切片
+	for len(out) > 0 && out[len(out)-1] == "" {
+		out = out[:len(out)-1]
 	}
 	return out
 }

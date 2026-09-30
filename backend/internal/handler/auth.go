@@ -121,9 +121,9 @@ func BasicAuthMiddleware(cfg *config.Config, done <-chan struct{}) func(http.Han
 				next.ServeHTTP(w, r)
 				return
 			}
-			ip := clientIP(r)
+			ip := clientIP(r, cfg.TrustProxy)
 			if limiter.tooMany(ip) {
-				http.Error(w, "too many auth failures", http.StatusTooManyRequests)
+				writeJSONError(w, http.StatusTooManyRequests, "too many auth failures, retry later")
 				return
 			}
 			user, pass, ok := r.BasicAuth()
@@ -132,6 +132,8 @@ func BasicAuthMiddleware(cfg *config.Config, done <-chan struct{}) func(http.Han
 				subtle.ConstantTimeCompare([]byte(pass), expectedPass) != 1 {
 				limiter.recordFailure(ip)
 				w.Header().Set("WWW-Authenticate", `Basic realm="managi", charset="UTF-8"`)
+				// 401 保持纯文本：浏览器弹出的是登录框，直接访问时人眼读到的也是这个 body，
+				// JSON 反而添乱；调用方只需要状态码即可判定未授权。
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
@@ -141,14 +143,18 @@ func BasicAuthMiddleware(cfg *config.Config, done <-chan struct{}) func(http.Han
 	}
 }
 
-// clientIP 提取客户端 IP（优先 X-Forwarded-For 首段，回退 RemoteAddr）。
+// clientIP 提取客户端 IP。
+// 仅当 trustProxy 为真（MANAGI_TRUST_PROXY=true，即前面确实有可信反代）时才采信
+// X-Forwarded-For 首段；直连部署下任何人都能伪造这个头，限流就会按伪造 IP 计数而失效。
 // 复用 net.SplitHostPort 正确处理 IPv6 地址（原手写按 ':' 截断会破坏 IPv6）。
-func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if idx := strings.IndexByte(xff, ','); idx >= 0 {
-			return strings.TrimSpace(xff[:idx])
+func clientIP(r *http.Request, trustProxy bool) string {
+	if trustProxy {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			if idx := strings.IndexByte(xff, ','); idx >= 0 {
+				return strings.TrimSpace(xff[:idx])
+			}
+			return strings.TrimSpace(xff)
 		}
-		return strings.TrimSpace(xff)
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {

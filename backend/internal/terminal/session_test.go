@@ -61,6 +61,29 @@ func TestResize_NotOpened(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// TestResize_RejectsNonPositiveSize 验证 0/负尺寸被拒绝：
+// 客户端在拿到真实尺寸前常先发来 0×0，下发给 PTY 会让输出换行全乱。
+func TestResize_RejectsNonPositiveSize(t *testing.T) {
+	srv := testutil.Start(t)
+	defer srv.Close()
+
+	sshc := dialMock(t, srv)
+	defer func() { _ = sshc.Close() }()
+
+	sess := New(sshc)
+	require.NoError(t, sess.Open(80, 24))
+	defer func() { _ = sess.Close() }()
+
+	for _, tc := range []struct{ cols, rows int }{{0, 24}, {80, 0}, {-1, 24}, {80, -1}} {
+		err := sess.Resize(tc.cols, tc.rows)
+		require.Error(t, err, "cols=%d rows=%d must be rejected", tc.cols, tc.rows)
+		assert.Contains(t, err.Error(), "invalid terminal size")
+	}
+
+	// 合法尺寸仍然可用
+	assert.NoError(t, sess.Resize(120, 40))
+}
+
 // TestClose_NotOpened 验证未 Open 时 Close 不 panic。
 func TestClose_NotOpened(t *testing.T) {
 	srv := testutil.Start(t)

@@ -31,8 +31,10 @@ func New(cfg *config.Config, done <-chan struct{}) (*http.Server, *sshpool.Pool)
 	pool := handler.Register(mux, cfg, done)
 	mux.HandleFunc("/health", healthHandler())
 
-	// BasicAuth 包裹全部路由（内部对 /health 放行），最外层再套基础安全响应头
-	h := handler.SecurityHeaders(handler.BasicAuthMiddleware(cfg, done)(mux))
+	// BasicAuth 包裹全部路由（内部对 /health 放行），外层再叠访问日志与安全响应头。
+	// 顺序：SecurityHeaders( AccessLog( BasicAuth( mux ) ) ) —— 访问日志在鉴权之内，
+	// 未授权请求（含口令爆破尝试）也会被记录，且只记 path 不记凭据。
+	h := handler.SecurityHeaders(handler.AccessLog(handler.BasicAuthMiddleware(cfg, done)(mux), cfg.TrustProxy))
 
 	return &http.Server{
 		Addr:              net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)),

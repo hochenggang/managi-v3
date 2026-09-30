@@ -101,38 +101,45 @@ func TestCheckOrigin(t *testing.T) {
 	assert.False(t, checkOrigin(req))
 }
 
-// TestClientIP 验证客户端 IP 提取（XFF 优先、RemoteAddr 回退、IPv6 兼容）。
-// 覆盖 R6 修复：net.SplitHostPort 正确处理 IPv6 地址。
+// TestClientIP 验证客户端 IP 提取：信任代理时取 XFF 首段，否则只用真实连接地址；
+// 两种回退路径都由 net.SplitHostPort 处理端口与 IPv6（R6 修复：
+// 原手写按 ':' 截断会破坏 IPv6 地址）。
 func TestClientIP(t *testing.T) {
 	// XFF 单 IP
 	req := httptest.NewRequest("GET", "/", nil)
 	req.Header.Set("X-Forwarded-For", "1.2.3.4")
-	assert.Equal(t, "1.2.3.4", clientIP(req))
+	assert.Equal(t, "1.2.3.4", clientIP(req, true))
 
 	// XFF 多 IP（取首段，去空白）
 	req = httptest.NewRequest("GET", "/", nil)
 	req.Header.Set("X-Forwarded-For", "1.2.3.4, 5.6.7.8")
-	assert.Equal(t, "1.2.3.4", clientIP(req))
+	assert.Equal(t, "1.2.3.4", clientIP(req, true))
 
 	// XFF 带前后空白
 	req = httptest.NewRequest("GET", "/", nil)
 	req.Header.Set("X-Forwarded-For", "  1.2.3.4  ")
-	assert.Equal(t, "1.2.3.4", clientIP(req))
+	assert.Equal(t, "1.2.3.4", clientIP(req, true))
+
+	// 未信任代理：即使带 XFF 也只认 RemoteAddr
+	req = httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("X-Forwarded-For", "1.2.3.4")
+	req.RemoteAddr = "203.0.113.9:55555"
+	assert.Equal(t, "203.0.113.9", clientIP(req, false))
 
 	// RemoteAddr IPv4
 	req = httptest.NewRequest("GET", "/", nil)
 	req.RemoteAddr = "1.2.3.4:5678"
-	assert.Equal(t, "1.2.3.4", clientIP(req))
+	assert.Equal(t, "1.2.3.4", clientIP(req, false))
 
 	// RemoteAddr IPv6（R6 修复：原手写按 ':' 截断会破坏 IPv6）
 	req = httptest.NewRequest("GET", "/", nil)
 	req.RemoteAddr = "[::1]:5678"
-	assert.Equal(t, "::1", clientIP(req))
+	assert.Equal(t, "::1", clientIP(req, false))
 
 	// 无 XFF 且 RemoteAddr 无端口（异常情况，返回原值）
 	req = httptest.NewRequest("GET", "/", nil)
 	req.RemoteAddr = "1.2.3.4"
-	assert.Equal(t, "1.2.3.4", clientIP(req))
+	assert.Equal(t, "1.2.3.4", clientIP(req, false))
 }
 
 // TestRandomBasicAuthPassword 验证随机口令为 32 位十六进制且两次生成不同。

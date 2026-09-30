@@ -53,18 +53,7 @@ func TestSftpDownloadHandler_Full(t *testing.T) {
 	assert.Equal(t, content, rec.Body.Bytes())
 }
 
-// TestSftpDownloadHandler_RejectGET 验证 GET 被拒绝：凭据不得出现在 URL 查询串中。
-func TestSftpDownloadHandler_RejectGET(t *testing.T) {
-	pool := sshpool.New(testutil.TestConfig())
-	defer pool.CloseAll()
-	h := sftpDownloadHandler(pool)
-
-	req := httptest.NewRequest("GET", "/api/sftp/download?node={}&path=/test.txt", nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-
-	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
-}
+// GET 拒绝用例见 TestRegister_MethodRouting：方法限制已上移到路由模式。
 
 // TestSftpDownloadHandler_Range 验证 Range 下载：206 + Content-Range + 部分内容。
 func TestSftpDownloadHandler_Range(t *testing.T) {
@@ -87,6 +76,81 @@ func TestSftpDownloadHandler_Range(t *testing.T) {
 	require.Equal(t, http.StatusPartialContent, rec.Code)
 	assert.Equal(t, "bytes 10-19/20", rec.Header().Get("Content-Range"))
 	assert.Equal(t, content[10:], rec.Body.Bytes())
+}
+
+// TestSftpDownloadHandler_RangeBeyondEOF 验证起点越过文件末尾回 416：
+// 若返回 200/206 空体，续传客户端会认为剩余部分已取完，停在错误偏移不再重试。
+func TestSftpDownloadHandler_RangeBeyondEOF(t *testing.T) {
+	srv := testutil.Start(t)
+	defer srv.Close()
+
+	content := []byte("0123456789") // 10 bytes
+	require.NoError(t, os.WriteFile(filepath.Join(srv.RootDir(), "small.txt"), content, 0644))
+
+	pool := sshpool.New(testutil.TestConfig())
+	defer pool.CloseAll()
+	h := sftpDownloadHandler(pool)
+
+	for _, offset := range []string{"10", "999"} {
+		req := httptest.NewRequest("POST", "/api/sftp/download",
+			downloadBody(t, testutil.TestNode(srv.Host(), srv.Port()), "/small.txt"))
+		req.Header.Set("Range", "bytes="+offset+"-")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusRequestedRangeNotSatisfiable, rec.Code, "offset %s", offset)
+		assert.Equal(t, "bytes */10", rec.Header().Get("Content-Range"))
+		assert.Empty(t, rec.Body.String())
+	}
+}
+
+// TestSftpDownloadHandler_ClosedRangeServesWholeFile 验证带结束位的 Range 被忽略、
+// 退回 200 整文件：本服务只支持开区间，按起始位解析会多发数据且 Content-Range 与请求不符。
+func TestSftpDownloadHandler_ClosedRangeServesWholeFile(t *testing.T) {
+	srv := testutil.Start(t)
+	defer srv.Close()
+
+	content := []byte("0123456789ABCDEFGHIJ") // 20 bytes
+	require.NoError(t, os.WriteFile(filepath.Join(srv.RootDir(), "closed.txt"), content, 0644))
+
+	pool := sshpool.New(testutil.TestConfig())
+	defer pool.CloseAll()
+	h := sftpDownloadHandler(pool)
+
+	req := httptest.NewRequest("POST", "/api/sftp/download",
+		downloadBody(t, testutil.TestNode(srv.Host(), srv.Port()), "/closed.txt"))
+	req.Header.Set("Range", "bytes=5-9")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Empty(t, rec.Header().Get("Content-Range"))
+	assert.Equal(t, content, rec.Body.Bytes())
+}
+
+// TestParseRangeOffset 覆盖 Range 头的各类写法：不支持的一律归零（= 忽略 Range 传整文件），
+// 绝不能解析出负数或越界偏移，否则 Seek 会把下载流打挂。
+func TestParseRangeOffset(t *testing.T) {
+	for _, tc := range []struct {
+		header string
+		want   int64
+	}{
+		{"", 0},
+		{"bytes=10-", 10},
+		{"bytes=1024-", 1024},
+		{"bytes=0-", 0},
+		{"bytes= 10 -", 10},
+		{"bytes=5-9", 0},                  // 闭区间不支持
+		{"bytes=-500", 0},                 // 后缀区间不支持
+		{"bytes=abc-", 0},                 // 非数字
+		{"bytes=-1-", 0},                  // 负数
+		{"items=10-", 0},                  // 非 bytes 单位
+		{"bytes=10", 0},                   // 缺少短横线
+		{"invalid", 0},                    // 连等号都没有
+		{"bytes=9223372036854775808-", 0}, // 超出 int64
+	} {
+		assert.Equal(t, tc.want, parseRangeOffset(tc.header), "header=%q", tc.header)
+	}
 }
 
 // TestSftpDownloadHandler_MissingParams 验证缺少参数返回 400。
@@ -246,7 +310,10 @@ func TestSftpWSHandler_UploadFlow(t *testing.T) {
 
 	pool := sshpool.New(testutil.TestConfig())
 	defer pool.CloseAll()
-	h := sftpWSHandler(pool, testutil.TestConfig())
+	cfg := testutil.TestConfig()
+	// 非默认分片大小：证明 upload_init 下发的是配置值而非硬编码
+	cfg.ChunkSize = 4096
+	h := sftpWSHandler(pool, cfg)
 	httpSrv := httptest.NewServer(h)
 	defer httpSrv.Close()
 
@@ -276,6 +343,7 @@ func TestSftpWSHandler_UploadFlow(t *testing.T) {
 	assert.NotEmpty(t, uploadID)
 	offset, _ := initData["offset"].(float64)
 	assert.Equal(t, float64(0), offset)
+	assert.Equal(t, float64(4096), initData["chunk_size"], "服务端应下发自己的分片大小")
 
 	// upload_chunk：发二进制帧（帧头协议，design-v3.md §6.4）
 	chunkData := []byte("hello world")
@@ -330,4 +398,54 @@ func buildChunkFrame(seq int64, uploadID string, chunkIndex int, offset int64, d
 	binary.BigEndian.PutUint64(buf[8+4+len(idBytes)+4+8:], uint64(len(data)))
 	copy(buf[8+4+len(idBytes)+4+8+8:], data)
 	return buf
+}
+
+// TestParseChunkFrame 覆盖分片帧解析的正常路径与各类畸形输入。
+// 这些分支都由浏览器可发送的二进制帧直接触发：任何一处越界切片都会 panic 打挂整个进程，
+// 而不只是断开一条连接。
+func TestParseChunkFrame(t *testing.T) {
+	// 正常帧：逐字段往返
+	frame := buildChunkFrame(42, "upload-1", 3, 1024, []byte("payload"))
+	seq, id, idx, off, data, err := parseChunkFrame(frame)
+	require.NoError(t, err)
+	assert.Equal(t, int64(42), seq)
+	assert.Equal(t, "upload-1", id)
+	assert.Equal(t, 3, idx)
+	assert.Equal(t, int64(1024), off)
+	assert.Equal(t, []byte("payload"), data)
+
+	// 空 upload id 与空分片
+	seq, id, _, _, data, err = parseChunkFrame(buildChunkFrame(7, "", 0, 0, nil))
+	require.NoError(t, err)
+	assert.Equal(t, int64(7), seq)
+	assert.Empty(t, id)
+	assert.Empty(t, data)
+
+	// 连 seq 都放不下
+	_, _, _, _, _, err = parseChunkFrame(frame[:4])
+	require.Error(t, err)
+
+	// 头部被截断
+	_, _, _, _, _, err = parseChunkFrame(frame[:20])
+	require.Error(t, err)
+
+	// 只声明不存在的分片内容
+	_, _, _, _, _, err = parseChunkFrame(frame[:len(frame)-2])
+	require.Error(t, err)
+
+	// idLen 超过上限：直接构造声明超大 id 的帧头，验证不会绕过 headerLen 校验
+	huge := make([]byte, 8+4)
+	binary.BigEndian.PutUint64(huge[:8], 1)
+	binary.BigEndian.PutUint32(huge[8:], 0xFFFFFFFF)
+	_, _, _, _, _, err = parseChunkFrame(huge)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "upload id too long")
+
+	// dataLen 大于实际剩余字节
+	bad := buildChunkFrame(1, "u", 0, 0, []byte("abc"))
+	dataLenOffset := 8 + 4 + len("u") + 4 + 8
+	binary.BigEndian.PutUint64(bad[dataLenOffset:], 1<<40)
+	_, _, _, _, _, err = parseChunkFrame(bad)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "frame data incomplete")
 }

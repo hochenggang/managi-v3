@@ -190,26 +190,6 @@ func TestJoinCmds(t *testing.T) {
 	assert.Equal(t, "", joinCmds([]string{}))
 }
 
-// TestParseRangeOffset 验证 Range 头解析。
-func TestParseRangeOffset(t *testing.T) {
-	cases := []struct {
-		input string
-		want  int64
-	}{
-		{"", 0},
-		{"bytes=0-", 0},
-		{"bytes=10-", 10},
-		{"bytes=1024-", 1024},
-		{"bytes=-50", 0}, // 不支持 suffix range
-		{"items=0-", 0},  // 非 bytes 前缀
-		{"invalid", 0},
-		{"bytes=abc-", 0}, // 非法数字
-	}
-	for _, c := range cases {
-		assert.Equal(t, c.want, parseRangeOffset(c.input), "input=%q", c.input)
-	}
-}
-
 // TestParseEnvelope 验证 envelope 解析（取代旧版 isResizeControl 前缀匹配）。
 func TestParseEnvelope(t *testing.T) {
 	// 合法 envelope

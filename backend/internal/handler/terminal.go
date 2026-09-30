@@ -34,6 +34,11 @@ var terminalUpgrader = websocket.Upgrader{
 
 var errLoginFrameExpected = errors.New(`expected login frame: {type:"login",data:{node,session_id}}`)
 
+// terminalReadLimit 终端 WS 单帧上限。
+// 必须容得下一次大段粘贴：xterm 对整段粘贴只回调一次 onData，前端按 8K 字符分帧，
+// 但一帧仍可能达数十 KB；上限过小会让 gorilla 以 1009 直接掐断整条会话。
+const terminalReadLimit = 1 << 20 // 1MB
+
 // terminalWSHandler WS /ws/ssh
 // 通过 sessionManager 复用终端会话：前端 60s 内重连可恢复同一 shell。
 func terminalWSHandler(mgr *sessionManager, cfg *config.Config) http.HandlerFunc {
@@ -44,10 +49,12 @@ func terminalWSHandler(mgr *sessionManager, cfg *config.Config) http.HandlerFunc
 		}
 		defer func() { _ = conn.Close() }()
 		// 限制 WS 消息大小，防止恶意客户端发送超大消息导致 OOM
-		conn.SetReadLimit(64 * 1024) // 64KB，终端消息足够
+		conn.SetReadLimit(terminalReadLimit)
 		wc := newWSConn(conn)
 
 		deadline := wsReadDeadline(cfg)
+		// Pong 回调须在任何一次 ReadMessage 之前装好（见 installPongHandler）
+		installPongHandler(wc, deadline)
 
 		lf, err := readLoginFrame(wc, deadline)
 		if err != nil {
@@ -70,7 +77,7 @@ func terminalWSHandler(mgr *sessionManager, cfg *config.Config) http.HandlerFunc
 		defer cancel()
 
 		// 服务端 WS 心跳：控制帧 Ping，避免浏览器后台定时器节流导致断连
-		go startPingLoop(ctx, wc, deadline, cfg.WSPingInterval)
+		go startPingLoop(ctx, wc, cfg.WSPingInterval)
 
 		// 主循环: ws → stdin（识别 msg/resize/ping）
 		forwardInput(wc, ls.Session(), cancel, deadline)
@@ -123,6 +130,11 @@ func readLoginFrame(wc *wsConn, deadline time.Duration) (loginFrame, error) {
 func forwardInput(wc *wsConn, sess *terminal.Session, cancel context.CancelFunc, deadline time.Duration) {
 	defer cancel()
 	stdin := sess.Stdin()
+	if stdin == nil {
+		// 会话已关闭：继续读只会让前端以为还连着，直接报错退出
+		_ = wc.writeError("终端会话已关闭")
+		return
+	}
 	for {
 		msgType, data, err := wc.readMessage()
 		if err != nil {

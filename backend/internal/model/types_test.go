@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestNode_ConnectionKey 验证连接键格式 host:port:username。
+// TestNode_ConnectionKey 验证连接键格式 [host]:port:username:凭据指纹。
 func TestNode_ConnectionKey(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -16,22 +16,22 @@ func TestNode_ConnectionKey(t *testing.T) {
 		{
 			name:     "standard",
 			node:     Node{Host: "10.0.0.1", Port: 22, Username: "root"},
-			expected: "10.0.0.1:22:root",
+			expected: "10.0.0.1:22:root:6e340b9c",
 		},
 		{
 			name:     "custom_port",
 			node:     Node{Host: "192.168.1.100", Port: 22022, Username: "admin"},
-			expected: "192.168.1.100:22022:admin",
+			expected: "192.168.1.100:22022:admin:6e340b9c",
 		},
 		{
 			name:     "ipv6_like",
 			node:     Node{Host: "fe80::1", Port: 22, Username: "ubuntu"},
-			expected: "[fe80::1]:22:ubuntu",
+			expected: "[fe80::1]:22:ubuntu:6e340b9c",
 		},
 		{
 			name:     "empty_username",
 			node:     Node{Host: "host", Port: 22, Username: ""},
-			expected: "host:22:",
+			expected: "host:22::6e340b9c",
 		},
 	}
 	for _, c := range cases {
@@ -39,6 +39,22 @@ func TestNode_ConnectionKey(t *testing.T) {
 			assert.Equal(t, c.expected, c.node.ConnectionKey())
 		})
 	}
+}
+
+// TestNode_ConnectionKey_DistinguishesCredentials 验证同 host:port:username
+// 但凭据不同（改过密码的条目 vs 旧条目）不会落到同一个池键上。
+func TestNode_ConnectionKey_DistinguishesCredentials(t *testing.T) {
+	base := Node{Host: "10.0.0.1", Port: 22, Username: "root"}
+	oldPass := base
+	oldPass.AuthType, oldPass.AuthValue = AuthPassword, "old-pass"
+	newPass := base
+	newPass.AuthType, newPass.AuthValue = AuthPassword, "new-pass"
+	keyed := base
+	keyed.AuthType, keyed.AuthValue = AuthKey, "old-pass" // 与 oldPass 字面值相同但认证方式不同
+
+	assert.NotEqual(t, oldPass.ConnectionKey(), newPass.ConnectionKey())
+	assert.NotEqual(t, oldPass.ConnectionKey(), keyed.ConnectionKey())
+	assert.Equal(t, oldPass.ConnectionKey(), oldPass.ConnectionKey()) // 稳定，可作 map 键
 }
 
 // TestNode_Masked 验证脱敏：AuthValue 置为 ***，原 Node 不变。

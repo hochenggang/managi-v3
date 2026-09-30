@@ -53,6 +53,16 @@ func New(node model.Node, sshc *ssh.Client) (*Client, error) {
 	}, nil
 }
 
+// Home 返回远端起始目录：SFTP 子系统的初始工作目录（通常为用户主目录）。
+// 硬编码 "/" 会让无根目录读权限的账号一进来就报错，主目录则一定能访问；
+// 取不到时退回 "/" 保持可用。
+func (c *Client) Home() string {
+	if wd, err := c.sc.Getwd(); err == nil && wd != "" {
+		return wd
+	}
+	return "/"
+}
+
 // List 列出目录项。
 func (c *Client) List(remotePath string) ([]model.FileItem, error) {
 	entries, err := c.sc.ReadDir(remotePath)
@@ -78,10 +88,19 @@ func (c *Client) Mkdir(remotePath string) error {
 }
 
 // Delete 删除文件或目录（递归）。
+// 先 Lstat：Stat 会跟随软链接，指向目录的链接会被当成目录，
+// 递归删除就打在链接目标上（用户以为只删了链接，实际清空了别人的目录）。
 func (c *Client) Delete(remotePath string) error {
-	info, err := c.sc.Stat(remotePath)
+	info, err := c.sc.Lstat(remotePath)
 	if err != nil {
-		return fmt.Errorf("sftp stat %s: %w", remotePath, err)
+		// 少数服务器不支持 lstat，退回 Stat（跟随链接）保证删除仍可用
+		info, err = c.sc.Stat(remotePath)
+		if err != nil {
+			return fmt.Errorf("sftp stat %s: %w", remotePath, err)
+		}
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return c.sc.Remove(remotePath)
 	}
 	if info.IsDir() {
 		return c.removeAll(remotePath)
@@ -90,6 +109,8 @@ func (c *Client) Delete(remotePath string) error {
 }
 
 // removeAll 递归删除目录（pkg/sftp 无 RemoveAll）。
+// 目录项必须用 Lstat 判定：软链接指向目录时 Stat/ReadDir 会跟随到链接目标，
+// 删除动作就打在目标上（用户以为只删了链接），目标里若还有回指链接更会无限递归。
 func (c *Client) removeAll(remotePath string) error {
 	entries, err := c.sc.ReadDir(remotePath)
 	if err != nil {
@@ -97,6 +118,12 @@ func (c *Client) removeAll(remotePath string) error {
 	}
 	for _, e := range entries {
 		full := path.Join(remotePath, e.Name())
+		if info, lErr := c.sc.Lstat(full); lErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			if err := c.sc.Remove(full); err != nil {
+				return err
+			}
+			continue
+		}
 		if e.IsDir() {
 			if err := c.removeAll(full); err != nil {
 				return err
@@ -121,7 +148,9 @@ func (c *Client) Rename(oldPath, newPath string) error {
 // UploadInit 初始化断点续传上传。
 // 返回 uploadID 与当前 offset（已有 .part 文件则续传，否则 0）。
 // 父目录不存在时自动递归创建（对应 v2 _ensure_remote_directory_exists）。
-func (c *Client) UploadInit(remotePath, filename string, totalSize int64, chunkSize int) (uploadID string, offset int64, err error) {
+// 分片大小不在这里传：客户端按 upload_init 响应里服务端下发的 chunk_size 切片，
+// 服务端只按 offset 顺序落盘，与分片边界无关。
+func (c *Client) UploadInit(remotePath, filename string, totalSize int64) (uploadID string, offset int64, err error) {
 	if err := validateFilename(filename); err != nil {
 		return "", 0, err
 	}
@@ -136,6 +165,14 @@ func (c *Client) UploadInit(remotePath, filename string, totalSize int64, chunkS
 	// 查询已有 .part 文件大小作为续传 offset
 	if info, statErr := c.sc.Stat(partPath); statErr == nil {
 		offset = info.Size()
+		// 脏 .part（上次崩溃/换文件后残留）比本次要传的完整文件还大时，
+		// 续传点永远追不上客户端的 offset，每片都会 mismatch。
+		// 此时丢弃 .part 从头传，而不是让上传卡死。
+		if totalSize > 0 && offset > totalSize {
+			if rmErr := c.sc.Remove(partPath); rmErr == nil {
+				offset = 0
+			}
+		}
 	}
 
 	// 以写模式打开 .part 文件并保持句柄，减少每分片 open/close 的往返开销
@@ -174,6 +211,15 @@ func (c *Client) UploadChunk(uploadID string, chunkIndex int, offset int64, data
 	if offset != st.offset {
 		return fmt.Errorf("chunk offset mismatch: got %d, expected %d", offset, st.offset)
 	}
+	// UploadComplete 的 rename 失败路径会保留状态但把句柄置 nil（供重试 Complete）。
+	// 此时再来分片必须报错，否则 st.file.Seek 直接 panic 打挂这条连接。
+	if st.file == nil {
+		return fmt.Errorf("upload %s already finalized: retry upload_complete or re-init", uploadID)
+	}
+	// 以客户端声明的 totalSize 为上界：否则一直发分片的客户端能把 .part 撑爆远端磁盘。
+	if st.totalSize > 0 && st.offset+int64(len(data)) > st.totalSize {
+		return fmt.Errorf("chunk exceeds file size: %d + %d > %d", st.offset, len(data), st.totalSize)
+	}
 	if _, err := st.file.Seek(st.offset, io.SeekStart); err != nil {
 		c.closeUploadLocked(uploadID)
 		return fmt.Errorf("seek: %w", err)
@@ -211,15 +257,15 @@ func (c *Client) closeUpload(uploadID string) {
 func (c *Client) UploadComplete(uploadID string) error {
 	c.mu.Lock()
 	st, ok := c.uploads[uploadID]
+	if ok && st.file != nil {
+		// 关闭必须在锁内：UploadChunk 持同一把锁写 st.file，
+		// 锁外 Close 会让「已关闭句柄的 Write」竞态出现（句柄置 nil 也需同一把锁）。
+		_ = st.file.Close()
+		st.file = nil
+	}
 	c.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("unknown upload_id: %s", uploadID)
-	}
-
-	// 关闭句柄后再重命名，避免远程文件被占用
-	if st.file != nil {
-		_ = st.file.Close()
-		st.file = nil
 	}
 
 	// 校验 .part 文件大小 == totalSize，不符则报错保留 .part 允许续传

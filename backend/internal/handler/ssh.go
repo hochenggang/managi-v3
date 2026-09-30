@@ -5,7 +5,6 @@ package handler
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
@@ -23,24 +22,15 @@ const maxRequestBodySize = 10 << 20 // 10MB
 // 请求体: {node, cmds}  响应: CmdsTestResult
 func testHandler(pool *sshpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// 仅允许 POST，其他方法返回 405
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		// 限制请求体大小
-		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		var req struct {
 			Node model.Node `json:"node"`
 			Cmds []string   `json:"cmds"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		if !decodeJSONRequest(w, r, &req) {
 			return
 		}
 		result := executeSingle(r.Context(), pool, req.Node, req.Cmds)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(result)
+		writeJSON(w, result)
 	}
 }
 
@@ -49,16 +39,8 @@ func testHandler(pool *sshpool.Pool) http.HandlerFunc {
 // v3：errgroup 并发执行，SetLimit 控制并发数。
 func batchHandler(pool *sshpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// 仅允许 POST，其他方法返回 405
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		// 限制请求体大小
-		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		var req model.BatchCmdRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		if !decodeJSONRequest(w, r, &req) {
 			return
 		}
 		results := make([]model.CmdsTestResult, len(req.Nodes))
@@ -76,8 +58,7 @@ func batchHandler(pool *sshpool.Pool) http.HandlerFunc {
 		}
 		_ = g.Wait()
 
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(results)
+		writeJSON(w, results)
 	}
 }
 

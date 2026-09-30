@@ -203,6 +203,9 @@ func (s *Server) Port() int {
 // Host 返回监听主机。
 func (s *Server) Host() string { return "127.0.0.1" }
 
+// HostKey 返回服务器主机公钥，供测试构造 known_hosts 条目。
+func (s *Server) HostKey() ssh.PublicKey { return s.hostKey.PublicKey() }
+
 // Password 返回认证密码。
 func (s *Server) Password() string { return s.password }
 
@@ -311,7 +314,10 @@ func (h *osHandler) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
 		}
 		infos := make([]os.FileInfo, 0, len(entries))
 		for _, e := range entries {
-			info, err := e.Info()
+			// 用 Stat 而非 entry.Info()（lstat 语义）：真实 sftp-server 在 readdir
+			// 中跟随软链接，目录软链接会以 IsDir()==true 出现在列表里。
+			// mock 若用 lstat，软链接相关行为（删除链接 vs 删除目标）就测不到真实语义。
+			info, err := os.Stat(filepath.Join(h.abs(r.Filepath), e.Name()))
 			if err != nil {
 				continue
 			}
@@ -326,6 +332,16 @@ func (h *osHandler) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
 		return listerAt([]os.FileInfo{info}), nil
 	}
 	return nil, fmt.Errorf("unsupported filelist method: %s", r.Method)
+}
+
+// Lstat 实现 sftp.LstatFileLister：不跟随软链接，返回链接本身。
+// 未实现该接口时 pkg/sftp 会把 Lstat 当 Stat 处理，客户端永远看不到链接位。
+func (h *osHandler) Lstat(r *sftp.Request) (sftp.ListerAt, error) {
+	info, err := os.Lstat(h.abs(r.Filepath))
+	if err != nil {
+		return nil, err
+	}
+	return listerAt([]os.FileInfo{info}), nil
 }
 
 // listerAt 实现 sftp.ListerAt。

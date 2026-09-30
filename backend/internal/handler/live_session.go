@@ -23,6 +23,34 @@ const scrollbackMax = 256 * 1024
 // scrollbackChunk 分块回放大小（修复 B13：避免单个超大 WS 帧导致前端卡顿/内存峰值）。
 const scrollbackChunk = 32 * 1024
 
+// splitScrollback 把回放快照切成不超过 chunk 字节的片段。
+// 切点若落在 UTF-8 多字节字符中间，前端按 UTF-8 解码会渲染出乱码，
+// 故向回退到字符起始字节；UTF-8 序列最长 4 字节，回退上限 3 即可，
+// 且末片直接收到尾（远端输出本就可能是任意二进制，找不到边界就原样切，
+// 保证不丢字节、每片至少 1 字节，循环必然前进）。
+func splitScrollback(data []byte, chunk int) [][]byte {
+	if chunk <= 0 {
+		return [][]byte{data}
+	}
+	var out [][]byte
+	pos := 0
+	for pos < len(data) {
+		end := pos + chunk
+		if end >= len(data) {
+			out = append(out, data[pos:])
+			break
+		}
+		// 回退找字符起始字节：最多退 3，且每片至少留 1 字节
+		limit := max(pos+1, end-3)
+		for end > limit && data[end]&0xC0 == 0x80 {
+			end--
+		}
+		out = append(out, data[pos:end])
+		pos = end
+	}
+	return out
+}
+
 // sessionManager 维护按 sessionID 索引的活跃终端会话。
 type sessionManager struct {
 	mu       sync.Mutex
@@ -51,14 +79,18 @@ func newSessionManager(pool *sshpool.Pool, cfg *config.Config) *sessionManager {
 }
 
 // liveSession 一个后端维护的终端会话：SSH shell + scrollback + 当前挂载的 WS 客户端。
+// 锁顺序：ioMu → mu（ls.mu 内不做网络 I/O）。
 type liveSession struct {
-	id         string
-	node       model.Node
-	sess       *terminal.Session
-	sshConn    *sshpool.Connection
-	buf        []byte  // scrollback，超 scrollbackMax 截断头部
-	cur        *wsConn // 当前挂载的 WS 客户端（nil 表示空挂）
-	mu         sync.Mutex
+	id      string
+	sess    *terminal.Session
+	sshConn *sshpool.Connection
+	buf     []byte  // scrollback，超 scrollbackMax 截断头部
+	cur     *wsConn // 当前挂载的 WS 客户端（nil 表示空挂）
+	mu      sync.Mutex
+	// ioMu 串行化「回放 → 实时输出」的 WS 写入：重连回放期间不允许实时输出插队，
+	// 否则用户会先看到最新一行、再看到历史 scrollback，顺序错乱。
+	// 只在写 WS 时持有，不在其上做 Read。
+	ioMu       sync.Mutex
 	closeTimer *time.Timer // 最后一个客户端断开后启动，到期关闭会话
 	mgr        *sessionManager
 	cancel     context.CancelFunc
@@ -79,30 +111,31 @@ func (m *sessionManager) AttachOrCreate(id string, node model.Node, wc *wsConn, 
 	// 1. 尝试复用已有会话
 	m.mu.Lock()
 	if ls, ok := m.sessions[id]; ok && !ls.isClosed() {
-		// 复用：停止空闲计时器，回放 scrollback，挂载新客户端
+		m.mu.Unlock()
+		// 回放整段 scrollback 期间持 ioMu：实时输出必须排在回放之后，
+		// 且 ls.mu 只在锁内取快照，网络写入全部在 ls.mu 之外（避免卡住 Detach/close）。
+		ls.ioMu.Lock()
+		defer ls.ioMu.Unlock()
+
 		ls.mu.Lock()
 		if ls.closeTimer != nil {
 			ls.closeTimer.Stop()
 			ls.closeTimer = nil
 		}
-		// 回放 scrollback（持锁保证回放先于后续实时输出）
-		// 分块发送，避免单个超大 WS 帧导致前端卡顿/内存峰值
-		for pos := 0; pos < len(ls.buf); pos += scrollbackChunk {
-			end := pos + scrollbackChunk
-			if end > len(ls.buf) {
-				end = len(ls.buf)
-			}
-			if err := wc.writeMsg(string(ls.buf[pos:end])); err != nil {
+		// 先挂载再取快照：挂载之后到达的输出会阻塞在 ioMu 上，回放完成后按序写出
+		ls.cur = wc
+		snapshot := make([]byte, len(ls.buf))
+		copy(snapshot, ls.buf)
+		ls.mu.Unlock()
+
+		// 分块回放，避免单个超大 WS 帧导致前端卡顿/内存峰值
+		for _, part := range splitScrollback(snapshot, scrollbackChunk) {
+			if err := wc.writeMsg(string(part)); err != nil {
 				break
 			}
 		}
-		ls.cur = wc
-		ls.mu.Unlock()
-		m.mu.Unlock()
-		// 同步 PTY 尺寸到新客户端
-		if cols > 0 && rows > 0 {
-			_ = ls.sess.Resize(cols, rows)
-		}
+		// 同步 PTY 尺寸到新客户端（非正尺寸由 Resize 拒绝）
+		_ = ls.sess.Resize(cols, rows)
 		slog.Debug("terminal session reused", "id", id)
 		return ls, true, nil
 	}
@@ -121,14 +154,13 @@ func (m *sessionManager) AttachOrCreate(id string, node model.Node, wc *wsConn, 
 		rows = 24
 	}
 	if err := sess.Open(cols, rows); err != nil {
-		m.pool.Release(node)
+		m.pool.Release(sshConn)
 		return nil, false, err
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ls := &liveSession{
 		id:      id,
-		node:    node,
 		sess:    sess,
 		sshConn: sshConn,
 		cur:     wc,
@@ -194,7 +226,7 @@ func (m *sessionManager) close(id string) {
 	if err := ls.sess.Close(); err != nil {
 		slog.Debug("terminal session close error", "id", id, "err", err)
 	}
-	ls.mgr.pool.Release(ls.node)
+	ls.mgr.pool.Release(ls.sshConn)
 	if cur != nil {
 		_ = cur.conn.Close()
 	}
@@ -205,6 +237,13 @@ func (m *sessionManager) close(id string) {
 // select 仅在 Read 阻塞前检查退出信号；Read 阻塞期间由 close() 调用
 // sess.Close() 解除阻塞（PTY 关闭后 Read 返回 EOF/error），随后 err 分支触发 close。
 func (ls *liveSession) outputLoop(ctx context.Context) {
+	reader := ls.sess.Stdout()
+	if reader == nil {
+		// Open 未成功（理论上不会走到这里）：无 stdout 可读，直接退出避免空指针
+		slog.Error("terminal session has no stdout reader", "id", ls.id)
+		ls.mgr.close(ls.id)
+		return
+	}
 	buf := make([]byte, 4096)
 	for {
 		select {
@@ -214,13 +253,17 @@ func (ls *liveSession) outputLoop(ctx context.Context) {
 			return
 		default:
 		}
-		n, err := ls.sess.Stdout().Read(buf)
+		n, err := reader.Read(buf)
 		if n > 0 {
 			data := make([]byte, n)
 			copy(data, buf[:n])
+			// ioMu 先于 ls.mu：与重连回放共用同一条写入序列，
+			// 保证「回放历史 → 实时输出」的先后顺序不被插队。
+			ls.ioMu.Lock()
 			ls.mu.Lock()
 			if ls.isClosedLocked() {
 				ls.mu.Unlock()
+				ls.ioMu.Unlock()
 				return
 			}
 			ls.appendScrollbackLocked(data)
@@ -230,6 +273,7 @@ func (ls *liveSession) outputLoop(ctx context.Context) {
 			if cur != nil {
 				_ = cur.writeMsg(string(data))
 			}
+			ls.ioMu.Unlock()
 		}
 		if err != nil {
 			ls.mgr.close(ls.id)
@@ -242,8 +286,12 @@ func (ls *liveSession) outputLoop(ctx context.Context) {
 func (ls *liveSession) appendScrollbackLocked(data []byte) {
 	ls.buf = append(ls.buf, data...)
 	if len(ls.buf) > scrollbackMax {
-		// 截断头部保留尾部
+		// 截断头部保留尾部；起点推进到下一个字符起始字节（最多 3 字节），
+		// 否则回放的第一帧以半个字符开头，前端渲染成乱码。
 		cut := len(ls.buf) - scrollbackMax
+		for i := 0; i < 3 && cut < len(ls.buf) && ls.buf[cut]&0xC0 == 0x80; i++ {
+			cut++
+		}
 		ls.buf = append([]byte(nil), ls.buf[cut:]...)
 	}
 }

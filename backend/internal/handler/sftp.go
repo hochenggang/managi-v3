@@ -57,7 +57,9 @@ type sftpRequestData struct {
 	UploadID  string `json:"upload_id,omitempty"`
 	Filename  string `json:"filename,omitempty"`
 	TotalSize int64  `json:"total_size,omitempty"`
-	ChunkSize int    `json:"chunk_size,omitempty"`
+	// ChunkSize 是历史客户端上报的分片大小，仅作观测；服务端不采用它，
+	// 切片大小以 upload_init 响应下发的 chunk_size 为准。
+	ChunkSize int `json:"chunk_size,omitempty"`
 	// 兼容字段：upload_init 使用 remote_path 表示目标目录
 	RemotePath string `json:"remote_path,omitempty"`
 }
@@ -70,11 +72,15 @@ func sftpWSHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 			return
 		}
 		defer func() { _ = conn.Close() }()
-		// 限制 WS 消息大小，防止恶意客户端发送超大消息导致 OOM
-		conn.SetReadLimit(2 * 1024 * 1024) // 2MB，覆盖 1MB chunk + 帧头
+		// 限制 WS 消息大小，防止恶意客户端发送超大消息导致 OOM。
+		// 取 2×分片上限：前端按 upload_init 下发的 chunk_size 切片，
+		// 帧 = 分片 + 帧头，翻倍留足余量，也保证改配置后上限跟着变。
+		conn.SetReadLimit(int64(cfg.ChunkSize) * 2)
 		wc := newWSConn(conn)
 
 		deadline := wsReadDeadline(cfg)
+		// Pong 回调须在任何一次 ReadMessage 之前装好（见 installPongHandler）
+		installPongHandler(wc, deadline)
 		_ = wc.setReadDeadline(time.Now().Add(deadline))
 
 		lf, err := readLoginFrame(wc, deadline)
@@ -89,7 +95,7 @@ func sftpWSHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 			_ = wc.writeLoginResult(false, err.Error(), false)
 			return
 		}
-		defer pool.Release(node)
+		defer pool.Release(sshConn)
 
 		sc, err := sftp.New(node, sshConn.Client())
 		if err != nil {
@@ -105,14 +111,15 @@ func sftpWSHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 		defer cancel()
 
 		// 服务端 WS 心跳：控制帧 Ping
-		go startPingLoop(ctx, wc, deadline, cfg.WSPingInterval)
+		go startPingLoop(ctx, wc, cfg.WSPingInterval)
 
 		// 下载串行化锁，确保同一 WS 连接同一时刻只有一个下载 goroutine，
 		// 避免多个并发下载的二进制帧交错导致文件内容损坏。
 		var downloadMu sync.Mutex
 
-		// 主动列根目录（修复：原 connected 后前端空白需手动刷新）
-		listRoot(wc, sc, "/")
+		// 主动列出起始目录（修复：原 connected 后前端空白需手动刷新）。
+		// 用远端主目录而非 "/"：许多服务器不让 sftp 用户读根目录，一进来就报错。
+		listRoot(wc, sc, sc.Home())
 
 		for {
 			msgType, data, err := wc.readMessage()
@@ -135,7 +142,7 @@ func sftpWSHandler(pool *sshpool.Pool, cfg *config.Config) http.HandlerFunc {
 				_ = wc.writePong()
 				continue
 			}
-			handleSftpOp(ctx, wc, sc, env, &downloadMu)
+			handleSftpOp(ctx, wc, sc, env, &downloadMu, cfg)
 		}
 	}
 }
@@ -152,7 +159,8 @@ func listRoot(wc *wsConn, sc *sftp.Client, p string) {
 
 // handleSftpOp 分发单个 SFTP 操作。
 // 所有响应（含错误）回填请求的 seq，前端据此丢弃迟到的旧响应。
-func handleSftpOp(ctx context.Context, wc *wsConn, sc *sftp.Client, env wsEnvelope, downloadMu *sync.Mutex) {
+// cfg 提供分片大小：upload_init 下发给前端的切片大小由服务端定，客户端不自行决定。
+func handleSftpOp(ctx context.Context, wc *wsConn, sc *sftp.Client, env wsEnvelope, downloadMu *sync.Mutex, cfg *config.Config) {
 	// 局部辅助：响应统一回填请求的 seq，避免每处重复传 env.Seq
 	writeResp := func(msgType string, data any) error {
 		return wc.writeEnvelopeSeq(msgType, data, env.Seq)
@@ -204,12 +212,13 @@ func handleSftpOp(ctx context.Context, wc *wsConn, sc *sftp.Client, env wsEnvelo
 		if targetDir == "" {
 			targetDir = req.Path
 		}
-		uploadID, offset, err := sc.UploadInit(targetDir, req.Filename, req.TotalSize, req.ChunkSize)
+		uploadID, offset, err := sc.UploadInit(targetDir, req.Filename, req.TotalSize)
 		if err != nil {
 			_ = writeErr(err.Error())
 			return
 		}
-		_ = writeResp(msgTypeUploadInit, map[string]any{"upload_id": uploadID, "offset": offset})
+		// chunk_size 由服务端下发：前端据此切片，MANAGI_SFTP_CHUNK_SIZE 因此真正生效
+		_ = writeResp(msgTypeUploadInit, map[string]any{"upload_id": uploadID, "offset": offset, "chunk_size": cfg.ChunkSize})
 
 	case msgTypeUploadDone:
 		if err := sc.UploadComplete(req.UploadID); err != nil {
@@ -221,7 +230,7 @@ func handleSftpOp(ctx context.Context, wc *wsConn, sc *sftp.Client, env wsEnvelo
 	case msgTypeDownload:
 		// 异步下载，避免大文件阻塞 WS 读循环（心跳/其他操作）
 		// 传 ctx 与 downloadMu，串行化下载并在 WS 断开时取消
-		go handleDownload(ctx, wc, sc, req, downloadMu, env.Seq)
+		go handleDownload(ctx, wc, sc, req, downloadMu, env.Seq, cfg.DownloadChunkSize)
 
 	default:
 		_ = writeErr("unknown operation: " + env.Type)
@@ -233,7 +242,8 @@ func handleSftpOp(ctx context.Context, wc *wsConn, sc *sftp.Client, env wsEnvelo
 // downloadMu 串行化同一 WS 连接的并发下载，避免二进制帧交错损坏文件。
 // ctx 控制下载生命周期，WS 断开时取消 reader 解除 Read 阻塞。
 // seq 回填到 download_start/complete/错误响应，前端据此匹配。
-func handleDownload(ctx context.Context, wc *wsConn, sc *sftp.Client, req sftpRequestData, downloadMu *sync.Mutex, seq int64) {
+// chunkSize 是每个二进制帧（即每次读出写出）的字节数，来自 MANAGI_SFTP_DOWNLOAD_CHUNK。
+func handleDownload(ctx context.Context, wc *wsConn, sc *sftp.Client, req sftpRequestData, downloadMu *sync.Mutex, seq int64, chunkSize int) {
 	downloadMu.Lock()
 	defer downloadMu.Unlock()
 
@@ -256,7 +266,8 @@ func handleDownload(ctx context.Context, wc *wsConn, sc *sftp.Client, req sftpRe
 	}()
 
 	_ = wc.writeEnvelopeSeq(msgTypeDownloadStart, map[string]any{"total": total}, seq)
-	buf := make([]byte, 32*1024)
+	// 逐帧缓冲大小 = MANAGI_SFTP_DOWNLOAD_CHUNK：帧越大往返越少、内存占用越高
+	buf := make([]byte, chunkSize)
 	for {
 		n, rerr := reader.Read(buf)
 		if n > 0 {
@@ -304,6 +315,12 @@ func parseChunkFrame(data []byte) (seq int64, uploadID string, chunkIndex int, o
 		return 0, "", 0, 0, nil, fmt.Errorf("frame too short: need id length")
 	}
 	idLen := binary.BigEndian.Uint32(data[pos:])
+	// 上限必须有：32 位构建里 int(idLen) 可溢出成负数，下面的 headerLen 校验被绕过，
+	// 再往后的切片就是 out-of-range panic（一条二进制帧即可打挂整个进程）。
+	const maxUploadIDLen = 4096
+	if idLen > maxUploadIDLen {
+		return 0, "", 0, 0, nil, fmt.Errorf("upload id too long: %d (max %d)", idLen, maxUploadIDLen)
+	}
 	headerLen := pos + 4 + int(idLen) + 4 + 8 + 8
 	if len(data) < headerLen {
 		return 0, "", 0, 0, nil, fmt.Errorf("frame header incomplete: need %d, got %d", headerLen, len(data))
@@ -336,34 +353,26 @@ type sftpDownloadRequest struct {
 // v3 新增：HTTP Range 下载，支持断点续传。设计见 design-v3.md §6.5。
 func sftpDownloadHandler(pool *sshpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// 仅允许 POST，其他方法返回 405
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		// 限制请求体大小，防止超大 body 导致 OOM
-		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		var req sftpDownloadRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		if !decodeJSONRequest(w, r, &req) {
 			return
 		}
 		if req.Node.Host == "" || req.Path == "" {
-			http.Error(w, "missing node or path", http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, "missing node or path")
 			return
 		}
 		node, remotePath := req.Node, req.Path
 
 		sshConn, err := pool.Get(node)
 		if err != nil {
-			http.Error(w, "ssh connect: "+err.Error(), http.StatusBadGateway)
+			writeJSONError(w, http.StatusBadGateway, "ssh connect: "+err.Error())
 			return
 		}
-		defer pool.Release(node)
+		defer pool.Release(sshConn)
 
 		sc, err := sftp.New(node, sshConn.Client())
 		if err != nil {
-			http.Error(w, "sftp init: "+err.Error(), http.StatusBadGateway)
+			writeJSONError(w, http.StatusBadGateway, "sftp init: "+err.Error())
 			return
 		}
 		defer func() { _ = sc.Close() }()
@@ -371,19 +380,25 @@ func sftpDownloadHandler(pool *sshpool.Pool) http.HandlerFunc {
 		offset := parseRangeOffset(r.Header.Get("Range"))
 		reader, total, err := sc.DownloadStream(remotePath, offset)
 		if err != nil {
-			http.Error(w, "sftp open: "+err.Error(), http.StatusBadGateway)
+			writeJSONError(w, http.StatusBadGateway, "sftp open: "+err.Error())
 			return
 		}
 		defer func() { _ = reader.Close() }()
 
 		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Accept-Ranges", "bytes")
+		// 起点越过文件末尾是「不可满足的 Range」，必须回 416：
+		// 发 200/206 空体会让续传客户端以为尾部已取完，停在错误偏移再也不敢传。
+		if offset > 0 && offset >= total {
+			w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(total, 10))
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
 		// 仅当 offset 有效且 total 大于 offset 时才发 206，避免空文件生成非法 Content-Range
-		if offset > 0 && total > offset {
+		if offset > 0 {
 			w.Header().Set("Content-Range", "bytes "+strconv.FormatInt(offset, 10)+"-"+strconv.FormatInt(total-1, 10)+"/"+strconv.FormatInt(total, 10))
-			w.Header().Set("Accept-Ranges", "bytes")
 			w.WriteHeader(http.StatusPartialContent)
 		} else {
-			w.Header().Set("Accept-Ranges", "bytes")
 			w.WriteHeader(http.StatusOK)
 		}
 		_, _ = io.Copy(w, reader)
@@ -391,6 +406,7 @@ func sftpDownloadHandler(pool *sshpool.Pool) http.HandlerFunc {
 }
 
 // parseRangeOffset 解析 "bytes=offset-" 格式的 Range 头，返回 offset。
+// 无法识别的写法（含结束位、后缀区间、非数字）一律返回 0，即忽略 Range 传整文件。
 func parseRangeOffset(rangeHeader string) int64 {
 	if rangeHeader == "" {
 		return 0
@@ -400,7 +416,14 @@ func parseRangeOffset(rangeHeader string) int64 {
 		return 0
 	}
 	rangeSpec := strings.SplitN(parts[1], "-", 2)
-	if len(rangeSpec) == 0 {
+	// 必须写成「起始-」两段（SplitN 至少返回 1 段，"bytes=10" 这类缺横线的视为无效）
+	if len(rangeSpec) != 2 {
+		return 0
+	}
+	// 只支持开区间 "bytes=起始-"（断点续传只需要它）。带结束位的区间按起始位
+	// 解析会一直发到文件末尾，Content-Range 与客户端要求不符；按 RFC 7233
+	// 「忽略不理解的 Range」退回 0，上层据此发 200 整文件。
+	if len(rangeSpec) == 2 && strings.TrimSpace(rangeSpec[1]) != "" {
 		return 0
 	}
 	offset, err := strconv.ParseInt(strings.TrimSpace(rangeSpec[0]), 10, 64)

@@ -90,16 +90,30 @@ func (w *wsConn) setReadDeadline(t time.Time) error {
 	return w.conn.SetReadDeadline(t)
 }
 
-func (w *wsConn) writeJSON(v any) error {
+// wsWriteDeadline 单次写超时。客户端页面冻结 / 网络半断时，WriteMessage 会一直阻塞在
+// 内核发送缓冲区上；没有写超时，回放与输出协程会永久挂住并拖住整条会话。
+const wsWriteDeadline = 30 * time.Second
+
+// writeLocked 在所有写操作持 mu 的前提下统一加写超时。
+// 写失败即关闭连接：gorilla 语义下写失败/超时后连接不可再用（半截帧已发出），
+// 留着只会让对端一直等待，关掉才能让读侧及时退出并触发会话清理。
+func (w *wsConn) writeLocked(fn func() error) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.conn.WriteJSON(v)
+	_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
+	if err := fn(); err != nil {
+		_ = w.conn.Close()
+		return err
+	}
+	return nil
 }
 
-func (w *wsConn) writeRaw(msgType int, data []byte) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.conn.WriteMessage(msgType, data)
+func (w *wsConn) writeJSON(v any) error {
+	return w.writeLocked(func() error { return w.conn.WriteJSON(v) })
+}
+
+func (w *wsConn) writeRaw(messageType int, data []byte) error {
+	return w.writeLocked(func() error { return w.conn.WriteMessage(messageType, data) })
 }
 
 // writeEnvelope 写入 {type, data} 消息。data 为 nil 时不带 data 字段。
@@ -135,7 +149,7 @@ func (w *wsConn) writeMsg(data string) error {
 }
 
 func (w *wsConn) writePong() error {
-	return w.writeRaw(websocket.TextMessage, []byte(`{"type":"pong"}`))
+	return w.writeEnvelope(msgTypePong, nil)
 }
 
 func (w *wsConn) writePing() error {
@@ -146,19 +160,22 @@ func (w *wsConn) writePing() error {
 	return w.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(10*time.Second))
 }
 
-func (w *wsConn) setPongHandler(h func(string) error) {
-	w.conn.SetPongHandler(h)
+// installPongHandler 安装「收到 Pong 即续期读超时」的回调。
+// 必须在启动心跳协程之前、由读侧调用：gorilla 把 handler 存为连接上的普通字段，
+// 与 ReadMessage 并发赋值属数据竞争。
+func installPongHandler(wc *wsConn, deadline time.Duration) {
+	wc.conn.SetPongHandler(func(string) error {
+		return wc.setReadDeadline(time.Now().Add(deadline))
+	})
 }
 
-// startPingLoop 启动服务端 WS Ping 循环：定期发送控制帧 Ping，并在收到 Pong 时重置读超时。
-func startPingLoop(ctx context.Context, wc *wsConn, deadline time.Duration, intervalSec int) {
+// startPingLoop 启动服务端 WS Ping 循环：定期发送控制帧 Ping。
+// Pong 回调由 installPongHandler 提前装好，此处只负责发包。
+func startPingLoop(ctx context.Context, wc *wsConn, intervalSec int) {
 	if intervalSec <= 0 {
 		intervalSec = 30
 	}
 	interval := time.Duration(intervalSec) * time.Second
-	wc.setPongHandler(func(string) error {
-		return wc.setReadDeadline(time.Now().Add(deadline))
-	})
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
