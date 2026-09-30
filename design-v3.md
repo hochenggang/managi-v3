@@ -330,26 +330,29 @@ protocol/
 
 **修复方案**：
 
-**协议扩展**（`/ws/sftp` 新增指令）：
+**协议扩展**（`/ws/sftp` 新增指令，统一 envelope `{type,data,seq}`）：
 ```
-上传初始化:  {operation:"upload_init", remote_path, filename, total_size, chunk_size}
-             ← {upload_id, uploaded_offset}  // 续传时返回已传偏移
-分片上传:    二进制帧(带 header: upload_id + chunk_index + offset)
-             ← {type:"chunk_ack", chunk_index, received_offset}
-上传完成:    {operation:"upload_complete", upload_id}
-             ← {success, path, size}
+上传初始化:  {type:"upload_init", data:{remote_path, filename, total_size, chunk_size}, seq}
+             ← {type:"upload_init", data:{upload_id, offset, chunk_size}, seq}
+                 // offset = 已有 .part 大小（续传起点）
+                 // chunk_size 由服务端下发（MANAGI_SFTP_CHUNK_SIZE），前端按它切片；
+                 // 请求里带的 chunk_size 仅作观测，服务端不采用。
+分片上传:    二进制帧 [8B seq][4B upload_id_len][upload_id][4B chunk_index][8B offset][8B data_len][data]
+             ← {type:"chunk_ack", data:{chunk_index}, seq}
+上传完成:    {type:"upload_complete", data:{upload_id}, seq}
+             ← {type:"ok", seq}
 ```
 
 **服务端**：
 - `upload_init` 生成 `upload_id`，在远端创建 `.part` 临时文件。
-- 查询已有 `.part` 文件大小返回 `uploaded_offset`（断点续传依据）。
-- 分片按 offset 写入 `.part`，完成后 rename 为目标文件。
-- `upload_id` 与进度持久化到内存 map（会话级），可选落盘防重启丢失。
+- 查询已有 `.part` 文件大小返回 `offset`（断点续传依据）；比本次 total_size 还大的脏 `.part` 直接丢弃重传。
+- 分片按 offset 顺序写入 `.part`（offset 与服务端记录不一致即拒绝，超过 total_size 也拒绝），完成后 rename 为目标文件。
+- `upload_id` 与进度保存在内存 map（会话级），可选落盘防重启丢失。
 
 **前端**：
-- 文件分片（chunk_size=1MB），`File.slice(offset, offset+chunk_size)`。
+- 分片大小取 `upload_init` 响应的 `chunk_size`（旧后端不带该字段时回退本地 1MB），`File.slice(pos, pos+chunk)`。
 - 上传前先 `upload_init` 查询 offset，从 offset 开始上传。
-- 进度持久化到 `localStorage`（key: `upload-{upload_id}`），含 offset 与 chunk_index。
+- 进度：`min(pos + 已写字节, file.size) / file.size`，封顶 100%。
 
 **验收**：上传中断网络，恢复后从中断点继续；刷新页面后可恢复（依赖 localStorage + 服务端 .part）。
 
@@ -363,16 +366,21 @@ protocol/
 
 **改为 HTTP Range 下载**（SFTP 下载经后端中转）：
 ```
-GET /api/sftp/download?node=...&path=...
-Header: Range: bytes=<offset>-           // 续传偏移
+POST /api/sftp/download          body: {node, path}   // 凭据走 body，不落 URL/访问日志
+Header: Range: bytes=<offset>-   // 续传偏移，只支持开区间
 ← 206 Partial Content
    Content-Range: bytes <offset>-<total-1>/<total>
    Body: 流式分块
+← 416 Requested Range Not Satisfiable   // offset ≥ total，Content-Range: bytes */<total>
+← 200 OK（整文件）                       // 无 Range，或写法不支持：带结束位、后缀区间、非数字
 ```
 
 **服务端**：
 - 后端打开 SFTP 文件，`Seek(offset)` 后流式 copy 到 HTTP ResponseWriter。
 - 支持 `Range` 请求头，返回 206 + `Content-Range`。
+- 起点越过文件末尾必须回 416：发 200/206 空体会让续传客户端以为尾部已取完，停在错误偏移再也不敢传。
+- 只认 `bytes=<起始>-`；其余写法按 RFC 7233「忽略不理解的 Range」退回 200 整文件，
+  而不是半支持（按起始位截断会多发数据，Content-Range 与请求不符）。
 - 流式写出，不载入内存。
 
 **前端**：
@@ -500,6 +508,13 @@ ENTRYPOINT ["/app/managi"]
 |------|------|
 | `managi` | 镜像 managi:v3、`network_mode: host` 或端口映射、环境变量(BasicAuth/端口)、`restart: unless-stopped`、healthcheck、volume 挂载（可选配置） |
 
+**凭据与端口约定**：
+- `MANAGI_BASICAUTH_PASSWORD` 由宿主环境或同目录 `.env` 注入（样板见 `deploy/.env.example`），
+  compose 用 `${VAR:?}` 强校验：留空不是「无密码」，而是每次启动换随机口令并打印进日志，
+  配合 `restart: unless-stopped` 等于口令天天变、历史明文留在 `docker logs`。
+- 端口只由 `MANAGI_PORT` 决定。镜像的 `CMD` 不写 `-port`：命令行 flag 优先级高于环境变量，
+  写死会让用户改的 `MANAGI_PORT` 静默失效。需要追加参数时用 compose 的 `command:` 覆盖。
+
 ### 8.3 install.sh（三系跳板机部署）
 
 **目标 OS**：Alpine、Debian、Ubuntu。
@@ -541,6 +556,7 @@ ENTRYPOINT ["/app/managi"]
 | `build-go` | push/PR | `CGO_ENABLED=0 GOOS=linux go build ./cmd/managi` 并检查产物体积 |
 | `build-frontend` | push/PR | `npm ci`、`npm run type-check`、`npm run test`、`npm run build`、校验 dist/index.html 生成 |
 | `build-windows-app` | push(main) | 构建前端 → 拷贝 dist 与图标 → rsrc 生成资源 → `go build` windows-app.exe |
+| `deploy-scripts` | push/PR | `sh -n` 语法检查 + 运行 `deploy/install_test.sh`（verify_checksum 的 sidecar/环境变量两条路径） |
 | `security-scan` | push/PR | Trivy 文件系统扫描（CRITICAL/HIGH，`exit-code: 1`，忽略上游无补丁项） |
 
 注：Go/Node 版本以 `backend/go.mod` 与 workflow 内 `node-version` 为准；CI 无独立 docker/tauri job，

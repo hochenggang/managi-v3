@@ -51,7 +51,7 @@ MANAGI_SHA256=<二进制文件的 sha256> sudo -E ./install.sh
 | `MANAGI_INDEX_HTML` | `index.html` | 前端单页文件路径 |
 | `MANAGI_BASICAUTH_ENABLED` | `false` | 是否启用 Basic Auth |
 | `MANAGI_BASICAUTH_USERNAME` | `admin` | Basic Auth 用户名 |
-| `MANAGI_BASICAUTH_PASSWORD` | 随机 | Basic Auth 密码（启用但未配置时自动生成） |
+| `MANAGI_BASICAUTH_PASSWORD` | 空 | Basic Auth 密码。启用而未配置时服务端生成随机口令并打印到启动日志（每次重启都变），故 docker 部署改为强制从 `.env` 注入（见 `deploy/.env.example`） |
 | `MANAGI_TRUST_PROXY` | `false` | 置于反向代理之后时设为 `true`，才按 `X-Forwarded-For` 识别客户端 IP（用于登录失败限流与访问日志）。直连部署保持关闭：任何人伪造该头即可绕开限流 |
 | `MANAGI_SSH_TIMEOUT` | `15` | SSH 连接超时（秒） |
 | `MANAGI_KEEPALIVE` | `30` | SSH 保活间隔（秒） |
@@ -61,8 +61,8 @@ MANAGI_SHA256=<二进制文件的 sha256> sudo -E ./install.sh
 | `MANAGI_WS_READ_DEADLINE` | `90` | WebSocket 读超时（秒） |
 | `MANAGI_WS_PING_INTERVAL` | `30` | WebSocket Ping 间隔（秒） |
 | `MANAGI_SESSION_IDLE_TIMEOUT` | `60` | 终端会话空闲保留时间（秒），前端断开后保留 shell 的时长 |
-| `MANAGI_SFTP_CHUNK_SIZE` | `1048576` | SFTP 上传分片大小（字节，默认 1MB） |
-| `MANAGI_SFTP_DOWNLOAD_CHUNK` | `65536` | SFTP 下载分片大小（字节，默认 64KB） |
+| `MANAGI_SFTP_CHUNK_SIZE` | `1048576` | SFTP 上传分片大小（字节，上限 8MB）。`upload_init` 响应下发给前端，前端按它切片；WS 单帧读取上限取 2× 该值 |
+| `MANAGI_SFTP_DOWNLOAD_CHUNK` | `65536` | WS 下载每帧字节数（上限 1MB）。大文件请走 HTTP Range 流式下载，与此无关 |
 
 ## 行为说明
 
