@@ -3,7 +3,9 @@
 # 目标镜像体积 <25MB
 
 # ===== 阶段1: 前端构建 =====
-FROM node:20-alpine AS frontend
+# Node 22 与 CI（.github/workflows/*.yml 的 node-version: '22'）对齐：
+# Node 20 已于 2026-04 EOL，两边版本不一致时「CI 过了镜像构建挂了」很难联想。
+FROM node:22-alpine AS frontend
 WORKDIR /fe
 COPY frontend/package*.json ./
 RUN npm ci
