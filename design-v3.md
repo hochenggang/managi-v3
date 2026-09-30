@@ -182,21 +182,26 @@ managi-v3/
 **v3 修正**：
 
 ```
-连接池(key = host:port:username)
-├── get(key)
+连接池(key = host:port:username:凭据指纹)
+├── Get(node)
+│   ├── 先校验 node 字段(host/port/username/认证材料齐全)，再取键
 │   ├── 存在且 transport 活跃 → 复用,引用计数+1
 │   └── 不存在/失效 → 新建,入池,引用计数=1
-├── release(key)
-│   ├── 引用计数-1
+├── Release(conn)
+│   ├── 按连接对象身份归还(避免死连接的迟到 Release 误减新连接的引用计数)
 │   └── 引用计数=0 → 不立即关闭,标记空闲时间戳
 └── 后台 cleaner(定时)
-    ├── 清理空闲超时(>5min)的连接
-    └── 池满时淘汰最旧空闲连接
+    ├── 清理空闲超时(默认 120s,`MANAGI_SSH_IDLE_TIMEOUT`)的连接
+    └── 池满(默认 20 条,`MANAGI_SSH_POOL_SIZE`)时淘汰最旧空闲连接
 ```
 
-- **命令执行也复用**：get → 执行 → release（减引用，不关闭），下次同节点命令直接复用。
-- **保活**：每 30s 发送 keepalive packet。
+- **键含凭据指纹**：同一 `host:port:username` 换口令/换认证方式后不会复用旧连接，
+  也不会把凭据本身写进键（指纹为 sha256 前 4 字节）。
+- **命令执行也复用**：Get → 执行 → Release（减引用，不关闭），下次同节点命令直接复用。
+- **保活**：每 30s 发送 keepalive packet；探测失败即从池中剔除，不滞留到 cleanIdle。
 - **并发安全**：per-key `sync.Mutex` 串行化连接创建，连接本身 goroutine 安全。
+- **主机密钥**：默认进程内 TOFU（首次记录公钥，之后不符即拒）；设 `MANAGI_KNOWN_HOSTS`
+  走 OpenSSH known_hosts 严格校验，文件无法解析时拒绝所有连接而不退回 TOFU。
 
 ### 4.3 并发模型
 
@@ -457,26 +462,32 @@ Header: Range: bytes=<offset>-           // 续传偏移
 ### 8.1 Dockerfile（多阶段）
 
 ```dockerfile
-# 阶段1: 前端构建
-FROM node:20-alpine AS frontend
+# 阶段1: 前端构建（Node 22，与 CI 的 node-version 对齐）
+FROM node:22-alpine AS frontend
 WORKDIR /fe
-COPY frontend/ .
-RUN npm ci && npm run build
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
 
-# 阶段2: 后端构建
-FROM golang:1.22-alpine AS backend
+# 阶段2: 后端构建（Go 版本与 backend/go.mod 一致）
+FROM golang:1.25-alpine AS backend
 WORKDIR /be
-COPY backend/ .
+COPY backend/go.mod backend/go.sum* ./
+RUN go mod download
+COPY backend/ ./
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /managi ./cmd/managi
 
 # 阶段3: 运行
-FROM alpine:3.19
-RUN apk add --no-cache ca-certificates tzdata
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates tzdata wget
 COPY --from=backend /managi /app/managi
 COPY --from=frontend /fe/dist/index.html /app/index.html
 WORKDIR /app
+RUN chown -R nobody:nobody /app
 EXPOSE 18001
-HEALTHCHECK --interval=30s CMD wget -qO- http://localhost:18001/health || exit 1
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
+  CMD wget -qO- http://localhost:18001/health || exit 1
 USER nobody
 ENTRYPOINT ["/app/managi"]
 ```
@@ -495,25 +506,28 @@ ENTRYPOINT ["/app/managi"]
 
 **流程**：
 ```
-1. 检测 OS → cat /etc/os-release → ID=alpine/debian/ubuntu
-2. 架构检测 → uname -m → amd64/arm64
-3. 依赖检查与安装：
-   - Alpine: apk add --no-cache ca-certificates tzdata wget
-   - Debian/Ubuntu: apt-get update && apt-get install -y ca-certificates tzdata wget
-4. 下载对应平台 Go 二进制（GitHub Release）
-5. 安装到 /usr/local/bin/managi
-6. 生成 /etc/managi/config.env（端口/BasicAuth，交互式询问）
-7. 创建非特权用户 managi
-8. 写入 systemd unit /etc/systemd/system/managi.service
-   (Alpine 用 OpenRC service)
-9. systemctl enable --now managi
-10. 健康检查 → 输出访问地址
+1. 交互菜单：安装 / 卸载 / 升级（脚本要求 TTY 与 root）
+2. 检测 OS → cat /etc/os-release → ID=alpine/debian/ubuntu（其余报错退出）
+3. 架构检测 → uname -m → amd64/arm64
+4. 依赖检查与安装（缺失才装）：
+   - Alpine: apk add --no-cache ca-certificates tzdata wget curl
+   - Debian/Ubuntu: apt-get update && apt-get install -y ca-certificates tzdata wget curl
+5. 下载对应平台 Go 二进制与前端 index.html（GitHub Release latest/download）
+   - 可选 MANAGI_SHA256 校验；Release 附带 <file>.sha256 时自动比对
+   - 落盘采用「同目录临时文件 + mv 原子 rename」，覆盖运行中的二进制不再 ETXTBSY
+6. 安装前检测已有安装/配置，询问是否沿用旧配置（沿用则读 /etc/managi/config.env）
+7. 交互式询问是否启用 BasicAuth；启用时必须给出口令，脚本不再写弱默认口令
+8. 写入 /etc/managi/config.env（chmod 600）
+9. 创建非特权服务用户 managi
+10. 写服务定义：systemd /etc/systemd/system/managi.service；Alpine /etc/init.d/managi(OpenRC)
+11. enable + restart，随后轮询 /health 探测就绪并输出访问地址
 ```
 
 **特性**：
-- 幂等：重复执行覆盖升级，保留 config.env。
-- 卸载：`install.sh uninstall` 停服 + 删二进制 + 删 unit。
-- 升级：`install.sh upgrade` 下载新版本替换二进制 + 重启。
+- 幂等：重复执行即覆盖升级；`config.env` 与用户手工改过的 service 文件不会被覆盖（升级仅在缺失时补写 unit）。
+- 原子替换：先写临时文件，下载/校验通过才 rename，失败不破坏线上文件。
+- 卸载：菜单项 2 停服 + 删 unit + 删二进制与前端，保留配置目录。
+- 升级：菜单项 3 仅替换二进制与前端 + 重启服务，不动配置。
 
 ---
 
@@ -523,20 +537,26 @@ ENTRYPOINT ["/app/managi"]
 
 | Job | 触发 | 步骤 |
 |-----|------|------|
-| `lint-test-go` | push/PR | `actions/setup-go`、`go vet`、`go test ./...`、`golangci-lint` |
-| `build-frontend` | push/PR | `actions/setup-node`、`npm ci`、`npm run build`、校验 dist/index.html 生成 |
-| `build-docker` | push/PR(main) | `docker build` 验证 Dockerfile 可构建 |
-| `build-tauri` | push/PR | matrix(windows/ubuntu/macos)、Tauri 构建（仅编译验证，不发布） |
+| `lint-test-go` | push/PR | `go vet`、`golangci-lint`(v2.6)、`go test -race ./...` |
+| `build-go` | push/PR | `CGO_ENABLED=0 GOOS=linux go build ./cmd/managi` 并检查产物体积 |
+| `build-frontend` | push/PR | `npm ci`、`npm run type-check`、`npm run test`、`npm run build`、校验 dist/index.html 生成 |
+| `build-windows-app` | push(main) | 构建前端 → 拷贝 dist 与图标 → rsrc 生成资源 → `go build` windows-app.exe |
+| `security-scan` | push/PR | Trivy 文件系统扫描（CRITICAL/HIGH，`exit-code: 1`，忽略上游无补丁项） |
+
+注：Go/Node 版本以 `backend/go.mod` 与 workflow 内 `node-version` 为准；CI 无独立 docker/tauri job，
+Dockerfile 的构建验证由本地或发布流水线承担。
 
 ### 9.2 `release.yml`（tag `v*` 触发）
 
 | Job | 产物 |
 |-----|------|
-| `build-go-binaries` | matrix(linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64) → 压缩包 |
-| `build-frontend` | dist/index.html |
-| `build-tauri` | matrix(windows/ubuntu/macos) → .msi/.deb/.AppImage/.dmg |
-| `build-docker` | `docker buildx` 多架构镜像 → 推送 GHCR |
-| `release` | 汇总所有产物上传 GitHub Release |
+| `build-go-binaries` | matrix(linux amd64/arm64 各含 glibc 与 musl、darwin amd64/arm64、windows amd64) → 裸二进制资产 |
+| `build-frontend` | dist/index.html（vite-single 单文件） |
+| `build-windows-app` | windows-app.exe（内嵌前端与图标，需先取 build-frontend 产物） |
+| `release` | 汇总上述产物 + `deploy/install.sh` 上传 GitHub Release（`generate_release_notes`） |
+
+说明：桌面端走「Go + 系统托盘 + 内嵌 index.html」，不再使用 Tauri；镜像由 `deploy/Dockerfile`
+与 `deploy/docker-compose.yml` 本地构建，发布流水线不推 GHCR。
 
 ### 9.3 CI/CD 流程图
 

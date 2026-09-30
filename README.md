@@ -29,6 +29,12 @@ sudo ./install.sh
 
 支持的系统：Alpine、Debian、Ubuntu（amd64/arm64）。
 
+安装脚本会按 Release 附带的 `<asset>.sha256` 自动校验下载产物；也可以自己指定预期指纹（注意 `sudo` 需要 `-E` 才保留环境变量）：
+
+```bash
+MANAGI_SHA256=<二进制文件的 sha256> sudo -E ./install.sh
+```
+
 ### 客户端方式（本地桌面应用）
 
 [下载 Windows 客户端](https://github.com/hochenggang/managi-v3/releases/latest/download/windows-app.exe)（约 9MB，内嵌服务、前端与托盘）
@@ -46,9 +52,12 @@ sudo ./install.sh
 | `MANAGI_BASICAUTH_ENABLED` | `false` | 是否启用 Basic Auth |
 | `MANAGI_BASICAUTH_USERNAME` | `admin` | Basic Auth 用户名 |
 | `MANAGI_BASICAUTH_PASSWORD` | 随机 | Basic Auth 密码（启用但未配置时自动生成） |
+| `MANAGI_TRUST_PROXY` | `false` | 置于反向代理之后时设为 `true`，才按 `X-Forwarded-For` 识别客户端 IP（用于登录失败限流与访问日志）。直连部署保持关闭：任何人伪造该头即可绕开限流 |
 | `MANAGI_SSH_TIMEOUT` | `15` | SSH 连接超时（秒） |
 | `MANAGI_KEEPALIVE` | `30` | SSH 保活间隔（秒） |
 | `MANAGI_SSH_IDLE_TIMEOUT` | `120` | SSH 连接池空闲清理时间（秒） |
+| `MANAGI_SSH_POOL_SIZE` | `20` | SSH 连接池常驻连接数上限，超出则驱逐空闲连接 |
+| `MANAGI_KNOWN_HOSTS` | 空 | 指向 OpenSSH `known_hosts` 即启用严格主机密钥校验；留空沿用首次信任（TOFU）。文件无法解析时拒绝所有连接，不会退回 TOFU |
 | `MANAGI_WS_READ_DEADLINE` | `90` | WebSocket 读超时（秒） |
 | `MANAGI_WS_PING_INTERVAL` | `30` | WebSocket Ping 间隔（秒） |
 | `MANAGI_SESSION_IDLE_TIMEOUT` | `60` | 终端会话空闲保留时间（秒），前端断开后保留 shell 的时长 |
