@@ -60,8 +60,8 @@ func Load() *Config {
 		BasicAuthEnabled:   envBool("MANAGI_BASICAUTH_ENABLED", false),
 		BasicAuthUser:      envStr("MANAGI_BASICAUTH_USERNAME", "admin"),
 		// 空表示未显式配置：启用 BasicAuth 时由服务入口生成随机强口令，避免固定弱默认值
-		BasicAuthPassword:  envStr("MANAGI_BASICAUTH_PASSWORD", ""),
-		IndexHTMLPath:      envStr("MANAGI_INDEX_HTML", "index.html"),
+		BasicAuthPassword: envStr("MANAGI_BASICAUTH_PASSWORD", ""),
+		IndexHTMLPath:     envStr("MANAGI_INDEX_HTML", "index.html"),
 	}
 	// 启动时将相对 IndexHTMLPath 转为绝对路径，避免 CWD 不确定时 404。
 	// 从 handler.Register 移到此处，保持 config 为唯一的配置归一化入口。

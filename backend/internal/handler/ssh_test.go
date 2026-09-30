@@ -136,7 +136,7 @@ func TestBatchHandler_PartialFailure(t *testing.T) {
 	req := model.BatchCmdRequest{
 		Nodes: []model.Node{
 			testutil.TestNode(srv.Host(), srv.Port()), // 成功
-			failingNode,                               // 失败
+			failingNode, // 失败
 		},
 		Cmds: []string{"echo ok"},
 	}

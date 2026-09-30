@@ -14,8 +14,8 @@ func SecurityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff") // 禁止浏览器按内容嗅探改写 Content-Type
-		h.Set("X-Frame-Options", "DENY")          // 禁止被任意页面以 iframe 嵌入（防点击劫持）
-		h.Set("Referrer-Policy", "no-referrer")   // 跳转外部时不携带来源（避免泄漏内部地址）
+		h.Set("X-Frame-Options", "DENY")           // 禁止被任意页面以 iframe 嵌入（防点击劫持）
+		h.Set("Referrer-Policy", "no-referrer")    // 跳转外部时不携带来源（避免泄漏内部地址）
 		next.ServeHTTP(w, r)
 	})
 }
