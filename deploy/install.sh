@@ -6,6 +6,8 @@
 #   ./install.sh              # 启动交互式菜单
 #
 # 特性: 强制交互、sudo 权限检查、旧配置检测、BASICAUTH 配置、systemd/OpenRC 服务
+# 覆盖安装/升级采用「临时文件 + 原子 rename」替换二进制：无需先停服务
+# （直接写运行中的可执行文件会 ETXTBSY），下载失败也不会破坏旧文件。
 
 set -e
 
@@ -13,7 +15,7 @@ INSTALL_DIR="/opt/managi"
 CONFIG_DIR="/etc/managi"
 SERVICE_USER="managi"
 GITHUB_REPO="${MANAGI_REPO:-hochenggang/managi-v3}"
-# 修复 B39：可选 SHA256 校验，用户可通过 MANAGI_SHA256 环境变量指定预期值
+# 可选 SHA256 校验，用户可通过 MANAGI_SHA256 环境变量指定预期值
 # 形如：MANAGI_SHA256=abc123... ./install.sh
 EXPECTED_SHA256="${MANAGI_SHA256:-}"
 
@@ -97,25 +99,40 @@ is_installed() {
 }
 
 # ===== 加载旧配置（不覆盖环境变量） =====
+# 值按行取最后一次出现，并脱掉写配置时加的单引号：
+# 引号是给 OpenRC 的 `. config.env` 看的，回到脚本里就该是字面口令。
+read_config_value() {
+    grep "^$1=" "$CONFIG_DIR/config.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed "s/^'//; s/'\$//"
+}
+
 load_config_env() {
     if [ -f "$CONFIG_DIR/config.env" ]; then
-        PORT="$(grep '^MANAGI_PORT=' "$CONFIG_DIR/config.env" | cut -d= -f2- | tail -n1)"
-        AUTH_ENABLED="$(grep '^MANAGI_BASICAUTH_ENABLED=' "$CONFIG_DIR/config.env" | cut -d= -f2- | tail -n1)"
-        AUTH_USER="$(grep '^MANAGI_BASICAUTH_USERNAME=' "$CONFIG_DIR/config.env" | cut -d= -f2- | tail -n1)"
-        AUTH_PASS="$(grep '^MANAGI_BASICAUTH_PASSWORD=' "$CONFIG_DIR/config.env" | cut -d= -f2- | tail -n1)"
+        PORT="$(read_config_value MANAGI_PORT)"
+        AUTH_ENABLED="$(read_config_value MANAGI_BASICAUTH_ENABLED)"
+        AUTH_USER="$(read_config_value MANAGI_BASICAUTH_USERNAME)"
+        AUTH_PASS="$(read_config_value MANAGI_BASICAUTH_PASSWORD)"
     fi
 }
 
 # ===== 写入配置 =====
 write_config_env() {
+    # 绝不再写 admin123 这类固定弱口令：配置文件一旦留在跳板机上就是公开的秘密。
+    # 启用认证却没有口令属于安装流程出错，宁可中止也不留下可用的弱凭据；
+    # 未启用认证则不写口令，磁盘上不留用不到的凭据。
+    if [ "${AUTH_ENABLED:-false}" = "true" ] && [ -z "${AUTH_PASS:-}" ]; then
+        error "已选择启用 BASICAUTH 但未取得密码，安装中止（不写入弱默认口令）"
+    fi
+
     mkdir -p "$CONFIG_DIR"
+    # 口令用单引号写入：systemd EnvironmentFile 与 OpenRC 的 `. config.env` 都按字面取值，
+    # 不加引号则 $ 和 ` 会被 shell 二次展开，含这些字符的口令会变形。
     cat > "$CONFIG_DIR/config.env" <<EOF
 MANAGI_HOST=0.0.0.0
 MANAGI_PORT=${PORT:-18001}
 MANAGI_INDEX_HTML=$INSTALL_DIR/index.html
 MANAGI_BASICAUTH_ENABLED=${AUTH_ENABLED:-false}
-MANAGI_BASICAUTH_USERNAME=${AUTH_USER:-admin}
-MANAGI_BASICAUTH_PASSWORD=${AUTH_PASS:-admin123}
+MANAGI_BASICAUTH_USERNAME='${AUTH_USER:-admin}'
+MANAGI_BASICAUTH_PASSWORD='${AUTH_PASS:-}'
 MANAGI_SSH_TIMEOUT=15
 MANAGI_KEEPALIVE=30
 EOF
@@ -151,6 +168,10 @@ detect_arch() {
 
 # ===== 依赖安装 =====
 install_deps() {
+    if command -v wget >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
+        info "wget/curl 已就绪，跳过依赖安装"
+        return 0
+    fi
     info "安装依赖..."
     case "$OS_FAMILY" in
         alpine)
@@ -163,29 +184,44 @@ install_deps() {
     esac
 }
 
-# ===== 下载二进制 =====
+# ===== 下载并原子落盘一个 release 资产 =====
+# $1=资产名  $2=目标路径  $3=八进制权限
+# 先写目标同目录的临时文件，校验通过后再 mv(rename) 替换：
+#   1) 直接 wget -qO 覆盖正在运行的可执行文件会得到 ETXTBSY（旧版升级必失败的原因）；
+#      rename 只改目录项，运行中的进程仍持有旧 inode，故无需停服务。
+#   2) 临时文件必须与目标同目录（同一文件系统），否则 mv 退化为复制+unlink，又踩回 ETXTBSY。
+#   3) 下载或校验半路失败时，线上文件保持原样，不会被半截数据毁掉。
+install_artifact() {
+    _ia_asset="$1"
+    _ia_dst="$2"
+    _ia_mode="$3"
+    mkdir -p "$(dirname "$_ia_dst")"
+    _ia_tmp="$(mktemp "${_ia_dst}.XXXXXX")" || error "无法创建临时文件: ${_ia_dst}.XXXXXX"
+    _ia_url="https://github.com/${GITHUB_REPO}/releases/latest/download/${_ia_asset}"
+    info "下载 $_ia_asset ..."
+    if ! wget -qO "$_ia_tmp" "$_ia_url"; then
+        rm -f "$_ia_tmp"
+        error "下载失败: $_ia_url"
+    fi
+    if ! verify_checksum "$_ia_tmp" "$_ia_asset"; then
+        rm -f "$_ia_tmp"
+        return 1
+    fi
+    chmod "$_ia_mode" "$_ia_tmp"
+    mv -f "$_ia_tmp" "$_ia_dst"
+    info "已安装到 $_ia_dst"
+}
+
+# ===== 下载二进制 / 前端 =====
 download_binary() {
-    mkdir -p "$INSTALL_DIR"
-    BINARY_NAME="managi-linux-${ARCH}${VARIANT}"
-    info "下载 managi 二进制 (file=$BINARY_NAME)..."
-    URL="https://github.com/${GITHUB_REPO}/releases/latest/download/${BINARY_NAME}"
-    wget -qO "$INSTALL_DIR/managi" "$URL" || error "下载失败: $URL"
-    chmod +x "$INSTALL_DIR/managi"
-    verify_checksum "$INSTALL_DIR/managi" "$BINARY_NAME"
-    info "二进制已安装到 $INSTALL_DIR/managi"
+    install_artifact "managi-linux-${ARCH}${VARIANT}" "$INSTALL_DIR/managi" 755
 }
 
-# ===== 下载前端 =====
 download_frontend() {
-    mkdir -p "$INSTALL_DIR"
-    info "下载前端 index.html..."
-    URL="https://github.com/${GITHUB_REPO}/releases/latest/download/index.html"
-    wget -qO "$INSTALL_DIR/index.html" "$URL" || error "下载前端失败: $URL"
-    verify_checksum "$INSTALL_DIR/index.html" "index.html"
-    info "前端已安装到 $INSTALL_DIR/index.html"
+    install_artifact "index.html" "$INSTALL_DIR/index.html" 644
 }
 
-# 修复 B39：校验下载文件 SHA256
+# 校验下载文件 SHA256
 # 优先级：MANAGI_SHA256 环境变量 > GitHub Release 中的 <file>.sha256 sidecar > 跳过（告警）
 # 返回值：0=校验通过或跳过；1=校验失败（已调用 error，调用方可据此 return）
 verify_checksum() {
@@ -241,10 +277,12 @@ create_user() {
     info "服务用户 $SERVICE_USER 已创建"
 }
 
-# ===== 服务安装 =====
-install_service() {
+# ===== 服务单元 =====
+# 只负责写 unit 文件；安装与升级共用，升级时仅在缺失时补写，避免覆盖用户手工改过的服务定义
+write_service_unit() {
     case "$OS_FAMILY" in
         alpine)
+            mkdir -p /etc/init.d
             cat > /etc/init.d/managi <<EOF
 #!/sbin/openrc-run
 name="managi"
@@ -270,10 +308,9 @@ start_pre() {
 }
 EOF
             chmod +x /etc/init.d/managi
-            rc-update add managi default 2>/dev/null || true
-            rc-service managi start || true
             ;;
         debian)
+            mkdir -p /etc/systemd/system
             cat > /etc/systemd/system/managi.service <<EOF
 [Unit]
 Description=Managi v3 SSH Management
@@ -291,21 +328,52 @@ LimitNOFILE=65536
 [Install]
 WantedBy=multi-user.target
 EOF
-            systemctl daemon-reload
-            systemctl enable managi
-            systemctl restart managi
             ;;
     esac
+}
+
+service_unit_exists() {
+    case "$OS_FAMILY" in
+        alpine) [ -f /etc/init.d/managi ] ;;
+        debian) [ -f /etc/systemd/system/managi.service ] ;;
+    esac
+}
+
+enable_service() {
+    case "$OS_FAMILY" in
+        alpine) rc-update add managi default 2>/dev/null || true ;;
+        debian)
+            systemctl daemon-reload
+            systemctl enable managi
+            ;;
+    esac
+}
+
+# OpenRC 下服务未运行时 restart 会失败，退化为 start
+restart_service() {
+    case "$OS_FAMILY" in
+        alpine) rc-service managi restart 2>/dev/null || rc-service managi start ;;
+        debian) systemctl restart managi ;;
+    esac
+}
+
+install_service() {
+    write_service_unit
+    enable_service
+    restart_service || warn "服务未能启动，请检查日志"
     info "服务已安装并启动"
 }
 
 # ===== 健康检查 =====
+# 用私有变量读端口：原先直接覆盖全局 PORT，且 grep 失败时管道退出码来自 cut，
+# 导致 `|| echo 18001` 永不生效、探测打到 http://localhost:/health
 health_check() {
     info "健康检查..."
-    PORT="$(grep MANAGI_PORT "$CONFIG_DIR/config.env" 2>/dev/null | cut -d= -f2- || echo 18001)"
-    for i in 1 2 3 4 5; do
-        if curl -sf "http://localhost:${PORT}/health" >/dev/null 2>&1; then
-            info "服务就绪: http://localhost:${PORT}"
+    _hc_port="$(read_config_value MANAGI_PORT)"
+    _hc_port="${_hc_port:-18001}"
+    for _ in 1 2 3 4 5; do
+        if curl -sf "http://localhost:${_hc_port}/health" >/dev/null 2>&1; then
+            info "服务就绪: http://localhost:${_hc_port}"
             return 0
         fi
         sleep 2
@@ -354,15 +422,20 @@ do_install() {
     PORT="${MANAGI_PORT:-${PORT:-18001}}"
     AUTH_ENABLED="${MANAGI_BASICAUTH_ENABLED:-${AUTH_ENABLED:-false}}"
     AUTH_USER="${MANAGI_BASICAUTH_USERNAME:-${AUTH_USER:-admin}}"
-    # D3：16 字节 hex（32 字符），纯字母数字，比 base64 更安全且易复制
-    AUTH_PASS="${MANAGI_BASICAUTH_PASSWORD:-${AUTH_PASS:-$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')}}"
+    AUTH_PASS="${MANAGI_BASICAUTH_PASSWORD:-${AUTH_PASS:-}}"
 
     if read_yes_no "是否启用 BASICAUTH（HTTP 基本认证）"; then
         AUTH_ENABLED="true"
         AUTH_USER="$(read_value "请输入用户名")"
-        AUTH_PASS="$(read_password "请输入密码")"
+        # 留空交给服务端会随机生成口令，但每次重启都会变化、等于无法登录，
+        # 因此交互安装要求一个固定口令（环境变量已提供时不再追问）。
+        if [ -z "$AUTH_PASS" ]; then
+            AUTH_PASS="$(read_password "请输入密码")"
+        fi
     else
         AUTH_ENABLED="false"
+        # 不启用认证就不把用不到的凭据写进磁盘
+        AUTH_PASS=""
     fi
 
     install_deps
@@ -397,12 +470,16 @@ do_upgrade() {
     info "开始升级 Managi v3..."
     detect_os
     detect_arch
+    install_deps
     download_binary
     download_frontend
-    case "$OS_FAMILY" in
-        alpine) rc-service managi restart ;;
-        debian) systemctl restart managi ;;
-    esac
+    # 旧安装可能没有 unit（或被手工删除）：缺失才补写，存在则原样保留
+    if ! service_unit_exists; then
+        warn "未找到服务定义，补写 unit 并设为开机自启"
+        write_service_unit
+        enable_service
+    fi
+    restart_service || warn "服务重启失败，请检查日志"
     health_check
     info "升级完成"
 }
