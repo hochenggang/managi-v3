@@ -33,6 +33,16 @@ describe('tabsStore 节点标签判重', () => {
     expect(store.activeTabId).toBe(first.id)
   })
 
+  // 判重必须含凭据指纹：只比 host:port:username 时，改过密码的节点会复用旧标签，
+  // 而旧标签持有的是登录时的旧凭据，用户以为连的是新密码那台。
+  it('openTerminal: 同 host:port:username 不同凭据各自开标签', () => {
+    const store = useTabsStore()
+    const old = store.openTerminal({ ...makeNode('a', '1.1.1.1', 22), auth_value: 'old-pwd' })
+    const fresh = store.openTerminal({ ...makeNode('a', '1.1.1.1', 22), auth_value: 'new-pwd' })
+    expect(fresh.id).not.toBe(old.id)
+    expect(store.tabs.filter((t) => t.type === 'terminal')).toHaveLength(2)
+  })
+
   it('openSftp: 同节点的 terminal 与 sftp 标签互不复用', () => {
     const store = useTabsStore()
     const node = makeNode('a', '1.1.1.1', 22)

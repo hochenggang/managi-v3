@@ -56,4 +56,6 @@ export interface SFTPChunkAckData {
 export interface SFTPUploadInitData {
   upload_id: string
   offset: number
+  /** 服务端指定的分片大小（MANAGI_SFTP_CHUNK_SIZE）。旧后端不带该字段，缺省用客户端默认值。 */
+  chunk_size?: number
 }

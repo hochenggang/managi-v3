@@ -269,9 +269,12 @@ export function useSFTP(node: ApiNode) {
     if (!init.success) throw new Error(init.message)
     const initData = init.data as SFTPUploadInitData
     const offset = initData?.offset ?? 0
-    let idx = Math.floor(offset / CHUNK_SIZE)
-    for (let pos = offset; pos < file.size; pos += CHUNK_SIZE) {
-      const chunk = file.slice(pos, pos + CHUNK_SIZE)
+    // 切片大小以服务端下发为准（MANAGI_SFTP_CHUNK_SIZE）；旧后端不带该字段时用本地默认值。
+    // 续传点 .part 不必与新分片对齐：服务端只按 offset 顺序落盘，分片边界无所谓。
+    const chunkSize = initData?.chunk_size && initData.chunk_size > 0 ? initData.chunk_size : CHUNK_SIZE
+    let idx = Math.floor(offset / chunkSize)
+    for (let pos = offset; pos < file.size; pos += chunkSize) {
+      const chunk = file.slice(pos, pos + chunkSize)
       const buf = await chunk.arrayBuffer()
       const frame = buildChunkFrame(initData!.upload_id, idx, pos, new Uint8Array(buf))
       const ack = await sendAndAwait(frame, CHUNK_TIMEOUT_MS)

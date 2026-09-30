@@ -8,18 +8,18 @@ import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
 import { useWebSocket } from './useWebSocket'
-import { loginMessage, inputMessage, resizeMessage } from '@/protocol/terminal'
+import { loginMessage, inputMessage, resizeMessage, chunkInput } from '@/protocol/terminal'
 import { parseWSMessage, type WSLoginResult, type WSError } from '@/protocol/ws'
-import type { ApiNode } from '@/protocol/types'
+import { nodeSessionKey, type ApiNode } from '@/protocol/types'
 import { handleError } from '@/helper'
 import { useSettingsStore } from '@/stores/settingsStore'
 
-// 会话 ID 缓存：按 host:port:username 索引，同节点复用同一 sessionId。
+// 会话 ID 缓存：按 nodeSessionKey（含凭据指纹）索引，同节点复用同一 sessionId。
 // 前端断线重连时携带相同 sessionId，后端即可复用已维护的 shell 会话。
 // 模块级 Map 永不清理会导致长期使用后内存泄漏。提供 clearSessionId 供节点删除场景调用。
 const sessionIds = new Map<string, string>()
 function getSessionId(node: ApiNode): string {
-  const key = `${node.host}:${node.port}:${node.username}`
+  const key = nodeSessionKey(node)
   let id = sessionIds.get(key)
   if (!id) {
     id = crypto.randomUUID?.() ?? Math.random().toString(36).slice(2) + Date.now().toString(36)
@@ -32,7 +32,7 @@ function getSessionId(node: ApiNode): string {
  *  在节点被删除时调用，避免 sessionId 残留导致复用到已失效的后端会话。
  */
 export function clearSessionId(node: ApiNode): void {
-  sessionIds.delete(`${node.host}:${node.port}:${node.username}`)
+  sessionIds.delete(nodeSessionKey(node))
 }
 
 /** clearAllSessionIds 清空全部会话 ID 缓存。
@@ -110,18 +110,23 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
     // 终端输出统一走 {type:"msg"} 文本帧，二进制处理为死代码。
   })
 
-  // 用户输入透传，WS 未连接时缓冲，重连后 flush
-  term.onData((data) => {
-    if (!send(inputMessage(data))) {
-      inputBuffer += data
+  // 用户输入透传，WS 未连接时缓冲，重连后 flush。
+  // 分帧发送：整段粘贴只有一次 onData，单帧过大会被后端按超限掐断整个连接。
+  const sendInput = (data: string): void => {
+    for (const part of chunkInput(data)) {
+      if (!send(inputMessage(part))) {
+        inputBuffer += part
+      }
     }
-  })
+  }
+  term.onData(sendInput)
 
   // watch status，重连成功后 flush 缓冲的输入
   const stopStatusWatch = watch(status, (s) => {
     if (s === 'connected' && inputBuffer) {
-      send(inputMessage(inputBuffer))
+      const pending = inputBuffer
       inputBuffer = ''
+      sendInput(pending)
     }
   })
 

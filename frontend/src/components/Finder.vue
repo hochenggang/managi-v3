@@ -139,7 +139,7 @@ import { useI18n } from 'vue-i18n'
 import CirclePercent from '@/components/CirclePercent.vue'
 import { useSFTP, LARGE_FILE_THRESHOLD } from '@/composables/useSFTP'
 import { useConfirm } from '@/composables/useConfirm'
-import { handleError, handleMsg } from '@/helper'
+import { handleError, handleMsg, toErrorMessage } from '@/helper'
 import type { ApiNode } from '@/protocol/types'
 import type { SFTPFile } from '@/protocol/sftp'
 import type { ConnectionStatus } from '@/composables/useWebSocket'
@@ -293,8 +293,9 @@ const handleFileUpload = async (event: Event) => {
     for (const file of Array.from(input.files)) {
       try {
         await upload(currentPath.value, file)
-      } catch {
-        failedFiles.push(file.name)
+      } catch (err) {
+        // 带上失败原因：只报文件名时，磁盘满/权限不足/连接断看起来一模一样
+        failedFiles.push(`${file.name}: ${toErrorMessage(err)}`)
       }
     }
     if (failedFiles.length > 0) {

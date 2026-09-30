@@ -95,7 +95,7 @@ vi.mock('@/composables/useWebSocket', () => ({
 
 import { useTerminal } from '@/composables/useTerminal'
 import { wsMessage } from '@/protocol/ws'
-import { inputMessage } from '@/protocol/terminal'
+import { inputMessage, INPUT_CHUNK_CHARS } from '@/protocol/terminal'
 
 // 初始化 reactive settings 对象（vi.hoisted 中无法调用 reactive）
 function makeSettings(overrides: Partial<{ terminalFontSize: number; terminalFontFamily: string }> = {}) {
@@ -293,6 +293,44 @@ describe('useTerminal', () => {
     withSetup(() => useTerminal(container, node))
     onDataCb!('ls -la\n')
     expect(mockSend).toHaveBeenCalledWith(inputMessage('ls -la\n'))
+  })
+
+  // 整段粘贴只回调一次 onData：必须分帧发送，否则后端超限即以 1009 掐断会话
+  it('term.onData: splits a large paste into multiple frames, lossless order', () => {
+    const container = document.createElement('div')
+    withSetup(() => useTerminal(container, node))
+    mockSend.mockClear()
+
+    const pasted = 'y'.repeat(INPUT_CHUNK_CHARS * 2 + 500)
+    onDataCb!(pasted)
+
+    expect(mockSend.mock.calls.length).toBe(3)
+    const reassembled = mockSend.mock.calls.map(([frame]) => JSON.parse(frame as string).data).join('')
+    expect(reassembled).toBe(pasted)
+    mockSend.mock.calls.forEach(([frame]) => {
+      expect(JSON.parse(frame as string).data.length).toBeLessThanOrEqual(INPUT_CHUNK_CHARS)
+    })
+  })
+
+  // 断线重连期间缓冲的长粘贴：flush 后每片只发一次，不重复
+  it('reconnect flush of a chunked paste sends each part exactly once', async () => {
+    const container = document.createElement('div')
+    mockStatus = ref('reconnecting')
+    mockSend.mockReturnValue(false)
+    withSetup(() => useTerminal(container, node))
+
+    const pasted = 'z'.repeat(INPUT_CHUNK_CHARS + 10)
+    onDataCb!(pasted)
+    // 未连接时的尝试发送不计入断言
+    mockSend.mockClear()
+
+    mockSend.mockReturnValue(true)
+    mockStatus.value = 'connected'
+    await vi.waitFor(() => {
+      expect(mockSend.mock.calls.length).toBe(2)
+    })
+    const reassembled = mockSend.mock.calls.map(([frame]) => JSON.parse(frame as string).data).join('')
+    expect(reassembled).toBe(pasted)
   })
 
   // WS 未连接时缓冲输入，重连成功后 flush

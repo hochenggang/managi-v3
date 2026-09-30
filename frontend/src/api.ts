@@ -33,6 +33,19 @@ function getApiUrl(): string {
 
 const { withRetry } = useRetry()
 
+/** readApiError 取后端 JSON 错误体里的具体原因（后端统一为 {"error": "..."}）。
+ *  只有状态码时用户看不出是密码错了还是网络不通，故优先展示消息。
+ */
+async function readApiError(resp: Response): Promise<string> {
+  try {
+    const data = (await resp.json()) as { error?: string }
+    if (data && typeof data.error === 'string' && data.error) return data.error
+  } catch {
+    // 非 JSON 响应（反向代理错误页等）：回退状态码
+  }
+  return `Error code ${resp.status}`
+}
+
 /** 带重试与超时的 fetch 封装。
  *  C3：AbortController 在每次重试的 fn 回调内创建，避免首次超时 abort 后重试复用已 aborted 的 signal。
  */
@@ -54,14 +67,14 @@ async function fetchWithRetry(url: string, body: unknown, timeoutMs = 30000): Pr
 
 export async function testSSH(node: ApiNode, cmds: string[]): Promise<CmdsTestResult> {
   const resp = await fetchWithRetry(`${getApiUrl()}${API_URI.sshTest}`, { node, cmds })
-  if (!resp.ok) throw new Error(`Error code ${resp.status}`)
+  if (!resp.ok) throw new Error(await readApiError(resp))
   return resp.json()
 }
 
 export async function batchSSH(nodes: ApiNode[], cmds: string[]): Promise<CmdsTestResult[]> {
   const req: BatchCmdRequest = { nodes, cmds }
   const resp = await fetchWithRetry(`${getApiUrl()}${API_URI.sshBatch}`, req)
-  if (!resp.ok) throw new Error(`Error code ${resp.status}`)
+  if (!resp.ok) throw new Error(await readApiError(resp))
   return resp.json()
 }
 
@@ -86,7 +99,7 @@ export async function downloadWithRange(
       body: JSON.stringify({ node, path }),
       signal: controller.signal,
     })
-    if (!resp.ok && resp.status !== 206) throw new Error(`Error code ${resp.status}`)
+    if (!resp.ok && resp.status !== 206) throw new Error(await readApiError(resp))
     // body 可能为 null（服务端错误/网络中断），显式检查避免后续 getReader() 崩溃
     if (!resp.body) throw new Error('download: response body is null')
     const total = parseTotalFromRange(resp.headers.get('Content-Range') ?? '')

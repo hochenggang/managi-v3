@@ -5,8 +5,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { i18n } from '@/i18n'
-import type { ApiNode } from '@/protocol/types'
-import { generateNodeId } from '@/protocol/types'
+import { nodeSessionKey, type ApiNode } from '@/protocol/types'
 
 export type TabType = 'welcome' | 'batch' | 'terminal' | 'sftp' | 'settings'
 
@@ -56,16 +55,20 @@ export const useTabsStore = defineStore('tabs', () => {
     return add({ type, title, icon: type })
   }
 
+  function nodeTabKey(type: TabType, node: ApiNode): string {
+    return `${type}:${nodeSessionKey(node)}`
+  }
+
   function nodeKeyOf(tab: TabItem): string {
     const node = tab.props?.node as ApiNode | undefined
-    return node ? `${tab.type}:${generateNodeId(node)}` : ''
+    return node ? nodeTabKey(tab.type, node) : ''
   }
 
   // 节点级标签：同类型 + 同节点复用。
-  // 判重必须用 generateNodeId（host:port:username），只比 host 会让同 host 的
+  // 判重键含 username 与凭据指纹（与后端连接池键同构）：只比 host 会让同主机的
   // 不同端口/账号节点复用旧标签，连到错误目标。
   function openNodeTab(type: 'terminal' | 'sftp', node: ApiNode): TabItem {
-    const key = `${type}:${generateNodeId(node)}`
+    const key = nodeTabKey(type, node)
     const existing = tabs.value.find((t) => nodeKeyOf(t) === key)
     if (existing) {
       activeTabId.value = existing.id

@@ -151,6 +151,31 @@ describe('useSFTP', () => {
     await p
   })
 
+  it('丢弃 seq 不匹配的迟到响应，避免旧响应把新请求误判为完成', async () => {
+    const s = withSetup(() => useSFTP(node))
+
+    const p1 = s.mkdir('/a')
+    respond({ type: 'ok', seq: 1 })
+    await p1
+
+    let settled = false
+    const p2 = s.del('/b').then((r) => {
+      settled = true
+      return r
+    })
+    expect(sentPayloadAt(1)).toEqual({ type: 'delete', data: { path: '/b' }, seq: 2 })
+
+    // 上一条请求迟到的响应：seq=1 与等待中的 2 不符，必须被忽略
+    respond({ type: 'ok', seq: 1 })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    // 匹配 seq 的响应才结清请求
+    respond({ type: 'ok', seq: 2 })
+    await p2
+    expect(settled).toBe(true)
+  })
+
   it('upload single-chunk file: init → binary frame → complete', async () => {
     const s = withSetup(() => useSFTP(node))
     const buf = new Uint8Array(10)
@@ -192,6 +217,40 @@ describe('useSFTP', () => {
 
     await p
     // 单分片 10 字节文件上传完成应正好 100%
+    expect(s.uploadProgress.value).toBe(100)
+  })
+
+  // 分片大小由服务端在 upload_init 响应下发（MANAGI_SFTP_CHUNK_SIZE），客户端不再自作主张
+  it('upload slices by the server-advertised chunk_size', async () => {
+    const s = withSetup(() => useSFTP(node))
+    const file = new File([new Uint8Array(10)], 'srv-chunk.bin')
+    const p = s.upload('/remote', file)
+
+    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(1))
+    respond({ type: 'upload_init', data: { upload_id: 'u3', offset: 0, chunk_size: 4 } })
+
+    // 10 字节按服务端下发的 4 切成 4 + 4 + 2 三帧
+    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(2))
+    expect(parseChunkFrame(mockSend.mock.calls[1][0] as ArrayBuffer).data).toHaveLength(4)
+    respond({ type: 'chunk_ack', data: { chunk_index: 0 } })
+
+    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(3))
+    const second = parseChunkFrame(mockSend.mock.calls[2][0] as ArrayBuffer)
+    expect(second.data).toHaveLength(4)
+    expect(second.offset).toBe(4)
+    respond({ type: 'chunk_ack', data: { chunk_index: 1 } })
+
+    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(4))
+    const third = parseChunkFrame(mockSend.mock.calls[3][0] as ArrayBuffer)
+    expect(third.data).toHaveLength(2)
+    expect(third.offset).toBe(8)
+    respond({ type: 'chunk_ack', data: { chunk_index: 2 } })
+
+    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(5))
+    expect(sentPayloadAt(4).type).toBe('upload_complete')
+    respond({ type: 'ok' })
+
+    await p
     expect(s.uploadProgress.value).toBe(100)
   })
 

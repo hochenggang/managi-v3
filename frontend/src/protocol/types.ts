@@ -61,3 +61,25 @@ export interface AppConfig {
 export function generateNodeId(node: ApiNode): string {
   return `${node.host}:${node.port}:${node.username}`
 }
+
+/** 会话身份键：generateNodeId + 凭据指纹。
+ *  后端连接池键同样含凭据指纹——同 host:port:username 但密码/私钥不同
+ *  （改过口令的条目与旧条目并存）必须是互不复用的两条会话，
+ *  否则会沿用别人（或旧口令）建立的连接。
+ *  此键只用于标签判重、会话缓存等瞬时状态；分组等持久化数据仍用
+ *  generateNodeId，否则改一次凭据就会打散用户已存好的分组。
+ */
+export function nodeSessionKey(node: ApiNode): string {
+  return `${generateNodeId(node)}:${authFingerprint(node)}`
+}
+
+// authFingerprint 认证材料的 FNV-1a 32 位摘要：仅用于区分身份，不承载安全语义。
+function authFingerprint(node: ApiNode): string {
+  const text = `${node.auth_type}\u0000${node.auth_value}`
+  let hash = 0x811c9dc5
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash.toString(36)
+}

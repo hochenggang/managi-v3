@@ -164,6 +164,19 @@ describe('downloadWithRange', () => {
     await expect(downloadWithRange(nodeWithSecret, '/missing.txt', 0)).rejects.toThrow('404')
   })
 
+  it('surfaces the backend error message, not just a status code', async () => {
+    stubFetch({
+      ok: false,
+      status: 502,
+      headers: new Headers(),
+      body: null,
+      json: async () => ({ error: 'ssh connect: dial tcp 1.2.3.4:22: connection refused' }),
+    })
+    await expect(downloadWithRange(nodeWithSecret, '/tmp/a.txt', 0)).rejects.toThrow(
+      'dial tcp 1.2.3.4:22',
+    )
+  })
+
   it('rejects when response body is null on success', async () => {
     stubFetch({ ok: true, status: 200, headers: new Headers(), body: null })
     await expect(downloadWithRange(nodeWithSecret, '/tmp/a.txt', 0)).rejects.toThrow(
