@@ -6,6 +6,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { i18n } from '@/i18n'
 import type { ApiNode } from '@/protocol/types'
+import { generateNodeId } from '@/protocol/types'
 
 export type TabType = 'welcome' | 'batch' | 'terminal' | 'sftp' | 'settings'
 
@@ -44,44 +45,55 @@ export const useTabsStore = defineStore('tabs', () => {
     return item
   }
 
-  function openBatch(): TabItem {
-    const existing = tabs.value.find((t) => t.type === 'batch')
+  // 单例标签：同类型只保留一个，已存在则激活
+  function openSingleton(type: 'batch' | 'settings'): TabItem {
+    const existing = tabs.value.find((t) => t.type === type)
     if (existing) {
       activeTabId.value = existing.id
       return existing
     }
-    return add({ type: 'batch', title: i18n.global.t('tabs.batch'), icon: 'batch' })
+    const title = i18n.global.t(type === 'batch' ? 'tabs.batch' : 'tabs.settings')
+    return add({ type, title, icon: type })
+  }
+
+  function nodeKeyOf(tab: TabItem): string {
+    const node = tab.props?.node as ApiNode | undefined
+    return node ? `${tab.type}:${generateNodeId(node)}` : ''
+  }
+
+  // 节点级标签：同类型 + 同节点复用。
+  // 判重必须用 generateNodeId（host:port:username），只比 host 会让同 host 的
+  // 不同端口/账号节点复用旧标签，连到错误目标。
+  function openNodeTab(type: 'terminal' | 'sftp', node: ApiNode): TabItem {
+    const key = `${type}:${generateNodeId(node)}`
+    const existing = tabs.value.find((t) => nodeKeyOf(t) === key)
+    if (existing) {
+      activeTabId.value = existing.id
+      return existing
+    }
+    const suffix = type === 'terminal' ? '' : ` ${i18n.global.t('tabs.sftp')}`
+    return add({
+      type,
+      title: `${node.name}${suffix}`,
+      icon: type,
+      props: { node },
+    })
+  }
+
+  function openBatch(): TabItem {
+    return openSingleton('batch')
   }
 
   function openTerminal(node: ApiNode): TabItem {
-    const existing = tabs.value.find(
-      (t) => t.type === 'terminal' && (t.props?.node as ApiNode | undefined)?.host === node.host,
-    )
-    if (existing) {
-      activeTabId.value = existing.id
-      return existing
-    }
-    return add({ type: 'terminal', title: `${node.name}`, icon: 'terminal', props: { node } })
+    return openNodeTab('terminal', node)
   }
 
   function openSftp(node: ApiNode): TabItem {
-    const existing = tabs.value.find(
-      (t) => t.type === 'sftp' && (t.props?.node as ApiNode | undefined)?.host === node.host,
-    )
-    if (existing) {
-      activeTabId.value = existing.id
-      return existing
-    }
-    return add({ type: 'sftp', title: `${node.name} ${i18n.global.t('tabs.sftp')}`, icon: 'sftp', props: { node } })
+    return openNodeTab('sftp', node)
   }
 
   function openSettings(): TabItem {
-    const existing = tabs.value.find((t) => t.type === 'settings')
-    if (existing) {
-      activeTabId.value = existing.id
-      return existing
-    }
-    return add({ type: 'settings', title: i18n.global.t('tabs.settings'), icon: 'settings' })
+    return openSingleton('settings')
   }
 
   function close(id: string): void {

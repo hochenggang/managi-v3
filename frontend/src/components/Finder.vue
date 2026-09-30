@@ -72,10 +72,11 @@
             <div class="file-modified">-</div>
           </div>
 
-          <div v-for="file in files" :key="file.filename" class="file-item" :class="{
+          <div v-for="(file, index) in files" :key="file.filename" class="file-item" :class="{
             'selected': selectedFile && selectedFile.filename === file.filename,
             'directory': file.is_dir
-          }" @click.stop="selectFile(file)" @dblclick.stop="handleFileDoubleClick(file)">
+          }" :style="{ '--file-index': index }" @click.stop="selectFile(file)"
+            @dblclick.stop="handleFileDoubleClick(file)">
             <div class="file-icon">
               <svg viewBox="0 0 24 24" width="24" height="24">
                 <path v-if="file.is_dir"
@@ -99,7 +100,8 @@
         </div>
         <div class="selected-info">
           <span>{{ props.node.name }}</span>
-          <span v-if="statusText" :class="['sftp-status', statusClass]">{{ statusText }}</span>
+          <span v-if="statusText" :class="['sftp-status', 'status-line', statusClass]"><i class="status-dot"
+              aria-hidden="true"></i>{{ statusText }}</span>
         </div>
       </div>
 
@@ -517,14 +519,27 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid var(--color-border-subtle);
   cursor: pointer;
   font-size: 0.85rem;
+  /* 进入目录时逐行错峰浮现；delay 上限 0.24s，长列表不会等最后一行 */
+  animation: file-item-in 0.18s ease-out backwards;
+  animation-delay: min(calc(var(--file-index, 0) * 8ms), 0.24s);
+  transition: background-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+@keyframes file-item-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
 }
 
 .file-item:hover {
   background-color: var(--color-hover-bg);
+  box-shadow: inset 2px 0 0 var(--color-accent);
 }
 
 .file-item.selected {
   background-color: var(--color-selected-bg);
+  box-shadow: inset 2px 0 0 var(--color-accent);
 }
 
 .file-icon {

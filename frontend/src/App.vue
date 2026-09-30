@@ -57,12 +57,17 @@ onBeforeMount(() => {
           :key="tab.id"
           class="tab-panel"
           :class="{ active: tab.id === tabsStore.activeTabId }"
+          :aria-hidden="tab.id === tabsStore.activeTabId ? 'false' : 'true'"
         >
-          <component :is="resolveComponent(tab.type)" v-bind="tab.props ?? {}" />
+          <div class="tab-panel-content">
+            <component :is="resolveComponent(tab.type)" v-bind="tab.props ?? {}" />
+          </div>
         </div>
-        <div v-if="tabsStore.tabs.length === 0" class="empty-tabs">
-          {{ $t('tabs.empty') }}
-        </div>
+        <Transition name="empty-tabs">
+          <div v-if="tabsStore.tabs.length === 0" class="empty-tabs">
+            {{ $t('tabs.empty') }}
+          </div>
+        </Transition>
       </div>
     </main>
   </div>
@@ -96,13 +101,36 @@ onBeforeMount(() => {
 .tab-panel {
   position: absolute;
   inset: 0;
-  display: none;
+  overflow: hidden;
+  /* 切页动效用 opacity/transform 而非 display 切换：
+     display:none 的面板每次激活都是"首次显示"，CSS 动画不会重复触发。
+     面板保持参与渲染，后台标签的 WS 连接与 ResizeObserver 不受影响。 */
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.996);
+  transition:
+    opacity 0.16s ease,
+    transform 0.16s ease;
+}
+
+.tab-panel-content {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
   overflow: hidden;
 }
 
 .tab-panel.active {
-  display: flex;
-  flex-direction: column;
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+  z-index: 1;
+}
+
+/* 非活动面板内暂停动画（如 Spinner），避免后台空转耗资源 */
+.tab-panel:not(.active) * {
+  animation-play-state: paused;
 }
 
 .empty-tabs {
@@ -111,6 +139,19 @@ onBeforeMount(() => {
   justify-content: center;
   height: 100%;
   color: var(--color-font-3);
+}
+
+.empty-tabs-enter-active {
+  transition: opacity 0.25s ease;
+}
+
+.empty-tabs-leave-active {
+  transition: opacity 0.15s ease;
+}
+
+.empty-tabs-enter-from,
+.empty-tabs-leave-to {
+  opacity: 0;
 }
 
 

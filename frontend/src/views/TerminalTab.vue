@@ -5,7 +5,7 @@
     </div>
     <div class="terminal-toolbar">
       <span class="terminal-info">{{ node ? `${node.name} (${node.host}:${node.port})` : t('xtermPanel.idle') }}</span>
-      <span :class="['status', statusClass]">{{ statusText }}</span>
+      <span :class="['status', 'status-line', statusClass]"><i class="status-dot" aria-hidden="true"></i>{{ statusText }}</span>
     </div>
   </div>
 </template>
@@ -129,7 +129,6 @@ onUnmounted(() => {
 
 .status {
   font-size: 0.75rem;
-  white-space: nowrap;
   transition: color 0.25s ease;
 }
 

@@ -40,8 +40,9 @@
               <span class="node-status"></span>
               <span class="node-name" :title="`${node.name} (${node.host}:${node.port})`">{{ node.name }}</span>
               <div v-show="hoverNodeId === generateNodeId(node)" class="node-actions">
-                <IconTerm :title="t('xtermPanel.terminal')" @click.stop="tabsStore.openTerminal(node)" />
-                <IconFinder :title="t('xtermPanel.finder')" @click.stop="tabsStore.openSftp(node)" />
+                <IconTerm :title="t('xtermPanel.terminal')"
+                  @click.stop="openNodeTab('terminal', $event, node)" />
+                <IconFinder :title="t('xtermPanel.finder')" @click.stop="openNodeTab('sftp', $event, node)" />
               </div>
             </div>
             </div>
@@ -70,7 +71,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, nextTick } from 'vue'
 import AddNode from '@/components/AddNode.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
 import IconTerm from '@/components/icons/IconTerm.vue'
@@ -78,6 +79,7 @@ import IconFinder from '@/components/icons/IconFinder.vue'
 import IconSetting from '@/components/icons/IconSetting.vue'
 import { useSidebar } from '@/composables/useSidebar'
 import { useConfirm } from '@/composables/useConfirm'
+import { flyToTab } from '@/composables/flyToTab'
 import { useI18n } from 'vue-i18n'
 
 import type { ApiNode } from '@/protocol/types'
@@ -207,6 +209,14 @@ function showGroupMenu(event: MouseEvent, group: string): void {
     })
   }
   openContextMenu(event, items)
+}
+
+// 点击节点上的终端/文件管理图标：开标签 + 让图标飞入该标签，建立"来源→标签"的视觉因果。
+// currentTarget 只在事件派发期间有效，必须在 await 前取出。
+function openNodeTab(type: 'terminal' | 'sftp', event: MouseEvent, node: ApiNode): void {
+  const from = event.currentTarget as Element
+  const tab = type === 'terminal' ? tabsStore.openTerminal(node) : tabsStore.openSftp(node)
+  nextTick(() => flyToTab(from, tab.id))
 }
 
 function showNodeMenu(event: MouseEvent, node: ApiNode): void {

@@ -1,7 +1,8 @@
 <template>
   <div class="tab-bar">
     <div class="tabs">
-      <div v-for="tab in tabsStore.tabs" :key="tab.id" class="tab" :class="{ active: tab.id === tabsStore.activeTabId }"
+      <div v-for="tab in tabsStore.tabs" :key="tab.id" class="tab" :data-tab-id="tab.id"
+        :class="{ active: tab.id === tabsStore.activeTabId }"
         @click="tabsStore.activate(tab.id)" @contextmenu.prevent="showContextMenu($event, tab.id)">
         <span class="tab-icon">
           <IconTerm v-if="tab.type === 'terminal'" />
@@ -98,6 +99,7 @@ function closeAll(): void {
   display: flex;
   align-items: center;
   gap: 0.35rem;
+  position: relative;
   height: calc(100% - 2px);
   padding: 0 0.75rem;
   margin-top: 2px;
@@ -113,12 +115,32 @@ function closeAll(): void {
 .tab.active {
   color: var(--color-font-1);
   background-color: var(--color-tab-active-bg);
-  border-bottom: 2px solid var(--color-accent);
 }
 
 .tab:hover {
   color: var(--color-font-1);
   background-color: var(--color-tab-hover-bg);
+}
+
+/* 图标悬停上浮由 main.css 的 --icon-lift 统一提供，此处不再重复定义 */
+
+/* 活动标识条：由左向右展开（border-bottom 无法过渡，改用伪元素） */
+.tab.active::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background-color: var(--color-accent);
+  transform-origin: left center;
+  animation: tab-indicator 0.18s ease-out;
+}
+
+@keyframes tab-indicator {
+  from {
+    transform: scaleX(0);
+  }
 }
 
 .tab-icon {

@@ -36,10 +36,10 @@
             <span class="execution-time">{{ result.time_elapsed }}s</span>
           </div>
           <div class="output-block" v-if="result.output && result.output.length > 0">
-            <pre><code>{{ result.output.join('\n') }}</code><button class="small-button copy-button" @click="copyCode(result.output.join(''))">{{ t('cmdPanel.copy') }}</button></pre>
+            <pre><code>{{ joinLines(result.output) }}</code><button class="small-button copy-button" @click="copyCode(joinLines(result.output))">{{ t('cmdPanel.copy') }}</button></pre>
           </div>
           <div class="output-block error-block" v-if="result.error && result.error.length > 0">
-            <pre><code>{{ result.error.join('\n') }}</code><button class="small-button copy-button" @click="copyCode(result.error.join(''))">{{ t('cmdPanel.copy') }}</button></pre>
+            <pre><code>{{ joinLines(result.error) }}</code><button class="small-button copy-button" @click="copyCode(joinLines(result.error))">{{ t('cmdPanel.copy') }}</button></pre>
           </div>
         </li>
       </ul>
@@ -153,6 +153,9 @@ const executeCommand = async () => {
     isExecuting.value = false;
   }
 };
+
+// 展示与复制共用同一份拼接结果，避免复制丢换行
+const joinLines = (lines: string[]) => lines.join('\n')
 
 const copyCode = (text: string) => {
   navigator.clipboard.writeText(text).then(() => {

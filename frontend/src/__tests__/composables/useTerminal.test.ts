@@ -40,6 +40,7 @@ const mockTerminal = {
   }),
   dispose: vi.fn(),
   focus: vi.fn(),
+  paste: vi.fn(),
   getSelection: vi.fn(() => ''),
   cols: 80,
   rows: 24,
@@ -56,6 +57,12 @@ vi.mock('@xterm/xterm', () => ({
 vi.mock('@xterm/addon-fit', () => ({
   FitAddon: function MockFitAddon() {
     return { fit: vi.fn() }
+  },
+}))
+
+vi.mock('@xterm/addon-web-links', () => ({
+  WebLinksAddon: function MockWebLinksAddon() {
+    return { activate: vi.fn() }
   },
 }))
 
@@ -113,6 +120,19 @@ const node: ApiNode = {
   auth_value: 'pwd',
 }
 
+// happy-dom 不提供 navigator.clipboard / isSecureContext，测试内按需打桩
+function stubClipboard(text: string, secure: boolean): void {
+  Object.defineProperty(navigator, 'clipboard', {
+    value: { readText: vi.fn().mockResolvedValue(text), writeText: vi.fn().mockResolvedValue(undefined) },
+    configurable: true,
+    writable: true,
+  })
+  Object.defineProperty(window, 'isSecureContext', {
+    value: secure,
+    configurable: true,
+  })
+}
+
 function withSetup<T>(composable: () => T): { result: T; unmount: () => void } {
   let result!: T
   const App = defineComponent({
@@ -141,13 +161,50 @@ describe('useTerminal', () => {
     mockSend.mockReturnValue(true)
   })
 
+  // FitAddon + WebLinksAddon 各 loadAddon 一次；顺序即「先布局插件、后交互插件」
   it('mount: creates Terminal, opens in container, loads FitAddon, calls connect', () => {
     const container = document.createElement('div')
     withSetup(() => useTerminal(container, node))
     expect(mockTerminal.open).toHaveBeenCalledWith(container)
-    expect(mockTerminal.loadAddon).toHaveBeenCalledTimes(1)
+    expect(mockTerminal.loadAddon).toHaveBeenCalledTimes(2)
     expect(mockTerminal.focus).toHaveBeenCalledTimes(1)
     expect(mockConnect).toHaveBeenCalledTimes(1)
+  })
+
+  // 回滚缓冲需大于 xterm 默认 1000 行，长输出运维场景才回得去
+  it('mount: enables scrollback beyond xterm default', () => {
+    const container = document.createElement('div')
+    withSetup(() => useTerminal(container, node))
+    expect(terminalCtorOpts.scrollback).toBeGreaterThan(1000)
+  })
+
+  // 根治：右键粘贴只交原文给 term.paste()，由 xterm 依据 DEC mode 2004 自行包裹。
+  // 前端手写 ESC[200~/ESC[201~ 会在未启用该模式时把转义序列当字面量打进 shell。
+  it('contextmenu paste: hands raw clipboard text to term.paste without escape wrapping', async () => {
+    const container = document.createElement('div')
+    withSetup(() => useTerminal(container, node))
+    mockTerminal.paste.mockClear()
+
+    const text = 'line1\nline2'
+    stubClipboard(text, true)
+    container.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))
+    await vi.waitFor(() => {
+      expect(mockTerminal.paste).toHaveBeenCalledTimes(1)
+    })
+    expect(mockTerminal.paste).toHaveBeenCalledWith(text)
+    expect(mockTerminal.paste.mock.calls[0][0]).not.toContain('200~')
+  })
+
+  // 降级：HTTP 非安全上下文读不到剪贴板，此时不应产生任何粘贴内容
+  it('contextmenu paste: no-op in insecure context (B14 fallback)', async () => {
+    const container = document.createElement('div')
+    withSetup(() => useTerminal(container, node))
+    mockTerminal.paste.mockClear()
+
+    stubClipboard('should-not-be-read', false)
+    container.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))
+    await new Promise((r) => setTimeout(r, 0))
+    expect(mockTerminal.paste).not.toHaveBeenCalled()
   })
 
   it('onText msg type writes data to terminal', () => {

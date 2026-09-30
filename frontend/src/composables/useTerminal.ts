@@ -5,6 +5,7 @@
 import { ref, onUnmounted, watch } from 'vue'
 import { Terminal, type ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
 import { useWebSocket } from './useWebSocket'
 import { loginMessage, inputMessage, resizeMessage } from '@/protocol/terminal'
@@ -42,11 +43,15 @@ export function clearAllSessionIds(): void {
   sessionIds.clear()
 }
 
+// 回滚缓冲行数：默认 1000 行对运维场景偏小，5000 行在内存与体验间取衡。
+const SCROLLBACK_LINES = 5000
+
 export function useTerminal(container: HTMLElement, node: ApiNode) {
   // 从设置 store 读取终端字体大小与字体族，并在变化时热更新
   const settings = useSettingsStore()
   const term = new Terminal({
     cursorBlink: true,
+    scrollback: SCROLLBACK_LINES,
     fontSize: settings.settings.terminalFontSize,
     fontFamily: settings.settings.terminalFontFamily,
     rightClickSelectsWord: false,
@@ -54,6 +59,8 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
   })
   const fitAddon = new FitAddon()
   term.loadAddon(fitAddon)
+  // URL 可点击（依赖已在 package.json，此前未接线）
+  term.loadAddon(new WebLinksAddon())
   term.open(container)
   fitAddon.fit()
   term.focus()
@@ -129,11 +136,12 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
       return
     }
     const text = await readFromClipboard()
-    if (text) {
-      // bracketed paste，多行粘贴时用 ESC[200~ ... ESC[201~ 包裹，
-      // 让 shell 识别为粘贴而非手动输入，避免意外执行命令
-      term.paste(`\x1b[200~${text}\x1b[201~`)
-    }
+    if (!text) return
+    // 只交原文给 term.paste()：xterm 内部按当前 DEC mode 2004（bracketed paste）
+    // 决定是否包裹 ESC[200~/ESC[201~。手写包裹会在未启用该模式的 shell/vim 里
+    // 把转义序列当字面量显示，故禁止在此拼接转义序列。
+    term.paste(text)
+    term.focus()
   }
   container.addEventListener('contextmenu', handleContextMenu)
 

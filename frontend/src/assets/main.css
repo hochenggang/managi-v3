@@ -1,5 +1,63 @@
 @import './base.css';
 
+/* 图标悬停微上浮：全局唯一的"可点击图标"反馈定义。
+   位移量集中在 --icon-lift，新增图标入口只需把选择器并入下方分组，不各写各的。 */
+:root {
+  --icon-lift: -1px;
+}
+
+/* 用直接子选择器：只作用于按钮自身的图标，不误伤内嵌组件
+   （如 CirclePercent 的 svg 自带 rotate(-90deg)，被覆盖会导致进度环方向跳变） */
+.icon-btn > svg,
+.small-button > svg,
+.tab-add > svg,
+.tab-icon > svg,
+.node-actions > svg {
+  transition: transform 0.18s ease, fill 0.15s ease;
+}
+
+.icon-btn:hover > svg,
+.small-button:hover > svg,
+.tab-add:hover > svg,
+.tab:hover .tab-icon > svg,
+.node-actions > svg:hover {
+  transform: translateY(var(--icon-lift));
+}
+
+/* 状态灯：终端与 SFTP 共用的连接状态原语，颜色跟随文本 currentcolor */
+.status-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  white-space: nowrap;
+}
+
+.status-dot {
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 50%;
+  background-color: currentcolor;
+}
+
+/* connecting / reconnecting 状态都映射到 .connecting，故只判一个类 */
+.connecting .status-dot {
+  animation: status-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes status-pulse {
+
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  50% {
+    opacity: 0.35;
+    transform: scale(0.75);
+  }
+}
+
 body {
   line-height: 1.5;
   min-height: 100vh;
@@ -144,3 +202,21 @@ button.sucess:disabled {
 }
 
 @media (min-width: 1024px) {}
+
+/* 可访问性：系统要求减少动效时，用极短过渡替代位移/缩放动画 */
+@media (prefers-reduced-motion: reduce) {
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  /* 例外：Spinner 是"正在进行"的唯一视觉信号，停下会被误认为卡死 */
+  .loading-spinner {
+    animation-duration: 1s !important;
+    animation-iteration-count: infinite !important;
+  }
+}
