@@ -39,14 +39,26 @@ run_case() {
         error() { ERROR_LOG="${ERROR_LOG}$1|"; }
 
         wget() {
-            if [ "$1" = "--spider" ]; then
-                return "$_rc_spider"
-            elif [ "$1" = "-qO" ]; then
-                if [ "$_rc_download" -eq 0 ]; then
-                    printf '%s' "$_rc_sidecar_content" > "$2"
-                    return 0
-                fi
-                return 1
+            # 按选项token匹配，不看位置：install.sh 实际调用是
+            # `wget -q --spider URL` 与 `wget -qO FILE URL`，
+            # 原先按 $1 判断永不命中，sidecar 分支于是从来没被测到（T4/T5 长期假红）。
+            _w_out=""
+            _w_pending=0
+            for _w_arg in "$@"; do
+                case "$_w_arg" in
+                    --spider) return "$_rc_spider" ;;
+                    -qO) _w_pending=1 ;;
+                    *)
+                        if [ "$_w_pending" -eq 1 ]; then
+                            _w_out="$_w_arg"
+                            _w_pending=0
+                        fi
+                        ;;
+                esac
+            done
+            if [ -n "$_w_out" ] && [ "$_rc_download" -eq 0 ]; then
+                printf '%s' "$_rc_sidecar_content" > "$_w_out"
+                return 0
             fi
             return 1
         }

@@ -125,6 +125,17 @@ jobs:
         shell: bash
         run: ls -lh desktop/windows-app.exe
 
+  deploy-scripts:
+    name: Deploy Script Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Syntax check
+        run: sh -n deploy/install.sh && sh -n deploy/install_test.sh
+      - name: Run install.sh checksum tests
+        # 此前无人运行 install_test.sh，它的 wget 桩与 install.sh 的调用方式早已脱节却无人察觉
+        run: sh deploy/install_test.sh
+
   security-scan:
     name: Trivy Security Scan
     runs-on: ubuntu-latest

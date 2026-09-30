@@ -7,3 +7,6 @@ backend/bin/
 coverage.out
 *.exe
 .trae/
+
+# 本地环境变量（含凭据，勿入库）
+.env

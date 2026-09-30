@@ -16,11 +16,13 @@ services:
       - MANAGI_PORT=18001
       - MANAGI_INDEX_HTML=/app/index.html
       # 安全默认值：默认启用 BasicAuth，避免误暴露在公网成为开放跳板机。
-      # 密码留空时服务端自动生成随机强口令并从日志提示获取方式；
-      # 生产部署建议显式设置 MANAGI_BASICAUTH_PASSWORD。
+      # 密码必须由宿主环境或同目录 .env 提供：
+      #   echo 'MANAGI_BASICAUTH_PASSWORD=你的密码' > .env
+      # 留空的后果不是「无密码」，而是每次启动生成一个新随机口令并写进启动日志：
+      # 配合 restart: unless-stopped，容器每次重启口令都变，日志里还留着历史明文。
       - MANAGI_BASICAUTH_ENABLED=true
-      - MANAGI_BASICAUTH_USERNAME=admin
-      - MANAGI_BASICAUTH_PASSWORD=
+      - "MANAGI_BASICAUTH_USERNAME=${MANAGI_BASICAUTH_USERNAME:-admin}"
+      - "MANAGI_BASICAUTH_PASSWORD=${MANAGI_BASICAUTH_PASSWORD:?请先设置 MANAGI_BASICAUTH_PASSWORD（留空会每次重启换随机口令并打印到日志）}"
       - MANAGI_SSH_TIMEOUT=15
       - MANAGI_KEEPALIVE=30
     restart: unless-stopped

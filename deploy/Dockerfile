@@ -30,8 +30,11 @@ WORKDIR /app
 # D1：确保 nobody 用户可读写 /app 目录（默认 root 所有）
 RUN chown -R nobody:nobody /app
 EXPOSE 18001
+# 注意：HEALTHCHECK 固定探 18001（默认端口）。改了 MANAGI_PORT 需一并覆盖 healthcheck。
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
   CMD wget -qO- http://localhost:18001/health || exit 1
 USER nobody
 ENTRYPOINT ["/app/managi"]
-CMD ["-port", "18001"]
+# 不要在这里写 CMD ["-port", "..."]：命令行 flag 的优先级高于环境变量，
+# 写死会让用户的 MANAGI_PORT 被静默忽略（表现为「改了环境变量端口却没变」）。
+# 端口一律由 MANAGI_PORT 决定，需要追加参数时用 compose 的 command: 覆盖。
