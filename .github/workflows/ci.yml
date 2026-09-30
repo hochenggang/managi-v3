@@ -8,6 +8,11 @@ on:
   pull_request:
     branches: [main]
 
+# 同一分支的旧运行被新提交取代时直接取消，避免排队堆积重复构建
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint-test-go:
     name: Go Lint & Test
@@ -19,7 +24,8 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.25'
+          # Go 版本以 backend/go.mod 为唯一来源，避免 bump go.mod 时漏改此处
+          go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
       - name: Go vet
         run: go vet ./...
@@ -42,7 +48,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.25'
+          go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
       - name: Build
         run: CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /tmp/managi ./cmd/managi
@@ -82,7 +88,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25'
+          go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -125,9 +131,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
+        # 钉到具体 commit（v0.36.0）：@master 是浮动 ref，上游一改动本流水线就跟着变
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           scan-type: 'fs'
           scan-ref: '.'
           severity: 'CRITICAL,HIGH'
           exit-code: '1'
+          # 只在"有修复版本可用"时失败：上游暂无补丁的披露不应阻塞合并
+          ignore-unfixed: true
