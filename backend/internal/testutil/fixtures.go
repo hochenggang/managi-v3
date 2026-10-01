@@ -6,19 +6,13 @@ import (
 	"managi/internal/model"
 )
 
-// TestConfig 返回默认测试配置。
+// TestConfig 返回测试配置：只覆写测试关心的项，其余交给 Normalize。
+// 与生产入口 config.Load 走同一条校正路径，默认值因此全仓只有 config 一处定义，
+// 各使用点也就不必再写「零值就兜底」的分支。
 func TestConfig() *config.Config {
-	return &config.Config{
-		Host:               "127.0.0.1",
-		Port:               18001,
-		SSHTimeout:         15,
-		KeepaliveInterval:  30,
-		WSReadDeadline:     60,
-		ChunkSize:          1 << 20,
-		DownloadChunkSize:  1 << 16,
-		IndexHTMLPath:      "index.html",
-		SessionIdleTimeout: 60,
-	}
+	cfg := config.Config{Host: "127.0.0.1", Port: 18001}
+	cfg.Normalize()
+	return &cfg
 }
 
 // TestNode 返回密码认证的测试节点。

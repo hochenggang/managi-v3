@@ -18,9 +18,8 @@ import (
 )
 
 // AccessLog 记录每个请求的一行访问日志（方法、路径、状态、字节数、耗时、来源 IP）。
-// trustProxy 与 BasicAuth 保持同一取值：两处对「客户端 IP」的定义必须一致，
-// 否则日志里的来源和限流用的来源不是同一个地址，排查时对不上。
-func AccessLog(next http.Handler, trustProxy bool) http.Handler {
+// remote 与 BasicAuth 限流同源（都取真实连接地址），排查时对得上号。
+func AccessLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// /health 由容器健康检查按秒级轮询，记下来只会淹没真实访问
 		if r.URL.Path == "/health" {
@@ -35,7 +34,7 @@ func AccessLog(next http.Handler, trustProxy bool) http.Handler {
 			"status", rec.statusCode(),
 			"bytes", rec.written,
 			"duration_ms", time.Since(rec.start).Milliseconds(),
-			"remote", clientIP(r, trustProxy),
+			"remote", clientIP(r),
 		)
 	})
 }

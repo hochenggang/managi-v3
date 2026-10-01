@@ -1,15 +1,19 @@
-// useTerminal：xterm.js 终端实例管理 composable。
-// v3 协议：只渲染 {type:"msg"} 输出；登录失败格式化错误并 close() 抑制重连。
-// 设计见 ../../../design-v3.md §6.1。
+// useTerminal：一路终端标签 = 一个 xterm 实例 + 共享 /ws 上的一路 PTY 通道。
+//
+// 输出走数据面原始字节，直接 term.write(Uint8Array)：不经过 string→JSON，
+// 既省转义与再解析，也不会把跨帧边界的半个 UTF-8 字符变成 U+FFFD。
+// 断线时输入按帧缓冲，重连（同一 session_id，后端 shell 还在）后按序补发。
+// 粘贴这类大块输入按发送缓冲水位逐帧发出，不等队列降下来不发下一片。
 
-import { ref, onUnmounted, watch } from 'vue'
+import { computed, onUnmounted, watch } from 'vue'
 import { Terminal, type ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
-import { useWebSocket } from './useWebSocket'
-import { loginMessage, inputMessage, resizeMessage, chunkInput } from '@/protocol/terminal'
-import { parseWSMessage, type WSLoginResult, type WSError } from '@/protocol/ws'
+import { uiStatus, useWSHub } from './useWSHub'
+import { useConfirm } from './useConfirm'
+import { splitBytes } from '@/protocol/frames'
+import type { ErrorData, OpenPTY, OpenResponse } from '@/protocol/ws'
 import { nodeSessionKey, type ApiNode } from '@/protocol/types'
 import { handleError } from '@/helper'
 import { useSettingsStore } from '@/stores/settingsStore'
@@ -46,6 +50,29 @@ export function clearAllSessionIds(): void {
 // 回滚缓冲行数：默认 1000 行对运维场景偏小，5000 行在内存与体验间取衡。
 const SCROLLBACK_LINES = 5000
 
+// 擦屏并清回滚：重连复用同一后端会话时，服务端会整段回放 scrollback，
+// 不先擦掉屏上内容就会看到同一批输出重演一遍。
+const CLEAR_SCREEN = '\x1b[2J\x1b[3J\x1b[H'
+
+// open 响应未到时的兜底分片大小。真值总由服务端下发（chunk_size），
+// 这里只需保证「首帧之前」不会切出 1 字节一片。
+const DEFAULT_INPUT_FRAME_BYTES = 32 * 1024
+
+// 待发送输入的字节上限。粘贴在慢链路上排队，超出即拒绝本次输入并出声——
+// 有界才不会让一次粘贴把标签页压死；丢弃必须可见，绝不静默吞字节。
+const MAX_OUTBOUND_BYTES = 4 * 1024 * 1024
+
+// 粘贴超过这两项之一就先问一句：大块输入会挤在发送队列里，值得让用户确认一次；
+// 日常几行命令低于阈值，不打扰。
+const PASTE_CONFIRM_BYTES = 32 * 1024
+const PASTE_CONFIRM_LINES = 20
+
+// 远端 tty 按行截断（Linux MAX_CANON 约 4095 字节）：单行超出会有字节到不了 shell，
+// 这是远端终端的固有属性，只能提醒用户，前端分帧救不了。
+const MAX_CANON_BYTES = 4000
+
+const encoder = new TextEncoder()
+
 export function useTerminal(container: HTMLElement, node: ApiNode) {
   // 从设置 store 读取终端字体大小与字体族，并在变化时热更新
   const settings = useSettingsStore()
@@ -65,70 +92,132 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
   fitAddon.fit()
   term.focus()
 
+  const hub = useWSHub()
+  const { confirm } = useConfirm()
   const sessionId = getSessionId(node)
-  // 重连期间缓冲用户输入，重连成功后 flush
-  let inputBuffer = ''
-  const { status, connect, send, close, markFailed, markLoginSuccess } = useWebSocket('/ws/ssh', {
-    authPayload: loginMessage(node, sessionId, term.cols, term.rows),
-    maxReconnect: 10, // 后端维持会话，前端应积极重连
-    onText: (data) => {
-      const msg = parseWSMessage(data)
-      if (!msg) return // 非协议消息忽略，避免渲染垃圾
-      switch (msg.type) {
-        case 'msg':
-          if (typeof msg.data === 'string') {
-            term.write(msg.data)
-          }
-          break
-        case 'login': {
-          const r = msg.data as WSLoginResult
-          if (r && !r.success) {
-            const m = r.message ?? 'unknown'
-            term.writeln(`\x1b[31m登录失败：${m}\x1b[0m`)
-            handleError(`登录失败：${m}`)
-            markFailed() // 替代 close()，设置 first_failed/reconnect_failed 并抑制重连
-          } else if (r && r.success) {
-            markLoginSuccess() // 标记登录成功，后续断线重连时状态为 reconnecting 而非 connecting
-            if (r.reattached) {
-              term.writeln(`\x1b[32m[已恢复之前的会话]\x1b[0m`)
-            }
-          }
-          break
-        }
-        case 'error': {
-          const e = msg.data as WSError
-          term.writeln(`\x1b[31m错误：${e?.message ?? 'unknown'}\x1b[0m`)
-          break
-        }
-        case 'pong':
-          break
-        default:
-          break
+  // 待发送的输入帧：断线缓冲与粘贴背压共用一条队列，保证顺序只有一个来源。
+  let outbound: Uint8Array[] = []
+  let outboundBytes = 0
+  let pumping = false
+  // 单帧载荷上限：服务端定（超限的帧会被 WS 读上限掐断整条连接）。
+  let frameBudget = DEFAULT_INPUT_FRAME_BYTES
+  let openedOnce = false
+
+  const channel = hub.attach({
+    openData: (): OpenPTY => ({
+      kind: 'pty',
+      node,
+      session_id: sessionId,
+      cols: term.cols,
+      rows: term.rows,
+    }),
+    onOpen: (resp: OpenResponse) => {
+      openedOnce = true
+      if (resp.chunk_size) frameBudget = resp.chunk_size
+      if (resp.reattached) {
+        term.write(CLEAR_SCREEN)
+        term.writeln('\x1b[32m[已恢复之前的会话]\x1b[0m')
       }
     },
-    // 移除 onBinary：v3 协议后端仅发送文本帧（writeEnvelope → TextMessage），
-    // 终端输出统一走 {type:"msg"} 文本帧，二进制处理为死代码。
+    onData: (payload, end) => {
+      if (payload.byteLength) term.write(payload)
+      if (!end) return
+      // 后端会话被回收（shell 退出或空闲超时）：必须出声，
+      // 否则用户会对着一个不再回话的提示符一直敲下去。
+      clearOutbound()
+      term.writeln('\x1b[33m[会话已结束]\x1b[0m')
+    },
+    onNotify: (type, data) => {
+      if (type !== 'error') return
+      const message = (data as ErrorData | undefined)?.message ?? '未知错误'
+      term.writeln(`\x1b[31m错误：${message}\x1b[0m`)
+      // 从未打开成功（认证失败、目标不可达）时终端里那行红字容易被忽略，补一条通知
+      if (!openedOnce) handleError(`终端连接失败：${message}`)
+    },
   })
 
-  // 用户输入透传，WS 未连接时缓冲，重连后 flush。
-  // 分帧发送：整段粘贴只有一次 onData，单帧过大会被后端按超限掐断整个连接。
-  const sendInput = (data: string): void => {
-    for (const part of chunkInput(data)) {
-      if (!send(inputMessage(part))) {
-        inputBuffer += part
-      }
+  /** sendInput 把用户输入切成数据帧发出。
+   *  整段粘贴 xterm 只回调一次 onData，不分帧会把几十 MB 塞进一帧，
+   *  服务端按超限掐断整条连接（表现为「粘贴长文本就断线」）。
+   */
+  function sendInput(data: string): void {
+    const bytes = encoder.encode(data)
+    if (!bytes.byteLength) return
+    // 交互敲键走同步快路径：不进队列、不等微任务，手感与原生终端一致
+    if (!outbound.length && bytes.byteLength <= frameBudget && channel.frame(bytes)) return
+    if (outboundBytes + bytes.byteLength > MAX_OUTBOUND_BYTES) {
+      term.writeln('\x1b[33m[输入缓冲已满，本次输入已丢弃，请分段粘贴]\x1b[0m')
+      return
     }
+    for (const part of splitBytes(bytes, frameBudget)) {
+      outbound.push(part)
+      outboundBytes += part.byteLength
+    }
+    void pumpOutbound()
   }
   term.onData(sendInput)
 
-  // watch status，重连成功后 flush 缓冲的输入
-  const stopStatusWatch = watch(status, (s) => {
-    if (s === 'connected' && inputBuffer) {
-      const pending = inputBuffer
-      inputBuffer = ''
-      sendInput(pending)
+  /** pumpOutbound 逐帧发出缓冲：每帧之间等浏览器发送缓冲降回水位。
+   *  一次性把整段粘贴塞进 ws.send() 会让发送队列无界增长，慢链路下标签页直接卡死。
+   *  链路断开时 frame() 返回 false，整体留着等通道重开，既不重发也不丢。
+   */
+  async function pumpOutbound(): Promise<void> {
+    if (pumping) return
+    pumping = true
+    try {
+      while (outbound.length) {
+        const head = outbound[0]
+        if (!channel.frame(head)) return
+        outbound.shift()
+        outboundBytes -= head.byteLength
+        await channel.waitDrain()
+      }
+    } finally {
+      pumping = false
     }
+  }
+
+  function clearOutbound(): void {
+    outbound = []
+    outboundBytes = 0
+  }
+
+  const stopStateWatch = watch(channel.state, (s) => {
+    if (s === 'open') void pumpOutbound()
   })
+
+  /** guardPaste 粘贴入口：超过阈值的先确认，再提示单行截断风险，最后交回 term.paste()。
+   *  只交原文给 term.paste()：xterm 内部按当前 DEC mode 2004（bracketed paste）
+   *  决定是否包裹 ESC[200~/ESC[201~。手写包裹会在未启用该模式的 shell/vim 里
+   *  把转义序列当字面量显示，故禁止在此拼接转义序列。
+   */
+  async function guardPaste(text: string): Promise<void> {
+    const bytes = encoder.encode(text).byteLength
+    const lines = text.split(/[\r\n]/).length
+    if (bytes > PASTE_CONFIRM_BYTES || lines > PASTE_CONFIRM_LINES) {
+      const kb = Math.round(bytes / 1024)
+      if (!(await confirm(`粘贴 ${lines} 行 / ${kb} KB 到终端？`))) {
+        term.writeln('\x1b[33m[已取消粘贴]\x1b[0m')
+        return
+      }
+    }
+    if (maxLineBytes(text) > MAX_CANON_BYTES) {
+      term.writeln('\x1b[33m[提示：单行超过约 4000 字节会被远端终端截断]\x1b[0m')
+    }
+    term.paste(text)
+    term.focus()
+  }
+
+  // Ctrl+V 落在 xterm 的内部 textarea 上：在容器捕获阶段接管，才能在字节进入
+  // 发送队列之前拦下来（等 onData 回调时已经发出去了）。
+  const handlePaste = (ev: ClipboardEvent): void => {
+    const text = ev.clipboardData?.getData('text') ?? ''
+    if (!text) return // 让 xterm 自己处理（读不到文本时不该吞掉粘贴）
+    ev.preventDefault()
+    ev.stopPropagation()
+    void guardPaste(text)
+  }
+  container.addEventListener('paste', handlePaste, true)
 
   // 右键菜单：有选区则复制，无选区则粘贴（屏蔽浏览器默认右键菜单）。
   // 非安全上下文（HTTP）下 navigator.clipboard 不可用，降级到 execCommand。
@@ -142,23 +231,22 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
     }
     const text = await readFromClipboard()
     if (!text) return
-    // 只交原文给 term.paste()：xterm 内部按当前 DEC mode 2004（bracketed paste）
-    // 决定是否包裹 ESC[200~/ESC[201~。手写包裹会在未启用该模式的 shell/vim 里
-    // 把转义序列当字面量显示，故禁止在此拼接转义序列。
-    term.paste(text)
-    term.focus()
+    await guardPaste(text)
   }
   container.addEventListener('contextmenu', handleContextMenu)
 
-  // 首次连接即发送当前尺寸，避免 v2 的 80×24 默认值导致换行错乱。
-  const onResize = () => {
+  // 布局变化后把新行列数告知后端（openData 自带 cols/rows，所以重连无需补发）。
+  const sendResize = (): void => {
+    channel.notify('resize', { cols: term.cols, rows: term.rows })
+  }
+  const onResize = (): void => {
     fitAddon.fit()
-    send(resizeMessage(term.cols, term.rows))
+    sendResize()
   }
 
   // 移除冗余的 window.addEventListener('resize')，
   // ResizeObserver 已覆盖容器尺寸变化（含 window resize 导致的变化）。
-  const resizeObserver = new ResizeObserver(() => onResize())
+  const resizeObserver = new ResizeObserver(onResize)
   resizeObserver.observe(container)
 
   // 监听终端字体/主题变化，热更新 xterm 实例并重新 fit
@@ -171,27 +259,40 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
       term.options.theme = getTerminalTheme()
       // 字体/主题变化影响字符宽高，需重新 fit 同步行列数到后端
       fitAddon.fit()
-      send(resizeMessage(term.cols, term.rows))
+      sendResize()
     },
     { deep: true },
   )
 
-  connect()
-  onResize() // 立即同步一次
+  // 界面状态 = 链路状态 + 通道状态：WS 握手成功不等于 shell 已就绪。
+  const status = computed(() => uiStatus(hub.status.value, channel.state.value))
 
   onUnmounted(() => {
-    stopStatusWatch()
+    stopStateWatch()
     stopSettingsWatch()
     container.removeEventListener('contextmenu', handleContextMenu)
+    container.removeEventListener('paste', handlePaste, true)
     resizeObserver.disconnect()
-    close()
+    channel.close()
     term.dispose()
-    // 优化：tab 关闭时清除 sessionId 缓存。
-    // WS 关闭后后端会话将进入 60s 空闲回收，重新打开 tab 应创建新会话而非尝试 reattach 已失效的会话。
+    // tab 关闭时清除 sessionId 缓存：close 之后后端会话进入空闲回收，
+    // 重新打开 tab 应当是新会话，而不是去 reattach 一个已失效的 shell。
     clearSessionId(node)
   })
 
   return { term, status }
+}
+
+/** maxLineBytes 返回最长一行的 UTF-8 字节数（tty 按行截断，不看总长）。
+ *  一行最多 4 字节/字符，故按字符数上界先跳过不可能胜出的行，避免整段粘贴逐行编码。
+ */
+function maxLineBytes(text: string): number {
+  let max = 0
+  for (const line of text.split(/[\r\n]/)) {
+    if (line.length * 4 <= max) continue
+    max = Math.max(max, encoder.encode(line).byteLength)
+  }
+  return max
 }
 
 export function getTerminalTheme(): ITheme {

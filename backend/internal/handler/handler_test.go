@@ -36,10 +36,8 @@ func TestRegister(t *testing.T) {
 		path   string
 	}{
 		{"GET", "/"},
-		{"POST", "/api/ssh/test"},
 		{"POST", "/api/ssh/batch"},
-		{"GET", "/ws/ssh"},
-		{"GET", "/ws/sftp"},
+		{"GET", "/ws"},
 		{"POST", "/api/sftp/download"},
 	}
 
@@ -58,7 +56,7 @@ func TestRegister(t *testing.T) {
 func TestRegister_MethodRouting(t *testing.T) {
 	mux := newTestMux(t)
 
-	for _, p := range []string{"/api/ssh/test", "/api/ssh/batch", "/api/sftp/download"} {
+	for _, p := range []string{"/api/ssh/batch", "/api/sftp/download"} {
 		req := httptest.NewRequest("GET", p+"?node=%7B%7D&path=/x.txt", nil)
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)

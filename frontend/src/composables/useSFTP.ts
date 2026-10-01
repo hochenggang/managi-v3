@@ -1,40 +1,29 @@
-// useSFTP：SFTP 文件管理 composable。
-// v3 协议：统一 {type, data} envelope。服务端登录成功后主动 list /，无需前端首请求。
-// 设计见 ../../../design-v3.md §6.4 §6.5。
+// useSFTP：一路文件管理标签 = 共享 /ws 上的一路 SFTP 通道。
+//
+// 目录操作走控制面（一问一答，靠 seq 关联），文件字节走数据面（分片帧 + FLAG_END）。
+// 断线重连由枢纽负责：通道重开成功后把用户当前所在目录重新列出来即可。
+// 大文件不走 WS：见 downloadViaHTTP（HTTP Range 流式，避免浏览器内存累积）。
 
-import { ref } from 'vue'
-import { useWebSocket } from './useWebSocket'
-import { parseWSMessage, type WSMessage, type WSLoginResult, type WSError } from '@/protocol/ws'
-import {
-  sftpLogin,
-  sftpList,
-  sftpMkdir,
-  sftpDelete,
-  sftpDownload,
-  sftpUploadInit,
-  sftpUploadComplete,
-  type SFTPFile,
-  type SFTPListData,
-  type SFTPDownloadStartData,
-  type SFTPCompleteData,
-  type SFTPUploadInitData,
-} from '@/protocol/sftp'
-import type { ApiNode } from '@/protocol/types'
+import { computed, ref, watch } from 'vue'
+import { uiStatus, useWSHub } from './useWSHub'
 import { downloadWithRange } from '@/api'
-import { handleError } from '@/helper'
+import { handleError, toErrorMessage } from '@/helper'
+import type { ErrorData, OpenResponse, OpenSFTP } from '@/protocol/ws'
+import type { DownloadData, LSData, SFTPFile, UploadData } from '@/protocol/sftp'
+import type { ApiNode } from '@/protocol/types'
 
-const CHUNK_SIZE = 1 << 20 // 1MB
-const DEFAULT_TIMEOUT_MS = 30000
-const CHUNK_TIMEOUT_MS = 5 * 60 * 1000 // 分片写入可能跨慢网/慢盘，给 5 分钟
-// WS 下载缓冲上限。超此大小中止并提示走 HTTP Range 流式下载，避免浏览器 OOM。
-const DOWNLOAD_BUFFER_LIMIT = 256 * 1024 * 1024 // 256MB
-// 超过此大小的文件应改走 HTTP Range 流式下载，而非 WS 缓冲。导出供调用方统一判定。
-export const LARGE_FILE_THRESHOLD = 100 * 1024 * 1024 // 100MB
+// WS 下载缓冲上限：超此大小中止并提示走 HTTP Range 流式下载，避免浏览器 OOM。
+const DOWNLOAD_BUFFER_LIMIT = 256 * 1024 * 1024
+// 超过此大小的文件应改走 HTTP Range 流式下载。导出供调用方统一判定。
+export const LARGE_FILE_THRESHOLD = 100 * 1024 * 1024
+// FLAG_END 空帧的载荷：只用来表达「写完了，请落定」。
+const NO_BYTES = new Uint8Array(0)
 
-interface SFTPOperationResult {
-  success: boolean
-  message?: string
-  data?: unknown
+type StreamKind = 'upload' | 'download'
+
+interface Stream {
+  kind: StreamKind
+  settle: (err: Error | null) => void
 }
 
 export function useSFTP(node: ApiNode) {
@@ -44,327 +33,310 @@ export function useSFTP(node: ApiNode) {
   const uploadProgress = ref(0)
   const downloadProgress = ref(0)
 
-  let pendingResolve: ((r: SFTPOperationResult) => void) | null = null
-  let pendingReject: ((e: Error) => void) | null = null
-  let pendingTimer: ReturnType<typeof setTimeout> | null = null
-  // seq 关联：每个请求分配递增序号，响应按 seq 匹配；迟到的旧响应（seq 不匹配）被丢弃。
-  // 取代原 discardNextResponse 兜底（C4），根因修复请求-响应错配风险。
-  let seqCounter = 0
-  let pendingSeq = 0
-  let downloadBuffer: Uint8Array[] = []
-  let downloadTotalSize = 0
-  let downloadReceivedSize = 0
-  // 下载激活标志，仅在 download_start → complete 期间为 true，避免前次下载的延迟二进制帧污染新下载
-  let downloadActive = false
+  const hub = useWSHub()
+  // 一路通道同时只跑一路字节流（上传或下载）：交错两路只会得到内容错乱的文件，
+  // 服务端同样按此假设（第二个 upload 请求会接管前一路）。
+  let stream: Stream | null = null
+  let chunks: Uint8Array[] = []
+  let received = 0
+  let expectedTotal = 0
+  let downloadName = 'download'
+  let openedOnce = false
 
-  /** rejectPending 拒绝并清理 pending Promise。供 close/onClose/超时调用。 */
-  function rejectPending(err: Error): void {
-    if (pendingTimer) {
-      clearTimeout(pendingTimer)
-      pendingTimer = null
-    }
-    if (pendingResolve) {
-      pendingResolve = null
-    }
-    if (pendingReject) {
-      const fn = pendingReject
-      pendingReject = null
-      fn(err)
-    }
-  }
-
-  function resolvePending(msg: WSMessage): void {
-    // seq 关联：响应必须匹配当前等待的请求序号，否则是迟到的旧响应，丢弃。
-    // 旧后端不带 seq 时回退按到达顺序 resolve（向后兼容）。
-    if (msg.seq !== undefined && msg.seq !== pendingSeq) return
-    if (!pendingResolve) return
-    const fn = pendingResolve
-    pendingResolve = null
-    pendingReject = null
-    if (pendingTimer) {
-      clearTimeout(pendingTimer)
-      pendingTimer = null
-    }
-    fn({
-      success: msg.type !== 'error',
-      message: msg.type === 'error' ? (msg.data as WSError)?.message : undefined,
-      data: msg.data,
-    })
-  }
-
-  const { status, connected, connect, send, close: wsClose, markFailed, markLoginSuccess } = useWebSocket('/ws/sftp', {
-    authPayload: sftpLogin(node),
-    // 原 maxReconnect:3 过低，网络抖动时 SFTP 早早放弃。后端 SSH 连接池维持会话，
-    // 提高到 10 与终端一致。登录失败由 markFailed 抑制重连。
-    maxReconnect: 10,
-    onClose: () => {
-      loading.value = false
-      downloadActive = false
-      // WS 断开时 reject pending Promise，避免用户卡住等待超时
-      rejectPending(new Error('WebSocket closed'))
+  const channel = hub.attach({
+    openData: (): OpenSFTP => ({ kind: 'sftp', node }),
+    onOpen: (resp: OpenResponse) => {
+      // 首开用服务端报的 home：硬编码 '/' 会让没有根目录读权限的账号一进来就报错。
+      // 重连后回到用户当前所在目录，而不是把他弹回主目录。
+      const target = openedOnce ? currentPath.value : resp.home || '/'
+      openedOnce = true
+      list(target).catch((e) => handleError(toErrorMessage(e)))
     },
-    onText: (data) => {
-      const msg = parseWSMessage(data)
-      if (!msg) return
-      switch (msg.type) {
-        case 'login': {
-          const r = msg.data as WSLoginResult
-          if (r && !r.success) {
-            loading.value = false
-            handleError(`登录失败：${r.message ?? 'unknown'}`)
-            // 用 markFailed 替代 close，设置 first_failed 状态而非 disconnected，
-            // UI 可区分"登录失败"与"主动关闭"
-            markFailed()
-          } else if (r && r.success) {
-            // 登录成功才置 connected（与 useTerminal 一致，避免 WS 握手即显示已连接）
-            markLoginSuccess()
-          }
+    onData: (payload, end) => {
+      // 只接纳下载在跑时的帧：服务端在上传方向不该发数据帧，误投的丢掉。
+      if (!stream || stream.kind !== 'download') return
+      if (payload.byteLength) {
+        if (received + payload.byteLength > DOWNLOAD_BUFFER_LIMIT) {
+          failDownload(`文件超过 ${DOWNLOAD_BUFFER_LIMIT / 1024 / 1024}MB，请改用流式下载`)
           return
         }
-        case 'list': {
-          // 服务端登录后主动推送 list /，或响应客户端 list 请求
-          const d = msg.data as SFTPListData
-          if (d) {
-            files.value = d.files
-            if (d.path) currentPath.value = d.path
-          }
-          loading.value = false
-          resolvePending(msg)
-          return
-        }
-        case 'download_start':
-          downloadTotalSize = (msg.data as SFTPDownloadStartData)?.total ?? 0
-          // 标记下载激活，后续二进制帧才会被接纳
-          downloadActive = true
-          return
-        case 'complete': {
-          const d = msg.data as SFTPCompleteData
-          const blob = new Blob(downloadBuffer as BlobPart[])
-          triggerDownload(blob, d?.filename ?? 'download')
-          downloadBuffer = []
-          downloadActive = false
-          resolvePending(msg)
-          return
-        }
-        case 'chunk_ack':
-          resolvePending(msg)
-          return
-        case 'error':
-          loading.value = false
-          // 错误时关闭下载激活标志，避免后续二进制帧误纳入
-          downloadActive = false
-          handleError((msg.data as WSError)?.message ?? 'SFTP error')
-          resolvePending(msg)
-          return
-        case 'ok':
-          resolvePending(msg)
-          return
-        case 'pong':
-          return
-        default:
-          resolvePending(msg)
+        chunks.push(payload)
+        received += payload.byteLength
+        downloadProgress.value = percent(received, expectedTotal)
       }
+      if (!end) return
+      downloadProgress.value = 100
+      triggerDownload(new Blob(chunks as BlobPart[]), downloadName)
+      settleStream(null)
+      resetDownload()
     },
-    onBinary: (data) => {
-      // 仅在被激活的下载期间接纳二进制帧，避免前次下载延迟帧污染新下载
-      if (!downloadActive) return
-      // 缓冲上限保护，超限中止并提示走 HTTP Range，避免浏览器 OOM
-      if (downloadReceivedSize + data.byteLength > DOWNLOAD_BUFFER_LIMIT) {
-        handleError(`文件超过 ${DOWNLOAD_BUFFER_LIMIT / 1024 / 1024}MB，请使用 downloadViaHTTP 流式下载`)
-        downloadBuffer = []
-        downloadReceivedSize = 0
-        downloadTotalSize = 0
-        downloadActive = false
-        wsClose()
+    onNotify: (type, data) => {
+      if (type === 'upload_end') {
+        uploadProgress.value = 100
+        settleStream(null)
         return
       }
-      downloadBuffer.push(new Uint8Array(data))
-      downloadReceivedSize += data.byteLength
-      downloadProgress.value = downloadTotalSize
-        ? Math.min(100, Math.round((downloadReceivedSize / downloadTotalSize) * 100))
-        : 0
+      if (type !== 'error') return
+      const message = (data as ErrorData | undefined)?.message ?? 'SFTP 出错'
+      // 通道级错误一律判给在途传输（写盘失败、下载被截断），否则调用方会一直等落定信号；
+      // 没有传输在跑时才是真的没主的事，出声让用户看到。
+      if (stream) settleStream(new Error(message))
+      else handleError(message)
     },
   })
 
-  /** close 包装：手动关闭时先 reject pending Promise，再关闭 WS。
-   *  修复 B5：原 close() 设 ws.onclose=null 导致 onClose 回调永不触发，
-   *  pending Promise 永不 reject，组件卸载时泄漏。
-   */
-  function close(): void {
-    rejectPending(new Error('SFTP closed manually'))
-    downloadActive = false
-    wsClose()
-  }
+  // 断线/通道重开：在途传输判失败。服务端保留了 .part，重连后重发同一文件即从续传点继续。
+  const stopStateWatch = watch(channel.state, (s) => {
+    if (s !== 'open') settleStream(new Error('连接已断开'))
+  })
 
-  loading.value = true
-  connect()
+  const status = computed(() => uiStatus(hub.status.value, channel.state.value))
 
-  /** sendAndAwait 发送并等待服务端响应（resolve 时 clear 超时，避免泄漏）。
-   *  @param timeoutMs 等待响应的超时时间，分片上传等耗时操作可传入更大值。
-   *
-   *  每个请求分配递增 seq 并注入到消息（文本 JSON 注入，二进制分片帧前置 8 字节），
-   *  响应按 seq 匹配；迟到的旧响应（seq 不匹配）被 resolvePending 丢弃。
-   *  串行语义保留：前序未完成再发请求直接抛错。
+  // ===== 字节流占位 =====
+
+  /** startStream 占用这路字节流并返回等待落定的 Promise。
+   *  必须在发出请求前占位：响应之后数据帧可能先到，届时再无主就丢掉了。
    */
-  function sendAndAwait(sendData: string | ArrayBuffer, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<SFTPOperationResult> {
-    if (pendingResolve) {
-      return Promise.reject(new Error('SFTP busy: previous operation pending'))
-    }
-    const seq = ++seqCounter
-    pendingSeq = seq
-    const payload = typeof sendData === 'string'
-      ? injectTextSeq(sendData, seq)
-      : prependChunkSeq(sendData, seq)
-    return new Promise((resolve, reject) => {
-      pendingResolve = resolve
-      pendingReject = reject
-      pendingTimer = setTimeout(() => {
-        pendingResolve = null
-        pendingReject = null
-        pendingTimer = null
-        reject(new Error('SFTP request timeout'))
-      }, timeoutMs)
-      if (!send(payload)) {
-        pendingResolve = null
-        pendingReject = null
-        if (pendingTimer) {
-          clearTimeout(pendingTimer)
-          pendingTimer = null
-        }
-        reject(new Error('WebSocket not connected'))
-      }
+  function startStream(kind: StreamKind): Promise<void> {
+    if (stream) throw new Error('上一个传输尚未完成')
+    let settle: (err: Error | null) => void = () => {}
+    const done = new Promise<void>((resolve, reject) => {
+      settle = (err) => (err ? reject(err) : resolve())
     })
+    // 失败常常是调用方自己抛出来的（那条路径上没人 await done）：先认领这里的 rejection，
+    // 否则传输失败会附带一条无关的 unhandled rejection 噪声。
+    done.catch(() => {})
+    stream = { kind, settle }
+    return done
   }
 
-  // injectTextSeq 把 seq 注入到已序列化的文本 envelope（JSON 解析 + 重序列化）。
-  function injectTextSeq(s: string, seq: number): string {
-    const env = JSON.parse(s) as Record<string, unknown>
-    env.seq = seq
-    return JSON.stringify(env)
+  /** settleStream 了结当前字节流：err 为空即成功落定。 */
+  function settleStream(err: Error | null): void {
+    const s = stream
+    if (!s) return
+    stream = null
+    s.settle(err)
   }
 
-  // prependChunkSeq 在二进制分片帧前置 8 字节大端序 seq，与后端 parseChunkFrame 对齐。
-  function prependChunkSeq(frame: ArrayBuffer, seq: number): ArrayBuffer {
-    const out = new ArrayBuffer(8 + frame.byteLength)
-    new DataView(out).setBigUint64(0, BigInt(seq))
-    new Uint8Array(out, 8).set(new Uint8Array(frame))
-    return out
+  function resetDownload(): void {
+    chunks = []
+    received = 0
+    expectedTotal = 0
+    downloadName = 'download'
+    downloadProgress.value = 0
   }
+
+  function failDownload(message: string): void {
+    resetDownload()
+    settleStream(new Error(message))
+  }
+
+  // ===== 目录操作 =====
 
   async function list(path: string): Promise<void> {
+    if (!path) throw new Error('路径不能为空')
     loading.value = true
     try {
-      const r = await sendAndAwait(sftpList(path))
-      if (!r.success) throw new Error(r.message)
+      const d = await channel.request<LSData>('ls', { path })
+      files.value = d?.files ?? []
+      currentPath.value = d?.path || path
     } finally {
       loading.value = false
     }
   }
 
-  // v3 断点续传上传：upload_init 查询 offset → 二进制帧头发送分片 → upload_complete。
-  // remoteDir 为远程目标目录，文件名取自 file.name。
+  async function mkdir(path: string): Promise<void> {
+    await channel.request('mkdir', { path })
+  }
+
+  async function del(path: string): Promise<void> {
+    await channel.request('rm', { path })
+  }
+
+  // ===== 上传：upload 请求 → 数据面分片 → FLAG_END 落定 → upload_end =====
+
   async function upload(remoteDir: string, file: File): Promise<void> {
     uploadProgress.value = 0
-    const init = await sendAndAwait(sftpUploadInit(remoteDir, file.name, file.size, CHUNK_SIZE))
-    if (!init.success) throw new Error(init.message)
-    const initData = init.data as SFTPUploadInitData
-    const offset = initData?.offset ?? 0
-    // 切片大小以服务端下发为准（MANAGI_SFTP_CHUNK_SIZE）；旧后端不带该字段时用本地默认值。
-    // 续传点 .part 不必与新分片对齐：服务端只按 offset 顺序落盘，分片边界无所谓。
-    const chunkSize = initData?.chunk_size && initData.chunk_size > 0 ? initData.chunk_size : CHUNK_SIZE
-    let idx = Math.floor(offset / chunkSize)
-    for (let pos = offset; pos < file.size; pos += chunkSize) {
-      const chunk = file.slice(pos, pos + chunkSize)
-      const buf = await chunk.arrayBuffer()
-      const frame = buildChunkFrame(initData!.upload_id, idx, pos, new Uint8Array(buf))
-      const ack = await sendAndAwait(frame, CHUNK_TIMEOUT_MS)
-      if (!ack.success) throw new Error(ack.message)
-      // 进度用实际写入字节数，封顶 100%（修复 A7：小文件进度爆表）
-      const written = Math.min(pos + buf.byteLength, file.size)
-      uploadProgress.value = Math.round((written / file.size) * 100)
-      idx++
+    const done = startStream('upload')
+    try {
+      const init = await channel.request<UploadData>('upload', {
+        path: remoteDir,
+        filename: file.name,
+        size: file.size,
+      })
+      // 切片大小由服务端定（同时是它的单帧上限），客户端不自作主张
+      const chunkSize = init?.chunk_size ?? 0
+      if (!(chunkSize > 0)) throw new Error(`upload: 服务端给出非法切片大小 ${chunkSize}`)
+
+      for (let pos = init.offset ?? 0; pos < file.size; pos += chunkSize) {
+        const bytes = new Uint8Array(await file.slice(pos, pos + chunkSize).arrayBuffer())
+        if (!channel.frame(bytes)) throw new Error('连接已断开')
+        uploadProgress.value = percent(pos + bytes.byteLength, file.size)
+        // 跟着网络走：慢链路下不能把整个文件堆进浏览器发送缓冲
+        await channel.waitDrain()
+      }
+      if (!channel.frame(NO_BYTES, true)) throw new Error('连接已断开')
+      await done
+    } catch (e) {
+      settleStream(toError(e))
+      throw e
     }
-    const done = await sendAndAwait(sftpUploadComplete(initData!.upload_id))
-    if (!done.success) throw new Error(done.message)
   }
+
+  // ===== 下载：download 请求 → 数据面分片直到 FLAG_END =====
 
   async function download(remotePath: string): Promise<void> {
-    downloadProgress.value = 0
-    downloadBuffer = []
-    downloadReceivedSize = 0
-    downloadTotalSize = 0
-    const r = await sendAndAwait(sftpDownload(remotePath))
-    if (!r.success) throw new Error(r.message)
+    resetDownload()
+    const done = startStream('download')
+    try {
+      const d = await channel.request<DownloadData>('download', { path: remotePath })
+      downloadName = d?.filename || basename(remotePath)
+      expectedTotal = d?.total ?? 0
+      await done
+    } catch (e) {
+      settleStream(toError(e))
+      resetDownload()
+      throw e
+    }
   }
 
-  /** downloadViaHTTP 大文件流式下载（HTTP Range，分块触发 Blob 下载，避免内存累积）。
-   *  修复 B8：WS 下载会将全部 chunk 累积到内存，GB 级文件会 OOM。
-   *  调用方在文件已知较大（超 LARGE_FILE_THRESHOLD）时应直接使用本方法。
-   *  修复 B29：错误/超限提前返回时重置进度并释放 reader，避免残留非零进度与流悬挂。
+  /** downloadViaHTTP 大文件流式下载（HTTP Range）。
+   *  WS 下载会把整份文件缓冲在内存里，GB 级文件必然 OOM；调用方在文件已知较大
+   *  （超 LARGE_FILE_THRESHOLD）时应直接用本方法。
+   *  有 File System Access 就逐块写进用户选定的文件（字节不进内存），
+   *  没有才退回缓冲成 Blob 的老路——那条路确实吃内存，所以上限必须留着。
    */
   async function downloadViaHTTP(remotePath: string): Promise<void> {
     downloadProgress.value = 0
-    const { total, stream } = await downloadWithRange(node, remotePath, 0)
-    const chunks: Uint8Array[] = []
-    let received = 0
-    const reader = stream.getReader()
-    let succeeded = false
-    try {
-      for (;;) {
-        const { done, value } = await reader.read()
-        if (done) break
-        if (value) {
-          chunks.push(value)
-          received += value.byteLength
-          downloadProgress.value = total ? Math.min(100, Math.round((received / total) * 100)) : 0
-          // 流式路径同样设上限，避免极端大文件 OOM
-          if (received > DOWNLOAD_BUFFER_LIMIT) {
-            handleError(`文件超过 ${DOWNLOAD_BUFFER_LIMIT / 1024 / 1024}MB 下载上限`)
-            return
-          }
-        }
+    const name = basename(remotePath)
+    const pick = saveFilePicker()
+    let handle: FileHandle | null = null
+    if (pick) {
+      // 先弹保存框：showSaveFilePicker 要求用户手势，而在手势过期前未必等得到首字节
+      try {
+        handle = await pick({ suggestedName: name })
+      } catch (e) {
+        if (isUserCancel(e)) return // 用户按取消不是故障，静默收尾
+        throw e
       }
-      succeeded = true
-    } finally {
-      reader.releaseLock()
-      // 失败/超限时重置进度，避免残留值影响下次下载显示
-      if (!succeeded) downloadProgress.value = 0
     }
-    const blob = new Blob(chunks as BlobPart[])
-    triggerDownload(blob, remotePath.split('/').pop() ?? 'download')
+    try {
+      const { total, stream } = await downloadWithRange(node, remotePath, 0)
+      const onBytes = (got: number): void => {
+        downloadProgress.value = percent(got, total)
+      }
+      if (handle) await writeToDisk(handle, stream, onBytes)
+      else await saveViaBlob(stream, name, onBytes)
+      downloadProgress.value = 100
+    } catch (e) {
+      downloadProgress.value = 0
+      throw e
+    }
   }
 
-  async function mkdir(remotePath: string): Promise<void> {
-    const r = await sendAndAwait(sftpMkdir(remotePath))
-    if (!r.success) throw new Error(r.message)
-  }
-
-  async function del(remotePath: string): Promise<void> {
-    const r = await sendAndAwait(sftpDelete(remotePath))
-    if (!r.success) throw new Error(r.message)
+  function close(): void {
+    stopStateWatch()
+    settleStream(new Error('文件管理已关闭'))
+    channel.close()
   }
 
   return {
     currentPath, files, loading, uploadProgress, downloadProgress,
-    connected, status, list, upload, download, downloadViaHTTP, mkdir, del, close,
+    status, list, upload, download, downloadViaHTTP, mkdir, del, close,
   }
 }
 
-// buildChunkFrame 构造二进制分片帧（与后端 parseChunkFrame 对齐）。
-// 帧格式（大端序）：[4字节 upload_id_len][upload_id][4字节 chunk_index][8字节 offset][8字节 data_len][data]
-function buildChunkFrame(uploadId: string, chunkIndex: number, offset: number, data: Uint8Array): ArrayBuffer {
-  const idBytes = new TextEncoder().encode(uploadId)
-  const headerLen = 4 + idBytes.length + 4 + 8 + 8
-  const buf = new ArrayBuffer(headerLen + data.length)
-  const view = new DataView(buf)
-  let pos = 0
-  view.setUint32(pos, idBytes.length); pos += 4
-  new Uint8Array(buf, pos, idBytes.length).set(idBytes); pos += idBytes.length
-  view.setUint32(pos, chunkIndex); pos += 4
-  view.setBigUint64(pos, BigInt(offset)); pos += 8
-  view.setBigUint64(pos, BigInt(data.length)); pos += 8
-  new Uint8Array(buf, pos, data.length).set(data)
-  return buf
+/** percent 进度百分比：封顶 100（续传点与分片边界不总是对齐），总量未知时给 0。 */
+function percent(done: number, total: number): number {
+  return total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0
+}
+
+/** forEachChunk 逐块交给回调，读完释放 reader。流式下载的两条落盘路共用这个骨架。 */
+async function forEachChunk(
+  body: ReadableStream<Uint8Array>,
+  fn: (chunk: Uint8Array) => Promise<void>,
+): Promise<void> {
+  const reader = body.getReader()
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (value) await fn(value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+}
+
+// File System Access 里我们只用这三个成员，不必拉进整套 DOM 类型定义。
+interface DiskWritable {
+  write(data: Uint8Array): Promise<void>
+  close(): Promise<void>
+  abort(): Promise<void>
+}
+interface FileHandle {
+  createWritable(): Promise<DiskWritable>
+}
+
+function saveFilePicker(): ((opts: { suggestedName: string }) => Promise<FileHandle>) | null {
+  const w = window as unknown as { showSaveFilePicker?: (opts: { suggestedName: string }) => Promise<FileHandle> }
+  return typeof w.showSaveFilePicker === 'function' ? w.showSaveFilePicker : null
+}
+
+function isUserCancel(e: unknown): boolean {
+  return (e as { name?: string } | undefined)?.name === 'AbortError'
+}
+
+/** writeToDisk 把响应体直接写进用户选定的文件：字节过完即 close，全程不堆在内存里。
+ *  中途失败必须 abort()——否则半截文件会被当成完整的一份留在盘上。
+ */
+async function writeToDisk(
+  handle: FileHandle,
+  body: ReadableStream<Uint8Array>,
+  onBytes: (got: number) => void,
+): Promise<void> {
+  const writable = await handle.createWritable()
+  let got = 0
+  try {
+    await forEachChunk(body, async (chunk) => {
+      await writable.write(chunk)
+      got += chunk.byteLength
+      onBytes(got)
+    })
+    await writable.close()
+  } catch (e) {
+    await writable.abort().catch(() => {})
+    throw e
+  }
+}
+
+/** saveViaBlob 旧路径：缓冲成 Blob 再用 <a download> 触发浏览器保存。
+ *  整份文件都在内存里，所以超过 DOWNLOAD_BUFFER_LIMIT 就中止。
+ */
+async function saveViaBlob(
+  body: ReadableStream<Uint8Array>,
+  filename: string,
+  onBytes: (got: number) => void,
+): Promise<void> {
+  const parts: Uint8Array[] = []
+  let got = 0
+  await forEachChunk(body, async (chunk) => {
+    if (got + chunk.byteLength > DOWNLOAD_BUFFER_LIMIT) {
+      throw new Error(`文件超过 ${DOWNLOAD_BUFFER_LIMIT / 1024 / 1024}MB 下载上限`)
+    }
+    parts.push(chunk)
+    got += chunk.byteLength
+    onBytes(got)
+  })
+  triggerDownload(new Blob(parts as BlobPart[]), filename)
+}
+
+function basename(p: string): string {
+  return p.split('/').filter(Boolean).pop() ?? 'download'
+}
+
+function toError(e: unknown): Error {
+  return e instanceof Error ? e : new Error(toErrorMessage(e))
 }
 
 function triggerDownload(blob: Blob, filename: string): void {

@@ -90,11 +90,9 @@
         "back": "Back",
         "hello": "Hover over a node on the left and click the terminal icon to open a connection.",
         "idle": "No node connected",
-        "reattached": "Previous session restored",
         "connecting": "Connecting…",
-        "firstFailed": "Connection failed",
         "reconnecting": "Reconnecting…",
-        "reconnectFailed": "Reconnect failed"
+        "failed": "Connection failed"
     },
     "finder": {
         "actions": {
@@ -112,7 +110,6 @@
         "upDir": "..",
         "connecting": "Connecting",
         "connected": "Connected",
-        "disconnected": "Connection lost",
         "reconnecting": "Reconnecting soon",
         "error": "An error occurred",
         "downloaded": "Download completed",

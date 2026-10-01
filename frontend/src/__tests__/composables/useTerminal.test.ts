@@ -1,28 +1,39 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
-import { defineComponent, h, reactive, ref } from 'vue'
+import { defineComponent, h, nextTick, reactive } from 'vue'
 import type { ApiNode } from '@/protocol/types'
+import type { FakeChannel, FakeHub } from '../helpers/fakeHub'
+import { createFakeHub } from '../helpers/fakeHub'
 
 // vi.hoisted 确保 mock 在 vi.mock 工厂执行前已初始化
-// 使用 holder 模式：reactive 在 vi.hoisted 中不可用，故用 holder 延迟到 import 后初始化
-const { mockHandleError, mockSettingsHolder } = vi.hoisted(() => ({
+const { mockHandleError, mockConfirm, mockSettingsHolder, hubRef } = vi.hoisted(() => ({
   mockHandleError: vi.fn(),
+  mockConfirm: vi.fn().mockResolvedValue(true),
   mockSettingsHolder: { settings: null as any },
+  hubRef: { hub: null as any },
 }))
 
-vi.mock('@/helper', () => ({
+vi.mock('@/helper', async (importActual) => ({
+  ...(await importActual<typeof import('@/helper')>()),
   handleError: mockHandleError,
-  handleMsg: vi.fn(),
+}))
+
+// 确认框是全局单例对话框，单测里只关心「用户点了什么」
+vi.mock('@/composables/useConfirm', () => ({
+  useConfirm: () => ({ confirm: mockConfirm }),
 }))
 
 vi.mock('@/stores/settingsStore', () => ({
   useSettingsStore: () => mockSettingsHolder,
 }))
 
-// 捕获 Terminal 实例回调
+// 只替换 useWSHub() 这个取单例的入口，uiStatus 等纯函数保持真实实现
+vi.mock('@/composables/useWSHub', async (importActual) => ({
+  ...(await importActual<typeof import('@/composables/useWSHub')>()),
+  useWSHub: () => hubRef.hub,
+}))
+
 let onDataCb: ((data: string) => void) | null = null
-let onSelectionChangeCb: (() => void) | null = null
-// 捕获 Terminal 构造参数以断言字体设置
 let terminalCtorOpts: any = null
 const mockTerminal = {
   options: {} as Record<string, unknown>,
@@ -34,16 +45,13 @@ const mockTerminal = {
     onDataCb = cb
     return { dispose: vi.fn() }
   }),
-  onSelectionChange: vi.fn((cb: () => void) => {
-    onSelectionChangeCb = cb
-    return { dispose: vi.fn() }
-  }),
   dispose: vi.fn(),
   focus: vi.fn(),
   paste: vi.fn(),
   getSelection: vi.fn(() => ''),
-  cols: 80,
-  rows: 24,
+  clearSelection: vi.fn(),
+  cols: 100,
+  rows: 30,
 }
 
 // 注意：构造函数必须用普通 function（箭头函数不能 new），且返回对象时 new 会用该返回值。
@@ -66,38 +74,8 @@ vi.mock('@xterm/addon-web-links', () => ({
   },
 }))
 
-// 捕获 useWebSocket 回调与返回值（与 useSFTP.test.ts 同模式）
-let onTextCb: ((data: string) => void) | null = null
-let onBinaryCb: ((data: ArrayBuffer) => void) | null = null
-const mockSend = vi.fn()
-const mockConnect = vi.fn()
-const mockClose = vi.fn()
-const mockMarkFailed = vi.fn()
-const mockMarkLoginSuccess = vi.fn()
-// 用真实 ref 模拟 status，支持 watch 触发
-let mockStatus: ReturnType<typeof ref<string>>
+import { clearSessionId, useTerminal } from '@/composables/useTerminal'
 
-vi.mock('@/composables/useWebSocket', () => ({
-  useWebSocket: (_path: string, opts: any) => {
-    onTextCb = opts.onText
-    onBinaryCb = opts.onBinary
-    return {
-      status: mockStatus,
-      connected: { value: false },
-      connect: mockConnect,
-      send: mockSend,
-      close: mockClose,
-      markFailed: mockMarkFailed,
-      markLoginSuccess: mockMarkLoginSuccess,
-    }
-  },
-}))
-
-import { useTerminal } from '@/composables/useTerminal'
-import { wsMessage } from '@/protocol/ws'
-import { inputMessage, INPUT_CHUNK_CHARS } from '@/protocol/terminal'
-
-// 初始化 reactive settings 对象（vi.hoisted 中无法调用 reactive）
 function makeSettings(overrides: Partial<{ terminalFontSize: number; terminalFontFamily: string }> = {}) {
   return reactive({
     theme: 'nord' as const,
@@ -108,7 +86,6 @@ function makeSettings(overrides: Partial<{ terminalFontSize: number; terminalFon
   })
 }
 
-// 在所有测试开始前初始化 holder.settings
 mockSettingsHolder.settings = makeSettings()
 
 const node: ApiNode = {
@@ -123,14 +100,28 @@ const node: ApiNode = {
 // happy-dom 不提供 navigator.clipboard / isSecureContext，测试内按需打桩
 function stubClipboard(text: string, secure: boolean): void {
   Object.defineProperty(navigator, 'clipboard', {
-    value: { readText: vi.fn().mockResolvedValue(text), writeText: vi.fn().mockResolvedValue(undefined) },
+    value: {
+      readText: vi.fn().mockResolvedValue(text),
+      writeText: vi.fn().mockResolvedValue(undefined),
+    },
     configurable: true,
     writable: true,
   })
-  Object.defineProperty(window, 'isSecureContext', {
-    value: secure,
-    configurable: true,
+  Object.defineProperty(window, 'isSecureContext', { value: secure, configurable: true })
+}
+
+let fake!: FakeHub
+
+/** firePaste 派发一个带 clipboardData 的 paste 事件。
+ *  happy-dom 的 ClipboardEvent/DataTransfer 构造器不可用，只能手工挂视图。
+ */
+function firePaste(el: HTMLElement, text: string | undefined): Event {
+  const ev = new Event('paste', { bubbles: true, cancelable: true })
+  Object.defineProperty(ev, 'clipboardData', {
+    value: text === undefined ? null : { getData: () => text },
   })
+  el.dispatchEvent(ev)
+  return ev
 }
 
 function withSetup<T>(composable: () => T): { result: T; unmount: () => void } {
@@ -145,232 +136,322 @@ function withSetup<T>(composable: () => T): { result: T; unmount: () => void } {
   return { result, unmount: () => wrapper.unmount() }
 }
 
+/** 挂载终端并把 PTY 通道置为就绪（chunk_size 由服务端下发）。 */
+function mountTerminal(chunkSize = 4) {
+  const container = document.createElement('div')
+  const setup = withSetup(() => useTerminal(container, node))
+  const chan = fake.channel()
+  chan.ready({ kind: 'pty', chunk_size: chunkSize })
+  return { ...setup, container, chan }
+}
+
+/** 把分出去的帧按顺序拼回原文：分片既不能丢也不能重。 */
+function joinParts(parts: Uint8Array[]): string {
+  const all = new Uint8Array(parts.reduce((n, p) => n + p.byteLength, 0))
+  let offset = 0
+  for (const p of parts) {
+    all.set(p, offset)
+    offset += p.byteLength
+  }
+  return new TextDecoder().decode(all)
+}
+
+const sizes = (chan: { frames: Array<{ payload: Uint8Array }> }) =>
+  chan.frames.map((f) => f.payload.byteLength)
+
+/** 这路通道 open 负载里的会话 ID。 */
+function sessionIdOf(chan: FakeChannel): string {
+  const payload = chan.spec.openData()
+  if (payload.kind !== 'pty') throw new Error('终端通道应当是 PTY')
+  return payload.session_id
+}
+
+/** 等缓冲的帧全部发出：输入背压是逐帧 await 发送缓冲水位的，断言要等它跑完。 */
+async function settled(chan: FakeChannel, count: number): Promise<void> {
+  await vi.waitFor(() => expect(chan.frames).toHaveLength(count))
+}
+
 describe('useTerminal', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockConfirm.mockResolvedValue(true)
     onDataCb = null
-    onSelectionChangeCb = null
-    onTextCb = null
-    onBinaryCb = null
     terminalCtorOpts = null
-    // 每次测试重置 reactive settings 到默认值
     mockSettingsHolder.settings = makeSettings()
-    // 每次测试创建新的 status ref，默认 connected
-    mockStatus = ref('connected')
-    // mockSend 默认返回 true（WS 已连接），模拟正常发送
-    mockSend.mockReturnValue(true)
+    fake = createFakeHub()
+    hubRef.hub = fake
   })
 
-  // FitAddon + WebLinksAddon 各 loadAddon 一次；顺序即「先布局插件、后交互插件」
-  it('mount: creates Terminal, opens in container, loads FitAddon, calls connect', () => {
+  it('mount: 建 xterm、挂插件、聚焦，并向枢纽 attach 一路 PTY 通道', () => {
     const container = document.createElement('div')
     withSetup(() => useTerminal(container, node))
     expect(mockTerminal.open).toHaveBeenCalledWith(container)
     expect(mockTerminal.loadAddon).toHaveBeenCalledTimes(2)
     expect(mockTerminal.focus).toHaveBeenCalledTimes(1)
-    expect(mockConnect).toHaveBeenCalledTimes(1)
+    expect(fake.channel().spec.openData()).toMatchObject({
+      kind: 'pty',
+      node,
+      cols: 100,
+      rows: 30,
+      session_id: expect.any(String),
+    })
   })
 
-  // 回滚缓冲需大于 xterm 默认 1000 行，长输出运维场景才回得去
-  it('mount: enables scrollback beyond xterm default', () => {
-    const container = document.createElement('div')
-    withSetup(() => useTerminal(container, node))
+  it('mount: 回滚行数大于 xterm 默认 1000', () => {
+    withSetup(() => useTerminal(document.createElement('div'), node))
     expect(terminalCtorOpts.scrollback).toBeGreaterThan(1000)
   })
 
-  // 根治：右键粘贴只交原文给 term.paste()，由 xterm 依据 DEC mode 2004 自行包裹。
-  // 前端手写 ESC[200~/ESC[201~ 会在未启用该模式时把转义序列当字面量打进 shell。
-  it('contextmenu paste: hands raw clipboard text to term.paste without escape wrapping', async () => {
-    const container = document.createElement('div')
-    withSetup(() => useTerminal(container, node))
-    mockTerminal.paste.mockClear()
+  // 同节点复用同一 sessionId（后端据此接续仍在保留的 shell）；tab 关闭后应起新会话
+  it('sessionId: 同节点复用，unmount 后清除', () => {
+    const a = withSetup(() => useTerminal(document.createElement('div'), node))
+    const first = sessionIdOf(fake.channel(0))
+    const b = withSetup(() => useTerminal(document.createElement('div'), node))
+    expect(sessionIdOf(fake.channel(1))).toBe(first)
+    a.unmount()
+    const c = withSetup(() => useTerminal(document.createElement('div'), node))
+    expect(sessionIdOf(fake.channel(2))).not.toBe(first)
+    b.unmount()
+    c.unmount()
+  })
 
-    const text = 'line1\nline2'
-    stubClipboard(text, true)
-    container.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))
-    await vi.waitFor(() => {
-      expect(mockTerminal.paste).toHaveBeenCalledTimes(1)
+  // 输出走数据面原始字节：直接交给 term.write，不再经 JSON 与 string 往返
+  it('onData: 原始字节直写 xterm，未结束不出提示', () => {
+    const { chan } = mountTerminal()
+    mockTerminal.write.mockClear()
+    chan.push(new Uint8Array([0x1b, 0x5b, 0x31]))
+    expect(mockTerminal.write).toHaveBeenCalledWith(new Uint8Array([0x1b, 0x5b, 0x31]))
+    expect(mockTerminal.writeln).not.toHaveBeenCalled()
+  })
+
+  it('onData: 跨帧的半个 UTF-8 字符原样透传，不会被解码成 U+FFFD', () => {
+    const { chan } = mountTerminal()
+    mockTerminal.write.mockClear()
+    const bytes = new TextEncoder().encode('好')
+    chan.push(bytes.subarray(0, 2))
+    chan.push(bytes.subarray(2))
+    expect([...(mockTerminal.write.mock.calls[0][0] as Uint8Array)]).toEqual([...bytes.subarray(0, 2)])
+    expect([...(mockTerminal.write.mock.calls[1][0] as Uint8Array)]).toEqual([...bytes.subarray(2)])
+  })
+
+  it('onData end: 会话结束后不再补发断线期间缓冲的输入', async () => {
+    const { chan } = mountTerminal()
+    chan.lost()
+    onDataCb!('stale input')
+    expect(chan.frames).toHaveLength(0)
+
+    // 重开成功但 watcher 还没 flush，后端第一时间宣告这路会话已结束
+    chan.ready({ kind: 'pty', chan: 9 })
+    chan.push(new Uint8Array(0), true)
+    await nextTick()
+    expect(chan.frames).toHaveLength(0)
+    expect(mockTerminal.writeln).toHaveBeenCalledWith(expect.stringContaining('[会话已结束]'))
+  })
+
+  it('onOpen reattached: 先擦屏再提示恢复，避免回放内容重演一遍', () => {
+    withSetup(() => useTerminal(document.createElement('div'), node))
+    mockTerminal.write.mockClear()
+    fake.channel().ready({ kind: 'pty', reattached: true })
+    expect(mockTerminal.write).toHaveBeenCalledWith(expect.stringContaining('\x1b[3J'))
+    expect(mockTerminal.writeln).toHaveBeenCalledWith(expect.stringContaining('已恢复之前的会话'))
+  })
+
+  // 认证失败/目标不可达：终端里那行红字容易被忽略，首次打开失败额外弹通知
+  it('onNotify error: 未打开成功时红字 + 通知，已打开后只写终端', () => {
+    withSetup(() => useTerminal(document.createElement('div'), node))
+    const chan = fake.channel()
+    chan.emit('error', { message: 'ssh: rejected' })
+    expect(mockTerminal.writeln).toHaveBeenCalledWith(expect.stringContaining('错误：ssh: rejected'))
+    expect(mockHandleError).toHaveBeenCalledWith('终端连接失败：ssh: rejected')
+
+    mockTerminal.writeln.mockClear()
+    mockHandleError.mockClear()
+    chan.ready({ kind: 'pty' })
+    chan.emit('error', { message: 'boom' })
+    expect(mockTerminal.writeln).toHaveBeenCalledWith(expect.stringContaining('错误：boom'))
+    expect(mockHandleError).not.toHaveBeenCalled()
+  })
+
+  it('Terminal 构造使用设置里的字号与字体族', () => {
+    mockSettingsHolder.settings = makeSettings({
+      terminalFontSize: 18,
+      terminalFontFamily: "'Fira Code', monospace",
     })
-    expect(mockTerminal.paste).toHaveBeenCalledWith(text)
+    withSetup(() => useTerminal(document.createElement('div'), node))
+    expect(terminalCtorOpts.fontSize).toBe(18)
+    expect(terminalCtorOpts.fontFamily).toBe("'Fira Code', monospace")
+  })
+
+  // 设置变化热更新 xterm，并把新的行列数告知后端（否则换行仍按旧尺寸算）
+  it('设置变化：更新 options 并发送 resize', async () => {
+    const { chan } = mountTerminal()
+    mockSettingsHolder.settings.terminalFontSize = 20
+    await nextTick()
+    expect(mockTerminal.options.fontSize).toBe(20)
+    expect(chan.notifies[chan.notifies.length - 1]).toEqual({
+      type: 'resize',
+      data: { cols: 100, rows: 30, chan: 1 },
+    })
+  })
+
+  // 敲键是同步快路径：不进队列、不等水位，手感不能被背压拖慢
+  it('输入：单帧且链路就绪时同步发出，不经队列', () => {
+    const { chan } = mountTerminal(1024)
+    onDataCb!('ls\r')
+    expect(sizes(chan)).toEqual([3])
+    expect(chan.drainCalls).toBe(0)
+  })
+
+  it('输入按服务端下发的 chunk_size 分帧，逐帧等发送缓冲回落后才发下一片', async () => {
+    const { chan } = mountTerminal(4)
+    onDataCb!('abcdefghij')
+    await settled(chan, 3)
+    expect(sizes(chan)).toEqual([4, 4, 2])
+    expect(chan.frames.every((f) => !f.end)).toBe(true)
+    expect(chan.drainCalls).toBe(3)
+    expect(joinParts(chan.frames.map((f) => f.payload))).toBe('abcdefghij')
+  })
+
+  // 整段粘贴 xterm 只回调一次 onData：不分帧会把几十 MB 塞进一帧，
+  // 服务端按超限即以 1009 掐断整条连接（表现为「粘贴长文本就断线」）。
+  it('open 未给出 chunk_size 时用兜底尺寸分帧，不留 1 字节一片', async () => {
+    const { unmount } = withSetup(() => useTerminal(document.createElement('div'), node))
+    const chan = fake.channel()
+    onDataCb!('x'.repeat(40 * 1024))
+    expect(chan.frames).toHaveLength(0) // 通道未就绪，先缓冲
+    chan.ready({ kind: 'pty' })
+    await settled(chan, 2)
+    expect(sizes(chan)).toEqual([32 * 1024, 8 * 1024])
+    unmount()
+  })
+
+  // 断线期间缓冲，重连后每片只补发一次：既不丢也不重
+  it('断线缓冲输入，通道重开后按序补发一次', async () => {
+    const { chan } = mountTerminal(4)
+    chan.lost()
+    onDataCb!('abcdef')
+    expect(chan.frames).toHaveLength(0)
+
+    chan.ready({ kind: 'pty', chan: 2 })
+    await settled(chan, 2)
+    expect(sizes(chan)).toEqual([4, 2])
+    expect(joinParts(chan.frames.map((f) => f.payload))).toBe('abcdef')
+  })
+
+  // 有界队列：超出上限就拒绝并出声，绝不静默吞字节，也绝不让队列无界增长
+  it('缓冲超过上限时拒绝本次输入并在终端出声', () => {
+    const { chan } = mountTerminal(1024)
+    chan.lost()
+    onDataCb!('x'.repeat(4 * 1024 * 1024))
+    mockTerminal.writeln.mockClear()
+    onDataCb!('overflow')
+    expect(chan.frames).toHaveLength(0)
+    expect(mockTerminal.writeln).toHaveBeenCalledWith(expect.stringContaining('输入缓冲已满'))
+  })
+
+  it('右键粘贴：原文交给 term.paste，不手写 bracketed paste 转义', async () => {
+    const { container } = mountTerminal()
+    mockTerminal.paste.mockClear()
+    stubClipboard('line1\nline2', true)
+    container.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))
+    await vi.waitFor(() => expect(mockTerminal.paste).toHaveBeenCalledTimes(1))
+    expect(mockTerminal.paste).toHaveBeenCalledWith('line1\nline2')
     expect(mockTerminal.paste.mock.calls[0][0]).not.toContain('200~')
   })
 
-  // 降级：HTTP 非安全上下文读不到剪贴板，此时不应产生任何粘贴内容
-  it('contextmenu paste: no-op in insecure context (B14 fallback)', async () => {
-    const container = document.createElement('div')
-    withSetup(() => useTerminal(container, node))
+  it('右键粘贴：HTTP 非安全上下文读不到剪贴板则不产生任何输入', async () => {
+    const { container } = mountTerminal()
     mockTerminal.paste.mockClear()
-
     stubClipboard('should-not-be-read', false)
     container.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))
     await new Promise((r) => setTimeout(r, 0))
     expect(mockTerminal.paste).not.toHaveBeenCalled()
   })
 
-  it('onText msg type writes data to terminal', () => {
-    const container = document.createElement('div')
-    withSetup(() => useTerminal(container, node))
-    onTextCb!(wsMessage('msg', 'hello world'))
-    expect(mockTerminal.write).toHaveBeenCalledWith('hello world')
+  it('粘贴：Ctrl+V 在容器捕获阶段接管，xterm 的 textarea 吃不到原文', async () => {
+    const { container } = mountTerminal()
+    const inner = document.createElement('textarea')
+    container.appendChild(inner)
+    const seenByXterm = vi.fn()
+    inner.addEventListener('paste', seenByXterm)
+    mockTerminal.paste.mockClear()
+
+    const ev = firePaste(inner, 'clip text')
+    await vi.waitFor(() => expect(mockTerminal.paste).toHaveBeenCalledWith('clip text'))
+    expect(ev.defaultPrevented).toBe(true)
+    expect(seenByXterm).not.toHaveBeenCalled()
   })
 
-  it('onText non-msg types (resize/ping/pong) do NOT write to terminal', () => {
-    const container = document.createElement('div')
-    withSetup(() => useTerminal(container, node))
-    mockTerminal.write.mockClear()
-    onTextCb!(wsMessage('resize', { cols: 120, rows: 40 }))
-    onTextCb!(wsMessage('ping'))
-    onTextCb!(wsMessage('pong'))
-    expect(mockTerminal.write).not.toHaveBeenCalled()
+  // 大块粘贴会挤满发送队列，值得让用户确认一次；日常几行命令不打扰
+  it('粘贴护栏：超过阈值先确认，用户拒绝则一个字都不发', async () => {
+    const { container } = mountTerminal()
+    mockTerminal.paste.mockClear()
+    mockConfirm.mockResolvedValueOnce(false)
+    firePaste(container, 'y'.repeat(40 * 1024))
+    await vi.waitFor(() => expect(mockConfirm).toHaveBeenCalledTimes(1))
+    expect(mockConfirm).toHaveBeenCalledWith(expect.stringContaining('KB'))
+    expect(mockTerminal.paste).not.toHaveBeenCalled()
+    expect(mockTerminal.writeln).toHaveBeenCalledWith(expect.stringContaining('[已取消粘贴]'))
   })
 
-  it('onText login failure writes formatted error, calls handleError and markFailed', () => {
-    const container = document.createElement('div')
-    withSetup(() => useTerminal(container, node))
+  it('粘贴护栏：确认后照常粘贴，并对超长单行提示远端截断', async () => {
+    const { container } = mountTerminal()
+    mockTerminal.paste.mockClear()
     mockTerminal.writeln.mockClear()
-    onTextCb!(wsMessage('login', { success: false, message: 'auth failed' }))
-    expect(mockTerminal.writeln).toHaveBeenCalledWith(expect.stringContaining('登录失败：auth failed'))
-    expect(mockHandleError).toHaveBeenCalledWith('登录失败：auth failed')
-    expect(mockMarkFailed).toHaveBeenCalledTimes(1)
+    firePaste(container, `${'z'.repeat(5000)}\nls`)
+    await vi.waitFor(() => expect(mockTerminal.paste).toHaveBeenCalledTimes(1))
+    expect(mockConfirm).not.toHaveBeenCalled() // 2 行 / 5KB：够不着确认阈值
+    expect(mockTerminal.writeln).toHaveBeenCalledWith(expect.stringContaining('会被远端终端截断'))
   })
 
-  it('onText login success calls markLoginSuccess and writes restore message if reattached', () => {
-    const container = document.createElement('div')
-    withSetup(() => useTerminal(container, node))
-    mockTerminal.writeln.mockClear()
-    onTextCb!(wsMessage('login', { success: true, reattached: true }))
-    expect(mockMarkLoginSuccess).toHaveBeenCalledTimes(1)
-    expect(mockTerminal.writeln).toHaveBeenCalledWith(expect.stringContaining('已恢复之前的会话'))
+  it('粘贴护栏：读不到 clipboardData 时不拦截，交回 xterm 自己处理', () => {
+    const { container } = mountTerminal()
+    mockTerminal.paste.mockClear()
+    const ev = firePaste(container, undefined)
+    expect(ev.defaultPrevented).toBe(false)
+    expect(mockTerminal.paste).not.toHaveBeenCalled()
   })
 
-  it('onText error type writes formatted error to terminal', () => {
-    const container = document.createElement('div')
-    withSetup(() => useTerminal(container, node))
-    mockTerminal.writeln.mockClear()
-    onTextCb!(wsMessage('error', { message: 'boom' }))
-    expect(mockTerminal.writeln).toHaveBeenCalledWith(expect.stringContaining('错误：boom'))
+  it('有选区时右键是复制而非粘贴', async () => {
+    const { container } = mountTerminal()
+    mockTerminal.getSelection.mockReturnValueOnce('selected text')
+    mockTerminal.paste.mockClear()
+    stubClipboard('clip', true)
+    container.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))
+    await vi.waitFor(() => expect(mockTerminal.clearSelection).toHaveBeenCalledTimes(1))
+    expect(mockTerminal.paste).not.toHaveBeenCalled()
   })
 
-  it('onText non-JSON data is ignored', () => {
-    const container = document.createElement('div')
-    withSetup(() => useTerminal(container, node))
-    mockTerminal.write.mockClear()
-    onTextCb!('not json')
-    expect(mockTerminal.write).not.toHaveBeenCalled()
-  })
-
-  // onBinary 已移除（后端仅发文本帧），不应注册 onBinary 回调
-  it('does NOT register onBinary callback (B8 fix)', () => {
-    const container = document.createElement('div')
-    withSetup(() => useTerminal(container, node))
-    expect(onBinaryCb).toBeFalsy()
-  })
-
-  // Terminal 构造时应使用 settings 中的字体大小与字体族
-  it('Terminal constructor uses fontSize/fontFamily from settings (B6 fix)', () => {
-    mockSettingsHolder.settings = makeSettings({
-      terminalFontSize: 18,
-      terminalFontFamily: "'Fira Code', monospace",
-    })
-    const container = document.createElement('div')
-    withSetup(() => useTerminal(container, node))
-    expect(terminalCtorOpts.fontSize).toBe(18)
-    expect(terminalCtorOpts.fontFamily).toBe("'Fira Code', monospace")
-  })
-
-  // settings 变化时热更新 Terminal options（fontSize/fontFamily/theme）
-  it('settings change hot-updates Terminal options (B7 fix)', async () => {
-    const container = document.createElement('div')
-    withSetup(() => useTerminal(container, node))
-    mockSettingsHolder.settings.terminalFontSize = 20
-    await vi.waitFor(() => {
-      expect(mockTerminal.options.fontSize).toBe(20)
-    })
-  })
-
-  it('term.onData forwards input as inputMessage envelope', () => {
-    const container = document.createElement('div')
-    withSetup(() => useTerminal(container, node))
-    onDataCb!('ls -la\n')
-    expect(mockSend).toHaveBeenCalledWith(inputMessage('ls -la\n'))
-  })
-
-  // 整段粘贴只回调一次 onData：必须分帧发送，否则后端超限即以 1009 掐断会话
-  it('term.onData: splits a large paste into multiple frames, lossless order', () => {
-    const container = document.createElement('div')
-    withSetup(() => useTerminal(container, node))
-    mockSend.mockClear()
-
-    const pasted = 'y'.repeat(INPUT_CHUNK_CHARS * 2 + 500)
-    onDataCb!(pasted)
-
-    expect(mockSend.mock.calls.length).toBe(3)
-    const reassembled = mockSend.mock.calls.map(([frame]) => JSON.parse(frame as string).data).join('')
-    expect(reassembled).toBe(pasted)
-    mockSend.mock.calls.forEach(([frame]) => {
-      expect(JSON.parse(frame as string).data.length).toBeLessThanOrEqual(INPUT_CHUNK_CHARS)
-    })
-  })
-
-  // 断线重连期间缓冲的长粘贴：flush 后每片只发一次，不重复
-  it('reconnect flush of a chunked paste sends each part exactly once', async () => {
-    const container = document.createElement('div')
-    mockStatus = ref('reconnecting')
-    mockSend.mockReturnValue(false)
-    withSetup(() => useTerminal(container, node))
-
-    const pasted = 'z'.repeat(INPUT_CHUNK_CHARS + 10)
-    onDataCb!(pasted)
-    // 未连接时的尝试发送不计入断言
-    mockSend.mockClear()
-
-    mockSend.mockReturnValue(true)
-    mockStatus.value = 'connected'
-    await vi.waitFor(() => {
-      expect(mockSend.mock.calls.length).toBe(2)
-    })
-    const reassembled = mockSend.mock.calls.map(([frame]) => JSON.parse(frame as string).data).join('')
-    expect(reassembled).toBe(pasted)
-  })
-
-  // WS 未连接时缓冲输入，重连成功后 flush
-  it('buffers input when WS not connected, flushes on reconnect (B24 fix)', async () => {
-    const container = document.createElement('div')
-    mockStatus = ref('reconnecting')
-    mockSend.mockReturnValue(false) // WS 未连接
-    withSetup(() => useTerminal(container, node))
-    mockSend.mockClear()
-
-    // 用户输入，但 WS 未连接 → 缓冲
-    onDataCb!('ls\n')
-    expect(mockSend).toHaveBeenCalledTimes(1) // 尝试发送
-    // send 返回 false，输入被缓冲（不额外发送）
-
-    // 重连成功 → flush 缓冲
-    mockSend.mockReturnValue(true)
-    mockStatus.value = 'connected'
-    await vi.waitFor(() => {
-      expect(mockSend).toHaveBeenCalledWith(inputMessage('ls\n'))
-    })
-  })
-
-  // 不应注册 window resize 监听器（ResizeObserver 已覆盖）
-  it('does NOT add window resize listener (B28 fix)', () => {
+  it('不注册 window resize 监听（ResizeObserver 已覆盖）', () => {
     const spy = vi.spyOn(window, 'addEventListener')
-    const container = document.createElement('div')
-    withSetup(() => useTerminal(container, node))
-    const resizeCalls = spy.mock.calls.filter(([event]) => event === 'resize')
-    expect(resizeCalls).toHaveLength(0)
+    withSetup(() => useTerminal(document.createElement('div'), node))
+    expect(spy.mock.calls.filter(([e]) => e === 'resize')).toHaveLength(0)
     spy.mockRestore()
   })
 
-  it('onUnmounted: calls close() and term.dispose()', () => {
-    const container = document.createElement('div')
-    const { unmount } = withSetup(() => useTerminal(container, node))
-    expect(mockClose).not.toHaveBeenCalled()
+  // 界面态 = 链路态 + 通道态：WS 握手成功不等于 shell 已就绪
+  it('status: 通道未开不显示 connected，通道失败显示 failed，链路重连优先', () => {
+    const { result } = withSetup(() => useTerminal(document.createElement('div'), node))
+    const chan = fake.channel()
+    expect(result.status.value).toBe('connecting')
+    chan.ready({ kind: 'pty' })
+    expect(result.status.value).toBe('connected')
+    chan.fail()
+    expect(result.status.value).toBe('failed')
+    fake.status.value = 'reconnecting'
+    expect(result.status.value).toBe('reconnecting')
+  })
+
+  it('unmount: 摘除通道、销毁 xterm 并清除 sessionId', () => {
+    clearSessionId(node)
+    const { chan, unmount } = mountTerminal()
+    expect(chan.closeCalls).toBe(0)
     expect(mockTerminal.dispose).not.toHaveBeenCalled()
     unmount()
-    expect(mockClose).toHaveBeenCalledTimes(1)
+    expect(chan.closeCalls).toBe(1)
     expect(mockTerminal.dispose).toHaveBeenCalledTimes(1)
+    const again = withSetup(() => useTerminal(document.createElement('div'), node))
+    expect(sessionIdOf(fake.channel(1))).not.toBe(sessionIdOf(chan))
+    again.unmount()
   })
 })

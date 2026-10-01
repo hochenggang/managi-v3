@@ -1,24 +1,35 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
-import { defineComponent, h, ref } from 'vue'
+import { defineComponent, h, nextTick } from 'vue'
 import type { ApiNode } from '@/protocol/types'
-import type { WSMessage } from '@/protocol/ws'
-import { useSFTP } from '@/composables/useSFTP'
+import type { FakeChannel, FakeHub } from '../helpers/fakeHub'
+import { createFakeHub } from '../helpers/fakeHub'
 
-// vi.hoisted 确保 mock 在 vi.mock 工厂执行前已初始化
-const { mockHandleError, mockDownloadWithRange } = vi.hoisted(() => ({
+// 链路层（握手/重连/seq 关联/帧路由）由 useWSHub.test.ts 覆盖，
+// 这里只验字节流的组织方式：占位、切片、续传、进度与落定信号。
+
+const { mockHandleError, mockDownloadWithRange, hubRef } = vi.hoisted(() => ({
   mockHandleError: vi.fn(),
   mockDownloadWithRange: vi.fn(),
+  hubRef: { hub: null as any },
 }))
 
-vi.mock('@/helper', () => ({
+vi.mock('@/helper', async (importActual) => ({
+  ...(await importActual<typeof import('@/helper')>()),
   handleError: mockHandleError,
-  handleMsg: vi.fn(),
 }))
 
 vi.mock('@/api', () => ({
   downloadWithRange: mockDownloadWithRange,
 }))
+
+// 只替换取单例的入口，uiStatus 保持真实实现
+vi.mock('@/composables/useWSHub', async (importActual) => ({
+  ...(await importActual<typeof import('@/composables/useWSHub')>()),
+  useWSHub: () => hubRef.hub,
+}))
+
+import { useSFTP } from '@/composables/useSFTP'
 
 const node: ApiNode = {
   name: 'n1',
@@ -29,32 +40,7 @@ const node: ApiNode = {
   auth_value: 'pwd',
 }
 
-// 捕获 useWebSocket 的回调与返回值
-let onTextCb: ((data: string) => void) | null = null
-let onBinaryCb: ((data: ArrayBuffer) => void) | null = null
-// mockSend 必须返回 true，sendAndAwait 据此判断连接可用
-const mockSend = vi.fn((_data: string | ArrayBuffer) => true)
-const mockConnect = vi.fn()
-const mockClose = vi.fn()
-const mockMarkFailed = vi.fn()
-// 捕获 useWebSocket opts 用于断言 maxReconnect 等
-let capturedOpts: any = null
-
-vi.mock('@/composables/useWebSocket', () => ({
-  useWebSocket: (_path: string, opts: any) => {
-    onTextCb = opts.onText
-    onBinaryCb = opts.onBinary
-    capturedOpts = opts
-    return {
-      status: ref('connected'),
-      connected: { value: true },
-      connect: mockConnect,
-      send: mockSend,
-      close: mockClose,
-      markFailed: mockMarkFailed,
-    }
-  },
-}))
+let fake!: FakeHub
 
 function withSetup<T>(composable: () => T): T {
   let result!: T
@@ -68,339 +54,361 @@ function withSetup<T>(composable: () => T): T {
   return result
 }
 
-// respond 模拟服务端发送 envelope 文本帧
-function respond(msg: WSMessage): void {
-  if (!onTextCb) throw new Error('onText callback not captured')
-  onTextCb(JSON.stringify(msg))
+/** 挂一路文件管理并把通道置为就绪；就绪后 useSFTP 自行列出起始目录。 */
+function mountSFTP(home = '/home/user'): { s: ReturnType<typeof useSFTP>; chan: FakeChannel } {
+  const s = withSetup(() => useSFTP(node))
+  const chan = fake.channel()
+  chan.ready({ kind: 'sftp', home })
+  return { s, chan }
 }
 
-// sentPayloadAt 取第 i 次 send 调用的 JSON 负载（仅用于文本帧）
-function sentPayloadAt(i: number): any {
-  const call = mockSend.mock.calls[i]
-  if (!call) throw new Error(`send not called at index ${i}`)
-  return JSON.parse(call[0] as string)
+/** 结清通道就绪时自动发出的那次列目录。 */
+async function settleAutoList(chan: FakeChannel, path: string): Promise<void> {
+  chan.lastRequest('ls').ok({ path, files: [] })
+  await nextTick()
 }
 
-// parseChunkFrame 解析二进制分片帧（与 sendAndAwait 注入的新帧格式对齐）。
-// 帧格式（大端序）：[8字节 seq][4字节 upload_id_len][upload_id][4字节 chunk_index][8字节 offset][8字节 data_len][data]
-function parseChunkFrame(frame: ArrayBuffer): {
-  seq: number
-  uploadId: string
-  chunkIndex: number
-  offset: number
-  data: Uint8Array
-} {
-  const view = new DataView(frame)
-  let pos = 0
-  const seq = Number(view.getBigUint64(pos)); pos += 8
-  const idLen = view.getUint32(pos); pos += 4
-  const idBytes = new Uint8Array(frame, pos, idLen); pos += idLen
-  const uploadId = new TextDecoder().decode(idBytes)
-  const chunkIndex = view.getUint32(pos); pos += 4
-  const offset = Number(view.getBigUint64(pos)); pos += 8
-  const dataLen = Number(view.getBigUint64(pos)); pos += 8
-  const data = new Uint8Array(frame, pos, dataLen)
-  return { seq, uploadId, chunkIndex, offset, data }
+const file = (name: string, size: number) => new File([new Uint8Array(size)], name)
+
+/** 打桩 File System Access：happy-dom 没有 showSaveFilePicker，测试里按需给一个。 */
+function stubPicker(impl: (() => Promise<any>) | undefined): void {
+  Object.defineProperty(window, 'showSaveFilePicker', { value: impl, configurable: true, writable: true })
 }
+
+const streamOf = (sizes: number[]) =>
+  new ReadableStream<Uint8Array>({
+    start(c) {
+      sizes.forEach((n) => c.enqueue(new Uint8Array(n)))
+      c.close()
+    },
+  })
 
 describe('useSFTP', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    onTextCb = null
-    onBinaryCb = null
-    capturedOpts = null
     mockDownloadWithRange.mockReset()
+    stubPicker(undefined)
+    fake = createFakeHub()
+    hubRef.hub = fake
   })
 
-  it('calls connect() on creation', () => {
+  it('attach 一路 SFTP 通道，open 负载只带节点描述', () => {
     withSetup(() => useSFTP(node))
-    expect(mockConnect).toHaveBeenCalledTimes(1)
+    expect(fake.channel().spec.openData()).toEqual({ kind: 'sftp', node })
   })
 
-  it('list sends type=list and updates files/currentPath on success', async () => {
-    const s = withSetup(() => useSFTP(node))
-    const p = s.list('/home')
-    expect(sentPayloadAt(0)).toEqual({ type: 'list', data: { path: '/home' }, seq: 1 })
-    respond({
-      type: 'list',
-      data: {
-        files: [{ filename: 'a.txt', size: 1, mode: '0644', is_dir: false, mtime: 0 }],
-        path: '/home',
-      },
+  // 硬编码 '/' 起步会让没有根目录读权限的账号一进来就报错
+  it('通道就绪后按服务端报出的 home 列首个目录', async () => {
+    const { s, chan } = mountSFTP('/srv/data')
+    expect(chan.lastRequest('ls').data).toEqual({ path: '/srv/data', chan: 1 })
+    await settleAutoList(chan, '/srv/data')
+    expect(s.currentPath.value).toBe('/srv/data')
+  })
+
+  it('list 写入 files/currentPath 并复位 loading', async () => {
+    const { s, chan } = mountSFTP()
+    await settleAutoList(chan, '/home/user')
+
+    const p = s.list('/etc')
+    expect(s.loading.value).toBe(true)
+    expect(chan.lastRequest('ls').data).toEqual({ path: '/etc', chan: 1 })
+    chan.lastRequest('ls').ok({
+      path: '/etc',
+      files: [{ filename: 'hosts', size: 10, mode: '0644', is_dir: false, mtime: 1 }],
     })
     await p
-    expect(s.files.value).toHaveLength(1)
-    expect(s.files.value[0].filename).toBe('a.txt')
-    expect(s.currentPath.value).toBe('/home')
+    expect(s.files.value[0].filename).toBe('hosts')
+    expect(s.currentPath.value).toBe('/etc')
     expect(s.loading.value).toBe(false)
   })
 
-  it('mkdir sends type=mkdir', async () => {
-    const s = withSetup(() => useSFTP(node))
-    const p = s.mkdir('/new')
-    expect(sentPayloadAt(0)).toEqual({ type: 'mkdir', data: { path: '/new' }, seq: 1 })
-    respond({ type: 'ok' })
+  it('响应缺 files 时按空目录处理，不把 undefined 塞进列表', async () => {
+    const { s, chan } = mountSFTP()
+    await settleAutoList(chan, '/home/user')
+    const p = s.list('/empty')
+    chan.lastRequest('ls').ok({ path: '/empty' })
     await p
+    expect(s.files.value).toEqual([])
   })
 
-  it('del sends type=delete', async () => {
-    const s = withSetup(() => useSFTP(node))
-    const p = s.del('/file')
-    expect(sentPayloadAt(0)).toEqual({ type: 'delete', data: { path: '/file' }, seq: 1 })
-    respond({ type: 'ok' })
-    await p
+  // 空路径会让服务端按别的工作目录列，界面却显示成空——直接挡在门口
+  it('list 拒绝空路径，不发请求', async () => {
+    const { s, chan } = mountSFTP()
+    await settleAutoList(chan, '/home/user')
+    const before = chan.requests.length
+    await expect(s.list('')).rejects.toThrow('路径不能为空')
+    expect(chan.requests).toHaveLength(before)
   })
 
-  it('丢弃 seq 不匹配的迟到响应，避免旧响应把新请求误判为完成', async () => {
-    const s = withSetup(() => useSFTP(node))
+  it('mkdir 与删除走控制面，删除用 rm 动词', async () => {
+    const { s, chan } = mountSFTP()
+    await settleAutoList(chan, '/home/user')
 
-    const p1 = s.mkdir('/a')
-    respond({ type: 'ok', seq: 1 })
-    await p1
+    const m = s.mkdir('/home/user/new')
+    expect(chan.lastRequest('mkdir').data).toEqual({ path: '/home/user/new', chan: 1 })
+    chan.lastRequest('mkdir').ok({ path: '/home/user/new' })
+    await m
 
-    let settled = false
-    const p2 = s.del('/b').then((r) => {
-      settled = true
-      return r
-    })
-    expect(sentPayloadAt(1)).toEqual({ type: 'delete', data: { path: '/b' }, seq: 2 })
-
-    // 上一条请求迟到的响应：seq=1 与等待中的 2 不符，必须被忽略
-    respond({ type: 'ok', seq: 1 })
-    await Promise.resolve()
-    expect(settled).toBe(false)
-
-    // 匹配 seq 的响应才结清请求
-    respond({ type: 'ok', seq: 2 })
-    await p2
-    expect(settled).toBe(true)
+    const d = s.del('/home/user/hosts')
+    expect(chan.lastRequest('rm').data).toEqual({ path: '/home/user/hosts', chan: 1 })
+    chan.lastRequest('rm').ok({ path: '/home/user/hosts' })
+    await d
   })
 
-  it('upload single-chunk file: init → binary frame → complete', async () => {
-    const s = withSetup(() => useSFTP(node))
-    const buf = new Uint8Array(10)
-    const file = new File([buf], 't.txt', { type: 'application/octet-stream' })
-    const p = s.upload('/remote', file)
+  it('upload：请求 → 按服务端 chunk_size 分帧 → 空帧 FLAG_END → upload_end 落定', async () => {
+    const { s, chan } = mountSFTP()
+    await settleAutoList(chan, '/home/user')
 
-    // send 调用 0：upload_init JSON（remote_path 为目录，filename 为文件名）
-    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(1))
-    expect(sentPayloadAt(0)).toMatchObject({
-      type: 'upload_init',
-      data: {
-        remote_path: '/remote',
-        filename: 't.txt',
-        total_size: 10,
-        chunk_size: 1 << 20,
-      },
+    const p = s.upload('/remote', file('t.bin', 10))
+    expect(chan.lastRequest('upload').data).toEqual({
+      path: '/remote',
+      filename: 't.bin',
+      size: 10,
+      chan: 1,
     })
-    respond({ type: 'upload_init', data: { upload_id: 'u1', offset: 0 } })
+    chan.lastRequest('upload').ok({ offset: 0, chunk_size: 4 })
 
-    // send 调用 1：二进制帧（含帧头）
-    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(2))
-    const frame = mockSend.mock.calls[1][0] as ArrayBuffer
-    expect(frame).toBeInstanceOf(ArrayBuffer)
-    const parsed = parseChunkFrame(frame)
-    expect(parsed.uploadId).toBe('u1')
-    expect(parsed.chunkIndex).toBe(0)
-    expect(parsed.offset).toBe(0)
-    expect(parsed.data.length).toBe(10)
-    // 响应 chunk_ack
-    respond({ type: 'chunk_ack', data: { chunk_index: 0 } })
+    await vi.waitFor(() => expect(chan.frames.length).toBe(4))
+    expect(chan.frames.map((f) => [f.payload.byteLength, f.end])).toEqual([
+      [4, false],
+      [4, false],
+      [2, false],
+      [0, true],
+    ])
+    // 每片发完都过一次水位，慢链路下不会把整个文件堆进浏览器
+    expect(chan.drainCalls).toBeGreaterThanOrEqual(3)
 
-    // send 调用 2：upload_complete JSON
-    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(3))
-    expect(sentPayloadAt(2)).toMatchObject({
-      type: 'upload_complete',
-      data: { upload_id: 'u1' },
-    })
-    respond({ type: 'ok' })
-
-    await p
-    // 单分片 10 字节文件上传完成应正好 100%
+    chan.emit('upload_end', { chan: 1, size: 10 })
+    await expect(p).resolves.toBeUndefined()
     expect(s.uploadProgress.value).toBe(100)
   })
 
-  // 分片大小由服务端在 upload_init 响应下发（MANAGI_SFTP_CHUNK_SIZE），客户端不再自作主张
-  it('upload slices by the server-advertised chunk_size', async () => {
-    const s = withSetup(() => useSFTP(node))
-    const file = new File([new Uint8Array(10)], 'srv-chunk.bin')
-    const p = s.upload('/remote', file)
+  // 服务端报了续传点：已落盘的字节不重发
+  it('upload 从服务端给出的 offset 续传', async () => {
+    const { s, chan } = mountSFTP()
+    await settleAutoList(chan, '/home/user')
 
-    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(1))
-    respond({ type: 'upload_init', data: { upload_id: 'u3', offset: 0, chunk_size: 4 } })
+    const p = s.upload('/remote', file('big.bin', 10))
+    chan.lastRequest('upload').ok({ offset: 4, chunk_size: 4 })
+    await vi.waitFor(() => expect(chan.frames.length).toBe(3))
+    expect(chan.frames.map((f) => [f.payload.byteLength, f.end])).toEqual([
+      [4, false],
+      [2, false],
+      [0, true],
+    ])
 
-    // 10 字节按服务端下发的 4 切成 4 + 4 + 2 三帧
-    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(2))
-    expect(parseChunkFrame(mockSend.mock.calls[1][0] as ArrayBuffer).data).toHaveLength(4)
-    respond({ type: 'chunk_ack', data: { chunk_index: 0 } })
-
-    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(3))
-    const second = parseChunkFrame(mockSend.mock.calls[2][0] as ArrayBuffer)
-    expect(second.data).toHaveLength(4)
-    expect(second.offset).toBe(4)
-    respond({ type: 'chunk_ack', data: { chunk_index: 1 } })
-
-    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(4))
-    const third = parseChunkFrame(mockSend.mock.calls[3][0] as ArrayBuffer)
-    expect(third.data).toHaveLength(2)
-    expect(third.offset).toBe(8)
-    respond({ type: 'chunk_ack', data: { chunk_index: 2 } })
-
-    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(5))
-    expect(sentPayloadAt(4).type).toBe('upload_complete')
-    respond({ type: 'ok' })
-
+    chan.emit('upload_end', { size: 10 })
     await p
     expect(s.uploadProgress.value).toBe(100)
   })
 
-  it('upload resumes from offset', async () => {
-    const s = withSetup(() => useSFTP(node))
-    // 文件大小 1MB + 100 字节，offset=1MB → 仅剩 100 字节需上传（1 个 chunk）
-    const buf = new Uint8Array((1 << 20) + 100)
-    const file = new File([buf], 'big.bin', { type: 'application/octet-stream' })
-    const guard = s.upload('/r', file).catch((e) => e)
+  // 0 或缺失的 chunk_size 会让切片步长为 0，上传循环永不结束
+  it('upload 拒绝服务端给出的非法切片大小，且不发数据帧', async () => {
+    const { s, chan } = mountSFTP()
+    await settleAutoList(chan, '/home/user')
 
-    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(1))
-    expect(sentPayloadAt(0).type).toBe('upload_init')
-    // 假装已上传 1MB（第 1 片已完成）
-    respond({ type: 'upload_init', data: { upload_id: 'u2', offset: 1 << 20 } })
-
-    // 等待 send(二进制帧)
-    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(2))
-    const frame = mockSend.mock.calls[1][0] as ArrayBuffer
-    const parsed = parseChunkFrame(frame)
-    // chunk_index 应为 1（offset 1MB / CHUNK_SIZE 1MB = 1）
-    expect(parsed.chunkIndex).toBe(1)
-    expect(parsed.offset).toBe(1 << 20)
-    // 响应 chunk ack
-    respond({ type: 'chunk_ack', data: { chunk_index: 1 } })
-
-    // 等待 upload_complete 发送
-    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(3))
-    expect(sentPayloadAt(2).type).toBe('upload_complete')
-    respond({ type: 'ok' })
-
-    await guard
+    const p = s.upload('/r', file('guard.bin', 4))
+    chan.lastRequest('upload').ok({ offset: 0, chunk_size: 0 })
+    await expect(p).rejects.toThrow(/非法切片大小/)
+    expect(chan.frames).toHaveLength(0)
   })
 
-  it('upload progress never exceeds 100 for small files', async () => {
-    const s = withSetup(() => useSFTP(node))
-    // 1 字节文件：旧公式 (0+1MB)/1*100 会爆表，新公式封顶 100
-    const buf = new Uint8Array(1)
-    const file = new File([buf], 'tiny.txt', { type: 'application/octet-stream' })
-    const p = s.upload('/r', file)
+  // 交错两路字节流只会得到内容错乱的文件：一路通道同时只跑一路
+  it('同一通道同时只允许一路传输', async () => {
+    const { s, chan } = mountSFTP()
+    await settleAutoList(chan, '/home/user')
 
-    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(1))
-    respond({ type: 'upload_init', data: { upload_id: 'u3', offset: 0 } })
-    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(2))
-    respond({ type: 'chunk_ack', data: { chunk_index: 0 } })
-    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(3))
-    respond({ type: 'ok' })
+    const first = s.upload('/r', file('a.bin', 8))
+    await expect(s.upload('/r', file('b.bin', 8))).rejects.toThrow('上一个传输尚未完成')
 
+    chan.lastRequest('upload').err('清理：断开')
+    await expect(first).rejects.toThrow('清理：断开')
+  })
+
+  it('传输在途时链路断开：等待者立即失败，不留悬等', async () => {
+    const { s, chan } = mountSFTP()
+    await settleAutoList(chan, '/home/user')
+
+    const p = s.upload('/r', file('a.bin', 8))
+    chan.lastRequest('upload').ok({ offset: 0, chunk_size: 4 })
+    await vi.waitFor(() => expect(chan.frames.length).toBeGreaterThan(0))
+
+    chan.lost()
+    await expect(p).rejects.toThrow(/连接已断开|通道尚未就绪|断开/)
+  })
+
+  it('服务端 error 推送判给在途传输，写盘失败不会让调用方干等', async () => {
+    const { s, chan } = mountSFTP()
+    await settleAutoList(chan, '/home/user')
+
+    const p = s.upload('/r', file('a.bin', 8))
+    chan.lastRequest('upload').ok({ offset: 0, chunk_size: 4 })
+    await vi.waitFor(() => expect(chan.frames.length).toBeGreaterThan(0))
+
+    chan.emit('error', { chan: 1, message: 'write .part: no space' })
+    await expect(p).rejects.toThrow('no space')
+    expect(mockHandleError).not.toHaveBeenCalled()
+  })
+
+  it('没有传输在跑时的 error 推送出声给用户', async () => {
+    const { chan } = mountSFTP()
+    await settleAutoList(chan, '/home/user')
+    chan.emit('error', { chan: 1, message: 'sftp: connection reset' })
+    expect(mockHandleError).toHaveBeenCalledWith('sftp: connection reset')
+  })
+
+  it('download：请求 → 数据帧累计进度 → FLAG_END 触发落盘并复位', async () => {
+    const { s, chan } = mountSFTP()
+    await settleAutoList(chan, '/home/user')
+
+    const p = s.download('/remote/file.txt')
+    expect(chan.lastRequest('download').data).toEqual({ path: '/remote/file.txt', chan: 1 })
+    chan.lastRequest('download').ok({ filename: 'file.txt', total: 6 })
+    await nextTick() // total 是在响应回调里落的，先让它生效
+
+    chan.push(new Uint8Array([1, 2, 3]))
+    expect(s.downloadProgress.value).toBe(50)
+    chan.push(new Uint8Array([4, 5, 6]), true)
     await p
-    expect(s.uploadProgress.value).toBeLessThanOrEqual(100)
-    expect(s.uploadProgress.value).toBe(100)
-  })
-
-  it('download sends type=download and resets progress', async () => {
-    const s = withSetup(() => useSFTP(node))
-    s.downloadProgress.value = 50
-    const p = s.download('/file')
-    expect(sentPayloadAt(0)).toEqual({ type: 'download', data: { path: '/file', offset: 0 }, seq: 1 })
+    // 落盘后复位，工具栏回到普通下载图标
     expect(s.downloadProgress.value).toBe(0)
-    respond({ type: 'ok' })
-    await p
   })
 
-  it('onBinary aggregates with download_start and complete triggers triggerDownload', async () => {
-    const s = withSetup(() => useSFTP(node))
-    const p = s.download('/file')
-    await vi.waitFor(() => expect(mockSend.mock.calls.length).toBeGreaterThanOrEqual(1))
-    // 模拟服务端：download_start（total=3）→ 二进制 chunk → complete
-    respond({ type: 'download_start', data: { total: 3 } })
-    onBinaryCb?.(new Uint8Array([1, 2, 3]).buffer)
-    respond({ type: 'complete', data: { filename: 'file' } })
-    await p
-    // 验证进度为 100%（3 字节已全部接收）
-    expect(s.downloadProgress.value).toBe(100)
+  it('download 未启动时到达的数据帧被丢弃，不污染进度', () => {
+    const { s, chan } = mountSFTP()
+    chan.push(new Uint8Array([1, 2, 3]))
+    expect(s.downloadProgress.value).toBe(0)
   })
 
-  it('login failure calls handleError and markFailed (B4 fix)', () => {
-    withSetup(() => useSFTP(node))
-    respond({ type: 'login', data: { success: false, message: 'auth failed' } })
-    expect(mockHandleError).toHaveBeenCalledWith('登录失败：auth failed')
-    // 应调用 markFailed 而非 close，UI 可区分"登录失败"与"主动关闭"
-    expect(mockMarkFailed).toHaveBeenCalledTimes(1)
-    expect(mockClose).not.toHaveBeenCalled()
-  })
+  it('close 了结在途传输并摘除通道', async () => {
+    const { s, chan } = mountSFTP()
+    const p = s.download('/remote/f')
+    chan.lastRequest('download').ok({ filename: 'f', total: 4 })
+    await nextTick()
 
-  it('sendAndAwait rejects when previous operation pending (B7 fix)', async () => {
-    const s = withSetup(() => useSFTP(node))
-    // 发起 list 但不响应 → pendingResolve 占用
-    const p1 = s.list('/a')
-    // 立即发起第二个请求，应被 reject
-    await expect(s.list('/b')).rejects.toThrow('SFTP busy')
-    // 清理：响应第一个请求
-    respond({ type: 'list', data: { files: [], path: '/a' } })
-    await p1
-  })
-
-  // 手动 close 应 reject pending Promise，避免组件卸载时泄漏
-  it('close() rejects pending Promise (B5 fix)', async () => {
-    const s = withSetup(() => useSFTP(node))
-    // 发起 list 但不响应 → pendingResolve 占用
-    const p = s.list('/a')
-    // 调用 close 应 reject pending
     s.close()
-    await expect(p).rejects.toThrow('SFTP closed manually')
-    expect(mockClose).toHaveBeenCalledTimes(1)
+    await expect(p).rejects.toThrow('文件管理已关闭')
+    expect(chan.closeCalls).toBe(1)
   })
 
-  // 未激活下载时二进制帧应被忽略，避免前次下载延迟帧污染新下载
-  it('onBinary ignores chunks when download not active (B6 fix)', async () => {
-    const s = withSetup(() => useSFTP(node))
-    // 直接发二进制帧，未经过 download_start，downloadActive=false
-    onBinaryCb?.(new Uint8Array([1, 2, 3]).buffer)
-    // 进度应保持 0，downloadBuffer 未被污染
-    expect(s.downloadProgress.value).toBe(0)
+  // 界面态 = 链路态 + 通道态：WS 通着不代表 SFTP 已可用
+  it('status 折叠链路态与通道态', async () => {
+    const { s, chan } = mountSFTP()
+    await settleAutoList(chan, '/home/user')
+    expect(s.status.value).toBe('connected')
+
+    chan.lost()
+    await nextTick()
+    expect(s.status.value).toBe('connecting')
+
+    fake.status.value = 'reconnecting'
+    expect(s.status.value).toBe('reconnecting')
+
+    fake.status.value = 'connected'
+    chan.ready({ kind: 'sftp', chan: 3, home: '/home/user' })
+    await settleAutoList(chan, '/home/user')
+    expect(s.status.value).toBe('connected')
   })
 
-  // maxReconnect 从 3 提高到 10，与终端一致
-  it('uses maxReconnect=10 (B9 fix)', () => {
-    withSetup(() => useSFTP(node))
-    expect(capturedOpts?.maxReconnect).toBe(10)
+  // 重连后回到用户当前所在目录，而不是把他弹回主目录
+  it('重开后重新列出当前目录而非 home', async () => {
+    const { s, chan } = mountSFTP('/home/user')
+    await settleAutoList(chan, '/home/user')
+    const p = s.list('/var/log')
+    chan.lastRequest('ls').ok({ path: '/var/log', files: [] })
+    await p
+
+    chan.lost()
+    chan.ready({ kind: 'sftp', chan: 5, home: '/home/user' })
+    expect(chan.lastRequest('ls').data).toEqual({ path: '/var/log', chan: 5 })
+    await settleAutoList(chan, '/var/log')
+    expect(s.currentPath.value).toBe('/var/log')
   })
 
-  // downloadViaHTTP 在流读取错误时重置进度，避免残留非零值
-  it('downloadViaHTTP resets progress on stream error (B29 fix)', async () => {
-    const s = withSetup(() => useSFTP(node))
-    // 构造一个先产出 50 字节再抛错的流
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(new Uint8Array(50))
-      },
-      pull() {
-        throw new Error('network interrupted')
-      },
+  it('downloadViaHTTP：分块读取流并按字节数推进度', async () => {
+    const { s } = mountSFTP()
+    const chunks = [new Uint8Array(50), new Uint8Array(50)]
+    let i = 0
+    mockDownloadWithRange.mockResolvedValue({
+      total: 100,
+      stream: new ReadableStream<Uint8Array>({
+        pull(c) {
+          if (i < chunks.length) c.enqueue(chunks[i++])
+          else c.close()
+        },
+      }),
     })
-    mockDownloadWithRange.mockResolvedValue({ total: 100, stream })
-    await expect(s.downloadViaHTTP('/big.bin')).rejects.toThrow('network interrupted')
-    // 错误后进度应被重置为 0
-    expect(s.downloadProgress.value).toBe(0)
-  })
-
-  // downloadViaHTTP 正常完成后进度保持 100（succeeded 不重置）
-  it('downloadViaHTTP keeps progress at completion (B29 fix)', async () => {
-    const s = withSetup(() => useSFTP(node))
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(new Uint8Array(100))
-        controller.close()
-      },
-    })
-    mockDownloadWithRange.mockResolvedValue({ total: 100, stream })
-    await s.downloadViaHTTP('/ok.bin')
+    await s.downloadViaHTTP('/big.bin')
     expect(s.downloadProgress.value).toBe(100)
+  })
+
+  it('downloadViaHTTP 失败时复位进度，不残留半截数字', async () => {
+    const { s } = mountSFTP()
+    mockDownloadWithRange.mockResolvedValue({
+      total: 100,
+      stream: new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(new Uint8Array(50))
+        },
+        pull() {
+          throw new Error('network interrupted')
+        },
+      }),
+    })
+    await expect(s.downloadViaHTTP('/big.bin')).rejects.toThrow('network interrupted')
+    expect(s.downloadProgress.value).toBe(0)
+  })
+
+  // 有 File System Access 就逐块写盘：GB 级文件不该先变成浏览器内存里的一个 Blob
+  it('downloadViaHTTP：走磁盘写入，不缓冲整份文件', async () => {
+    const { s } = mountSFTP()
+    const written: number[] = []
+    const writable = {
+      write: vi.fn(async (c: Uint8Array) => {
+        written.push(c.byteLength)
+      }),
+      close: vi.fn(),
+      abort: vi.fn(),
+    }
+    const picker = vi.fn(async () => ({ createWritable: async () => writable }))
+    stubPicker(picker)
+    mockDownloadWithRange.mockResolvedValue({ total: 100, stream: streamOf([50, 50]) })
+
+    await s.downloadViaHTTP('/dir/big.bin')
+    expect(picker).toHaveBeenCalledWith({ suggestedName: 'big.bin' })
+    expect(written).toEqual([50, 50])
+    expect(writable.close).toHaveBeenCalledTimes(1)
+    expect(writable.abort).not.toHaveBeenCalled()
+    expect(s.downloadProgress.value).toBe(100)
+  })
+
+  // 取消保存框是用户意愿，不该变成一次失败的下载，更不该再去拉数据
+  it('downloadViaHTTP：用户取消保存框则静默结束', async () => {
+    const { s } = mountSFTP()
+    stubPicker(async () => {
+      throw Object.assign(new Error('canceled'), { name: 'AbortError' })
+    })
+    await expect(s.downloadViaHTTP('/big.bin')).resolves.toBeUndefined()
+    expect(mockDownloadWithRange).not.toHaveBeenCalled()
+    expect(s.downloadProgress.value).toBe(0)
+  })
+
+  // 写盘失败必须 abort()：否则半截文件会被当成完整的一份留在盘上
+  it('downloadViaHTTP 写盘失败：abort 丢弃半成品并复位进度', async () => {
+    const { s } = mountSFTP()
+    const writable = {
+      write: vi.fn(async (c: Uint8Array) => {
+        if (c.byteLength > 40) throw new Error('disk full')
+      }),
+      close: vi.fn(),
+      abort: vi.fn(async () => {}),
+    }
+    stubPicker(async () => ({ createWritable: async () => writable }))
+    mockDownloadWithRange.mockResolvedValue({ total: 100, stream: streamOf([40, 60]) })
+
+    await expect(s.downloadViaHTTP('/big.bin')).rejects.toThrow('disk full')
+    expect(writable.abort).toHaveBeenCalledTimes(1)
+    expect(writable.close).not.toHaveBeenCalled()
+    expect(s.downloadProgress.value).toBe(0)
   })
 })

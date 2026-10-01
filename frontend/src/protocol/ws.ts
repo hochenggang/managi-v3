@@ -1,64 +1,84 @@
-// WS 统一消息协议：所有文本帧为 {type, data} envelope。
-// 与后端 handler/wsmsg.go 对齐。
+// 控制面协议：一条 /ws 连接上的 JSON 文本帧 {type, data, seq}。
+// 与后端 handler/wsmsg.go、handler/ws.go 的动词与负载逐字段对齐。
+// 一问一答靠 seq 关联；seq 省略（=0）表示不等回复或服务端主动推。
 
-/** WS 消息类型字面量联合（约束前后端协议）。 */
-export type WSMessageType =
-  | 'login' // 登录（首帧）/ 登录结果
-  | 'msg' // 终端输入/输出
-  | 'resize' // 终端尺寸调整
-  | 'ping' // 心跳请求
-  | 'pong' // 心跳响应
-  | 'error' // 错误
-  | 'list' // SFTP 列目录
-  | 'ok' // SFTP 操作成功
-  | 'download_start' // SFTP 下载开始
-  | 'complete' // SFTP 下载完成
-  | 'chunk_ack' // SFTP 分片确认
-  | 'upload_init' // SFTP 上传初始化
-  | 'upload_complete' // SFTP 上传完成
+import type { ApiNode } from './types'
+
+/** 通道种类：一路终端标签，或一路文件管理标签。 */
+export type Kind = 'pty' | 'sftp'
+
+/** 控制面动词。 */
+export type Verb =
+  // 通道生命周期
+  | 'open'
+  | 'close'
+  | 'resize'
+  // 心跳与错误
+  | 'ping'
+  | 'pong'
+  | 'error'
+  // SFTP 目录操作
+  | 'ls'
   | 'mkdir'
-  | 'delete'
-  | 'rename'
+  | 'rm'
+  // SFTP 字节流（内容走数据面二进制帧）
+  | 'upload'
+  | 'upload_end'
   | 'download'
 
-/** 统一消息信封。seq 用于 SFTP 请求-响应关联，其余消息省略。 */
-export interface WSMessage<T = unknown> {
-  type: WSMessageType
+/** 控制面信封。 */
+export interface Envelope<T = unknown> {
+  type: Verb
   data?: T
   seq?: number
 }
 
-/** 登录结果 data 负载。 */
-export interface WSLoginResult {
-  success: boolean
-  message?: string
-  reattached?: boolean // true=后端复用了已存在的终端会话
-}
-
-/** 错误 data 负载。 */
-export interface WSError {
+/** error 负载：chan 省略或为 0 表示与具体通道无关。 */
+export interface ErrorData {
+  chan?: number
   message: string
 }
 
-/** resize data 负载。 */
-export interface WSResize {
+/** open 响应负载。
+ *  home：sftp 子系统的初始目录（通常为主目录），无根目录读权限的账号据此起步。
+ *  chunk_size：客户端→服务端单帧载荷上限，仅 PTY 下发；上传的切片大小随 upload 响应给。
+ */
+export interface OpenResponse {
+  kind: Kind
+  chan: number
+  reattached?: boolean
+  home?: string
+  chunk_size?: number
+}
+
+/** open 请求负载。PTY 靠 session_id 复用后端 shell；SFTP 只需节点描述。 */
+export interface OpenPTY {
+  kind: 'pty'
+  node: ApiNode
+  session_id: string
   cols: number
   rows: number
 }
 
-/** 构造 envelope 消息字符串。可选 seq 用于 SFTP 请求-响应关联。 */
-export function wsMessage<T>(type: WSMessageType, data?: T, seq?: number): string {
-  const msg: WSMessage<T> = data === undefined ? { type } : { type, data }
-  if (seq !== undefined) msg.seq = seq
-  return JSON.stringify(msg)
+export interface OpenSFTP {
+  kind: 'sftp'
+  node: ApiNode
 }
 
-/** 解析 envelope，失败返回 null。 */
-export function parseWSMessage(data: string): WSMessage | null {
+export type OpenPayload = OpenPTY | OpenSFTP
+
+/** 目录/传输类请求负载：通道号由枢纽统一注入，调用方只写业务字段。 */
+export type RequestData = Record<string, unknown>
+
+export function encodeEnvelope(env: Envelope): string {
+  return JSON.stringify(env)
+}
+
+/** decodeEnvelope 解析控制帧；不是本协议的 JSON 返回 null（调用方丢弃，避免渲染垃圾）。 */
+export function decodeEnvelope(text: string): Envelope | null {
   try {
-    const obj = JSON.parse(data) as WSMessage
-    if (typeof obj.type !== 'string') return null
-    return obj
+    const obj = JSON.parse(text) as Envelope
+    return typeof obj.type === 'string' ? obj : null
   } catch {
     return null
   }

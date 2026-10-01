@@ -1,6 +1,8 @@
-// Package main 是 Managi v3 后端入口。
-// 对应 v2 的 app.py，解析命令行参数后交由 server 包装配并启动 HTTP 服务。
-// 设计见 ../design-v3.md 第四章。
+// Package main 是 Managi v3 后端入口：同一个二进制，两种形态。
+//   - 默认：HTTP/WebSocket 服务器（跳板机部署，systemd / OpenRC / Docker）
+//   - -tray：Windows 桌面托盘（只监听 127.0.0.1、内嵌前端、自动开浏览器）
+//
+// 设计见 design-v5.md 第四章。
 package main
 
 import (
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"managi/internal/config"
+	"managi/internal/desktop"
 	"managi/internal/server"
 )
 
@@ -26,6 +29,9 @@ const (
 func main() {
 	port := flag.Int("port", defaultPort, "服务监听端口")
 	host := flag.String("host", defaultHost, "服务监听地址")
+	// 桌面构建（-tags desktop）默认进托盘：exe 用 -H=windowsgui 链接，双击后没有控制台，
+	// 若默认走服务器形态就成了一个看不见的进程。-tray=false 可显式退回服务器形态。
+	tray := flag.Bool("tray", desktop.DefaultEnabled, "托盘模式（Windows 桌面构建）：只监听 127.0.0.1，内嵌前端并自动打开浏览器")
 	flag.Parse()
 
 	cfg := config.Load()
@@ -39,6 +45,14 @@ func main() {
 			cfg.Host = *host
 		}
 	})
+
+	if *tray {
+		if err := desktop.Run(cfg); err != nil {
+			slog.Error("tray mode unavailable", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	// done channel 用于通知所有后台 goroutine 退出
 	done := make(chan struct{})

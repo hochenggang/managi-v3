@@ -11,7 +11,7 @@
 ## 特性
 
 - **SSH 终端**：基于 xterm.js 的 Web 终端，支持多会话、窗口大小调整、断线重连恢复会话
-- **SFTP 文件管理**：浏览、上传（断点续传）、下载（Range 请求）、重命名、删除
+- **SFTP 文件管理**：浏览、上传（断点续传）、下载（Range 请求）、删除
 - **批量命令**：跨多节点并行执行命令，实时查看输出
 - **多平台**：后端 Go 静态二进制（Linux/macOS/Windows, glibc/musl），前端单 HTML 文件，桌面端为 Go 托盘启动器
 
@@ -37,42 +37,38 @@ MANAGI_SHA256=<二进制文件的 sha256> sudo -E ./install.sh
 
 ### 客户端方式（本地桌面应用）
 
-[下载 Windows 客户端](https://github.com/hochenggang/managi-v3/releases/latest/download/windows-app.exe)（约 9MB，内嵌服务、前端与托盘）
+[下载 Windows 客户端](https://github.com/hochenggang/managi-v3/releases/latest/download/managi-desktop-windows-amd64.exe)（约 9MB，内嵌服务、前端与托盘）
+
+双击后自动在 `http://127.0.0.1:18001` 启动服务并打开浏览器；端口被占用时自动顺延，失败原因显示在托盘图标上。
+
+它与服务器形态是同一个二进制（`managi`），桌面版只是带 `-tray` 启动。
 
 
 ## 配置
 
-配置文件位于 `/etc/managi/config.env`，首次安装时自动生成：
+后端只开放下面 5 个环境变量，配置文件 `/etc/managi/config.env` 首次安装时自动生成：
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `MANAGI_HOST` | `0.0.0.0` | 监听地址 |
 | `MANAGI_PORT` | `18001` | 监听端口 |
+| `MANAGI_AUTH` | 空 | Basic Auth 凭据，格式 `user:pass`。**非空即启用鉴权**（凭据本身就是开关，没有单独的启用项）；留空则不鉴权。只按第一个冒号切分，密码里可以带冒号 |
 | `MANAGI_INDEX_HTML` | `index.html` | 前端单页文件路径 |
-| `MANAGI_BASICAUTH_ENABLED` | `false` | 是否启用 Basic Auth |
-| `MANAGI_BASICAUTH_USERNAME` | `admin` | Basic Auth 用户名 |
-| `MANAGI_BASICAUTH_PASSWORD` | 空 | Basic Auth 密码。启用而未配置时服务端生成随机口令并打印到启动日志（每次重启都变），故 docker 部署改为强制从 `.env` 注入（见 `deploy/.env.example`） |
-| `MANAGI_TRUST_PROXY` | `false` | 置于反向代理之后时设为 `true`，才按 `X-Forwarded-For` 识别客户端 IP（用于登录失败限流与访问日志）。直连部署保持关闭：任何人伪造该头即可绕开限流 |
-| `MANAGI_SSH_TIMEOUT` | `15` | SSH 连接超时（秒） |
-| `MANAGI_KEEPALIVE` | `30` | SSH 保活间隔（秒） |
-| `MANAGI_SSH_IDLE_TIMEOUT` | `120` | SSH 连接池空闲清理时间（秒） |
-| `MANAGI_SSH_POOL_SIZE` | `20` | SSH 连接池常驻连接数上限，超出则驱逐空闲连接 |
 | `MANAGI_KNOWN_HOSTS` | 空 | 指向 OpenSSH `known_hosts` 即启用严格主机密钥校验；留空沿用首次信任（TOFU）。文件无法解析时拒绝所有连接，不会退回 TOFU |
-| `MANAGI_WS_READ_DEADLINE` | `90` | WebSocket 读超时（秒） |
-| `MANAGI_WS_PING_INTERVAL` | `30` | WebSocket Ping 间隔（秒） |
-| `MANAGI_SESSION_IDLE_TIMEOUT` | `60` | 终端会话空闲保留时间（秒），前端断开后保留 shell 的时长 |
-| `MANAGI_SFTP_CHUNK_SIZE` | `1048576` | SFTP 上传分片大小（字节，上限 8MB）。`upload_init` 响应下发给前端，前端按它切片；WS 单帧读取上限取 2× 该值 |
-| `MANAGI_SFTP_DOWNLOAD_CHUNK` | `65536` | WS 下载每帧字节数（上限 1MB）。大文件请走 HTTP Range 流式下载，与此无关 |
+
+另有 `-host` / `-port` 命令行参数，显式传入时优先于同名环境变量（供手工运行调试）。
+
+超时、心跳、连接池容量与分片大小属于协议调优参数而非用户选项：改错的代价是周期性掉线或单帧放大打爆内存，因此不再开放配置，统一取 `backend/internal/config` 里的默认值。客户端 IP 一律取真实连接地址，不采信 `X-Forwarded-For`（任何人都能伪造该头，采信后登录失败限流形同虚设）。
 
 ## 行为说明
 
 ### 终端会话复用
 
-后端维护到目标服务器的 shell 会话，前端断开后保留 `MANAGI_SESSION_IDLE_TIMEOUT`（默认 60 秒）。期间前端重连可复用同一会话（保留工作目录、运行中进程、scrollback）。超时后会话关闭。
+后端维护到目标服务器的 shell 会话，前端断开后保留 60 秒（固定值）。期间前端重连可复用同一会话（保留工作目录、运行中进程、scrollback）。超时后会话关闭。
 
 ### SFTP 下载路径
 
-小文件（≤100MB）通过 WebSocket 下载，大文件自动切换为 HTTP Range 流式下载（`POST /api/sftp/download`），避免浏览器内存溢出。断点续传通过 Range 请求头实现。
+小文件（≤100MB）通过 WebSocket 下载；更大的文件自动切换为 HTTP Range 流式下载（`POST /api/sftp/download`），在支持的浏览器里直接写入磁盘选定的文件（File System Access API），不支持时退化为内存缓冲后触发保存，避免内存溢出。断点续传通过 Range 请求头实现。
 
 ### 主机密钥校验（TOFU）
 
@@ -111,8 +107,8 @@ cd backend && go test ./...
 # 前端
 cd frontend && npm ci && npm run dev
 
-# Windows 桌面端（交叉编译）
-make build-windows-app
+# Windows 桌面端（交叉编译，产物在 desktop/）
+make build-desktop
 ```
 
 ## License

@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
@@ -102,7 +103,9 @@ func (s *Server) handleConn(nconn net.Conn, cfg *ssh.ServerConfig) {
 		if err != nil {
 			continue
 		}
-		s.handleSession(channel, reqs)
+		// 每个 session channel 独立协程：一条 SSH 连接上可以并发开多路
+		// shell/subsystem（连接池复用同一条连接），串行处理会让后开的通道永远排队。
+		go s.handleSession(channel, reqs)
 	}
 }
 
@@ -188,6 +191,23 @@ func (s *Server) handleSFTP(channel ssh.Channel) {
 		FileList: handler,
 	})
 	_ = srv.Serve()
+}
+
+// Dial 拨一条已认证的 SSH 客户端连接到本服务器。
+// 测试要直连 mock（不经连接池）时用它，握手细节不必在每个测试里重抄一遍。
+// 用户名与 handleConn 的 PasswordCallback 保持一致。
+func (s *Server) Dial(t *testing.T) *ssh.Client {
+	t.Helper()
+	client, err := ssh.Dial("tcp", s.Addr(), &ssh.ClientConfig{
+		User:            "test",
+		Auth:            []ssh.AuthMethod{ssh.Password(s.password)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("dial mock ssh: %v", err)
+	}
+	return client
 }
 
 // Addr 返回服务器监听地址（127.0.0.1:port）。

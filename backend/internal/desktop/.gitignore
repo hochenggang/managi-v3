@@ -1,0 +1,3 @@
+# 桌面构建前由 Makefile / CI 复制进来的内嵌资源，不入库
+index.html
+icon.ico

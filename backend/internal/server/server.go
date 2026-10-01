@@ -1,9 +1,9 @@
 // Package server 装配 Managi 的 HTTP 服务。
 //
-// 抽取动机：cmd/managi（服务器）与 cmd/windows-app（桌面托盘）此前各自重复
+// 抽取动机：服务器入口与桌面托盘入口此前各自重复
 // 「建 mux → 注册路由 → /health → BasicAuth → 超时参数」这段装配逻辑，
 // 两处漂移即埋下不一致隐患（如超时、安全头只加在一处）。本包收敛为单一入口，
-// 两个可执行程序只保留各自真正不同的部分（flag 解析 / 托盘交互 / 内嵌资源）。
+// 两种形态（cmd/managi 与 internal/desktop 的 -tray）只保留各自真正不同的部分。
 //
 // 调用方只需知道：New 返回一个可直接 ListenAndServe 的 *http.Server 与
 // 底层 SSH 连接池；不应关心路由注册、中间件叠加等内部细节。
@@ -34,7 +34,7 @@ func New(cfg *config.Config, done <-chan struct{}) (*http.Server, *sshpool.Pool)
 	// BasicAuth 包裹全部路由（内部对 /health 放行），外层再叠访问日志与安全响应头。
 	// 顺序：SecurityHeaders( AccessLog( BasicAuth( mux ) ) ) —— 访问日志在鉴权之内，
 	// 未授权请求（含口令爆破尝试）也会被记录，且只记 path 不记凭据。
-	h := handler.SecurityHeaders(handler.AccessLog(handler.BasicAuthMiddleware(cfg, done)(mux), cfg.TrustProxy))
+	h := handler.SecurityHeaders(handler.AccessLog(handler.BasicAuthMiddleware(cfg, done)(mux)))
 
 	return &http.Server{
 		Addr:              net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)),
@@ -51,7 +51,7 @@ func New(cfg *config.Config, done <-chan struct{}) (*http.Server, *sshpool.Pool)
 func ensureBasicAuthPassword(cfg *config.Config) {
 	if cfg.BasicAuthEnabled && cfg.BasicAuthPassword == "" {
 		cfg.BasicAuthPassword = handler.RandomBasicAuthPassword()
-		slog.Warn("BasicAuth 已启用但未配置密码，已生成随机口令（建议用 MANAGI_BASICAUTH_PASSWORD 显式设置）",
+		slog.Warn("BasicAuth 已启用但未配置密码，已生成随机口令（请用 MANAGI_AUTH=user:pass 显式设置）",
 			"generated_password", cfg.BasicAuthPassword)
 	}
 }

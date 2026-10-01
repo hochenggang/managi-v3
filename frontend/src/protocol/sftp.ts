@@ -1,10 +1,7 @@
-// SFTP 协议：基于统一 WS envelope。
-// 与后端 handler/sftp.go 对齐。
+// SFTP 控制帧的 data 负载：与后端 handler/chan_sftp.go 的请求/响应结构逐字段对齐。
+// 字节本身不在这里——上传分片与下载内容走数据面二进制帧（见 ./frames.ts）。
 
-import type { ApiNode } from './types'
-import { wsMessage } from './ws'
-
-/** 目录项。 */
+/** 目录项（后端 model.FileItem）。size/mtime 为 int64，JS number 在 2^53 内精确。 */
 export interface SFTPFile {
   filename: string
   size: number
@@ -13,49 +10,35 @@ export interface SFTPFile {
   mtime: number
 }
 
-// ===== 请求构造 =====
+/** ls 响应。空目录时后端省略 files：没有条目就是没有。 */
+export interface LSData {
+  chan: number
+  path: string
+  files?: SFTPFile[]
+}
 
-export const sftpLogin = (node: ApiNode): string => wsMessage<ApiNode>('login', node)
-export const sftpList = (path: string): string => wsMessage('list', { path })
-export const sftpMkdir = (path: string): string => wsMessage('mkdir', { path })
-export const sftpDelete = (path: string): string => wsMessage('delete', { path })
-export const sftpRename = (oldPath: string, newPath: string): string =>
-  wsMessage('rename', { old_path: oldPath, new_path: newPath })
-export const sftpDownload = (path: string, offset = 0): string =>
-  wsMessage('download', { path, offset })
-export const sftpUploadInit = (
-  remotePath: string,
-  filename: string,
-  totalSize: number,
-  chunkSize: number,
-): string =>
-  wsMessage('upload_init', {
-    remote_path: remotePath,
-    filename,
-    total_size: totalSize,
-    chunk_size: chunkSize,
-  })
-export const sftpUploadComplete = (uploadId: string): string =>
-  wsMessage('upload_complete', { upload_id: uploadId })
+/** mkdir/rm 回声操作的 path。 */
+export interface PathData {
+  chan: number
+  path: string
+}
 
-// ===== 响应 data 负载 =====
-
-export interface SFTPListData {
-  files: SFTPFile[]
-  path?: string
-}
-export interface SFTPDownloadStartData {
-  total: number
-}
-export interface SFTPCompleteData {
-  filename: string
-}
-export interface SFTPChunkAckData {
-  chunk_index: number
-}
-export interface SFTPUploadInitData {
-  upload_id: string
+/** upload 响应：续传点与切片大小都由服务端定，客户端不自作主张。 */
+export interface UploadData {
+  chan: number
   offset: number
-  /** 服务端指定的分片大小（MANAGI_SFTP_CHUNK_SIZE）。旧后端不带该字段，缺省用客户端默认值。 */
-  chunk_size?: number
+  chunk_size: number
+}
+
+/** upload_end：服务端主动推，size 为落定后的文件字节数。 */
+export interface UploadEndData {
+  chan: number
+  size: number
+}
+
+/** download 响应：此后该通道的数据帧即文件内容，最后一片带 FLAG_END。 */
+export interface DownloadData {
+  chan: number
+  filename: string
+  total: number
 }

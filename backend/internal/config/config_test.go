@@ -10,20 +10,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestLoad_Defaults 验证所有字段的默认值。
-func TestLoad_Defaults(t *testing.T) {
-	// 清空所有相关环境变量，确保使用默认值
-	keys := []string{
-		"MANAGI_HOST", "MANAGI_PORT", "MANAGI_SSH_TIMEOUT", "MANAGI_KEEPALIVE", "MANAGI_SSH_IDLE_TIMEOUT",
-		"MANAGI_SSH_POOL_SIZE",
-		"MANAGI_WS_READ_DEADLINE", "MANAGI_WS_PING_INTERVAL", "MANAGI_SFTP_CHUNK_SIZE", "MANAGI_SFTP_DOWNLOAD_CHUNK",
-		"MANAGI_BASICAUTH_ENABLED", "MANAGI_BASICAUTH_USERNAME", "MANAGI_BASICAUTH_PASSWORD",
-		"MANAGI_TRUST_PROXY", "MANAGI_KNOWN_HOSTS",
-		"MANAGI_INDEX_HTML",
-	}
-	for _, k := range keys {
+// clearEnv 清空全部受支持的环境变量，让 Load 走默认值路径。
+func clearEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{
+		"MANAGI_HOST", "MANAGI_PORT", "MANAGI_AUTH", "MANAGI_KNOWN_HOSTS", "MANAGI_INDEX_HTML",
+	} {
 		t.Setenv(k, "")
 	}
+}
+
+// TestLoad_Defaults 验证所有字段的默认值。
+func TestLoad_Defaults(t *testing.T) {
+	clearEnv(t)
 
 	cfg := Load()
 	assert.Equal(t, "0.0.0.0", cfg.Host)
@@ -34,111 +33,84 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, 20, cfg.SSHPoolSize)
 	assert.Equal(t, 90, cfg.WSReadDeadline)
 	assert.Equal(t, 30, cfg.WSPingInterval)
+	assert.Equal(t, 60, cfg.SessionIdleTimeout)
 	assert.Equal(t, 1<<20, cfg.ChunkSize) // 1MB
 	assert.Equal(t, 1<<16, cfg.DownloadChunkSize)
+	// MANAGI_AUTH 未填即不启用鉴权；填了才可能进入随机口令路径
 	assert.False(t, cfg.BasicAuthEnabled)
-	assert.Equal(t, "admin", cfg.BasicAuthUser)
-	// 空表示未显式配置；启用 BasicAuth 时由服务入口生成随机强口令
+	assert.Equal(t, "", cfg.BasicAuthUser)
 	assert.Equal(t, "", cfg.BasicAuthPassword)
-	// 默认不采信 XFF，默认沿用 TOFU（不设 known_hosts）
-	assert.False(t, cfg.TrustProxy)
+	// 默认沿用 TOFU（不设 known_hosts）
 	assert.Equal(t, "", cfg.KnownHostsFile)
-	// IndexHTMLPath 现在在 Load 中转为绝对路径
+	// IndexHTMLPath 在 Load 中转为绝对路径
 	assert.True(t, filepath.IsAbs(cfg.IndexHTMLPath), "IndexHTMLPath should be absolute")
-	assert.True(t, filepath.Base(cfg.IndexHTMLPath) == "index.html", "IndexHTMLPath base should be index.html")
+	assert.Equal(t, "index.html", filepath.Base(cfg.IndexHTMLPath))
 }
 
-// TestLoad_EnvOverride 验证环境变量覆盖默认值。
+// TestLoad_EnvOverride 验证 5 个受支持的环境变量覆盖默认值。
 func TestLoad_EnvOverride(t *testing.T) {
 	// 使用跨平台绝对路径，避免 Windows 上 /var/www 被视为相对路径
 	absPath := filepath.Join(t.TempDir(), "index.html")
 	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+	clearEnv(t)
 	t.Setenv("MANAGI_HOST", "192.168.1.1")
 	t.Setenv("MANAGI_PORT", "8080")
-	t.Setenv("MANAGI_SSH_TIMEOUT", "30")
-	t.Setenv("MANAGI_KEEPALIVE", "60")
-	t.Setenv("MANAGI_SSH_IDLE_TIMEOUT", "300")
-	t.Setenv("MANAGI_SSH_POOL_SIZE", "64")
-	t.Setenv("MANAGI_WS_READ_DEADLINE", "120")
-	t.Setenv("MANAGI_WS_PING_INTERVAL", "20")
-	t.Setenv("MANAGI_SFTP_CHUNK_SIZE", "2097152")
-	t.Setenv("MANAGI_SFTP_DOWNLOAD_CHUNK", "4096")
-	t.Setenv("MANAGI_BASICAUTH_ENABLED", "true")
-	t.Setenv("MANAGI_BASICAUTH_USERNAME", "ops")
-	t.Setenv("MANAGI_BASICAUTH_PASSWORD", "secret")
-	t.Setenv("MANAGI_TRUST_PROXY", "true")
+	t.Setenv("MANAGI_AUTH", "ops:sec:ret")
 	t.Setenv("MANAGI_KNOWN_HOSTS", knownHosts)
 	t.Setenv("MANAGI_INDEX_HTML", absPath)
 
 	cfg := Load()
 	assert.Equal(t, "192.168.1.1", cfg.Host)
 	assert.Equal(t, 8080, cfg.Port)
-	assert.Equal(t, 30, cfg.SSHTimeout)
-	assert.Equal(t, 60, cfg.KeepaliveInterval)
-	assert.Equal(t, 300, cfg.SSHIdleTimeout)
-	assert.Equal(t, 64, cfg.SSHPoolSize)
-	assert.Equal(t, 120, cfg.WSReadDeadline)
-	assert.Equal(t, 20, cfg.WSPingInterval)
-	assert.Equal(t, 2097152, cfg.ChunkSize)
-	assert.Equal(t, 4096, cfg.DownloadChunkSize)
 	assert.True(t, cfg.BasicAuthEnabled)
 	assert.Equal(t, "ops", cfg.BasicAuthUser)
-	assert.Equal(t, "secret", cfg.BasicAuthPassword)
-	assert.True(t, cfg.TrustProxy)
+	// 只按首个冒号切分：密码里带冒号不会被截断
+	assert.Equal(t, "sec:ret", cfg.BasicAuthPassword)
 	assert.Equal(t, knownHosts, cfg.KnownHostsFile)
 	// 已是绝对路径，Load 不会修改
 	assert.Equal(t, absPath, cfg.IndexHTMLPath)
 }
 
-// TestEnvInt_Invalid 验证非数字环境变量回退默认值。
-func TestEnvInt_Invalid(t *testing.T) {
-	t.Setenv("MANAGI_PORT", "abc")
-	t.Setenv("MANAGI_SSH_TIMEOUT", "12.5")
-
-	cfg := Load()
-	assert.Equal(t, 18001, cfg.Port)    // 非数字 → 默认
-	assert.Equal(t, 15, cfg.SSHTimeout) // 含小数点 → 默认
-}
-
-// TestEnvBool_Variants 验证 envBool 的各种输入。
-func TestEnvBool_Variants(t *testing.T) {
+// TestParseBasicAuth 验证 MANAGI_AUTH 的解析：填了凭据就是要鉴权，
+// 不再存在「密码写了但开关没开」这种静默不生效的组合。
+func TestParseBasicAuth(t *testing.T) {
 	cases := []struct {
+		name     string
 		input    string
-		expected bool
+		wantUser string
+		wantPass string
 	}{
-		{"true", true},
-		{"1", true},
-		{"yes", true},
-		{"false", false},
-		{"0", false},
-		{"no", false},
+		{"未填", "", "", ""},
+		{"空白", "   ", "", ""},
+		{"user:pass", "admin:pw", "admin", "pw"},
+		{"两侧空白", " admin:pw ", "admin", "pw"},
+		{"密码含冒号", "admin:a:b", "admin", "a:b"},
+		{"缺冒号整串当密码", "pw-only", DefaultBasicAuthUser, "pw-only"},
+		{"空用户名", ":pw", DefaultBasicAuthUser, "pw"},
+		{"空密码（启用但待生成）", "admin:", "admin", ""},
 	}
 	for _, c := range cases {
-		t.Run(c.input, func(t *testing.T) {
-			t.Setenv("MANAGI_BASICAUTH_ENABLED", c.input)
-			cfg := Load()
-			assert.Equal(t, c.expected, cfg.BasicAuthEnabled)
+		t.Run(c.name, func(t *testing.T) {
+			user, pass := parseBasicAuth(c.input)
+			assert.Equal(t, c.wantUser, user)
+			assert.Equal(t, c.wantPass, pass)
 		})
 	}
 }
 
-// TestEnvBool_Default 验证空值使用默认值。
-func TestEnvBool_Default(t *testing.T) {
-	t.Setenv("MANAGI_BASICAUTH_ENABLED", "")
-	cfg := Load()
-	assert.False(t, cfg.BasicAuthEnabled) // 默认 false
-}
+// TestEnvInt_Invalid 验证非数字端口回退默认值（且出声告警，不静默生效）。
+func TestEnvInt_Invalid(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("MANAGI_PORT", "abc")
 
-// TestEnvStr_EmptyString 验证空字符串使用默认值。
-func TestEnvStr_EmptyString(t *testing.T) {
-	t.Setenv("MANAGI_HOST", "")
-	cfg := Load()
-	assert.Equal(t, "0.0.0.0", cfg.Host)
+	assert.Equal(t, 18001, Load().Port)
 }
 
 // TestLoad_RelativePathConvertedToAbsolute 验证相对 IndexHTMLPath 被转为绝对路径（B36 修复）。
 func TestLoad_RelativePathConvertedToAbsolute(t *testing.T) {
+	clearEnv(t)
 	t.Setenv("MANAGI_INDEX_HTML", "relative/path/index.html")
+
 	cfg := Load()
 	assert.True(t, filepath.IsAbs(cfg.IndexHTMLPath), "relative path should be converted to absolute")
 	assert.Equal(t, "index.html", filepath.Base(cfg.IndexHTMLPath))
@@ -153,6 +125,7 @@ func TestNormalize_RejectsInvalidValues(t *testing.T) {
 		SSHTimeout:         -1,
 		KeepaliveInterval:  0,
 		SSHIdleTimeout:     -5,
+		SSHPoolSize:        0,
 		WSReadDeadline:     90,
 		WSPingInterval:     30,
 		SessionIdleTimeout: 0,
@@ -167,12 +140,13 @@ func TestNormalize_RejectsInvalidValues(t *testing.T) {
 	assert.Equal(t, DefaultSSHTimeout, cfg.SSHTimeout)
 	assert.Equal(t, DefaultKeepaliveInterval, cfg.KeepaliveInterval)
 	assert.Equal(t, DefaultSSHIdleTimeout, cfg.SSHIdleTimeout)
+	assert.Equal(t, DefaultSSHPoolSize, cfg.SSHPoolSize)
 	assert.Equal(t, DefaultSessionIdleTimeout, cfg.SessionIdleTimeout)
 	assert.Equal(t, DefaultChunkSize, cfg.ChunkSize)
 	assert.Equal(t, DefaultDownloadChunkSize, cfg.DownloadChunkSize)
 
 	// 每个被修正的字段都要有对应说明，供启动日志告警
-	for _, want := range []string{"MANAGI_PORT", "MANAGI_SSH_TIMEOUT", "MANAGI_SFTP_CHUNK_SIZE", "MANAGI_HOST"} {
+	for _, want := range []string{"Port", "SSHTimeout", "ChunkSize", "Host"} {
 		assert.Contains(t, strings.Join(fixed, "; "), want)
 	}
 }
@@ -184,7 +158,7 @@ func TestNormalize_ReadDeadlineAbovePingInterval(t *testing.T) {
 	fixed := cfg.Normalize()
 
 	assert.Equal(t, 90, cfg.WSReadDeadline)
-	assert.Contains(t, strings.Join(fixed, "; "), "MANAGI_WS_READ_DEADLINE")
+	assert.Contains(t, strings.Join(fixed, "; "), "WSReadDeadline")
 }
 
 // TestNormalize_KeepsValidValues 验证合法配置原样保留，并报告为空。
@@ -197,14 +171,11 @@ func TestNormalize_KeepsValidValues(t *testing.T) {
 	before := *cfg
 
 	assert.Empty(t, cfg.Normalize())
-	assert.Equal(t, before.Host, cfg.Host)
-	assert.Equal(t, before.Port, cfg.Port)
-	assert.Equal(t, before.WSReadDeadline, cfg.WSReadDeadline)
-	assert.Equal(t, before.ChunkSize, cfg.ChunkSize)
+	assert.Equal(t, before, *cfg)
 }
 
 // TestNormalize_BoundsChunkSize 验证分片大小有上界：
-// WS 单帧读取上限取 2×分片，前端又按下发值切片，一个数量级写错的环境变量
+// WS 单帧读取上限取 2×分片，前端又按下发值切片，一个数量级写错的常量
 // 就能把单帧放大到几百 MB（服务端 OOM、浏览器跟着崩）。
 func TestNormalize_BoundsChunkSize(t *testing.T) {
 	cfg := &Config{
@@ -216,8 +187,8 @@ func TestNormalize_BoundsChunkSize(t *testing.T) {
 
 	assert.Equal(t, MaxChunkSize, cfg.ChunkSize)
 	assert.Equal(t, MaxDownloadChunkSize, cfg.DownloadChunkSize)
-	assert.Contains(t, strings.Join(fixed, "; "), "MANAGI_SFTP_CHUNK_SIZE")
-	assert.Contains(t, strings.Join(fixed, "; "), "MANAGI_SFTP_DOWNLOAD_CHUNK")
+	assert.Contains(t, strings.Join(fixed, "; "), "ChunkSize")
+	assert.Contains(t, strings.Join(fixed, "; "), "DownloadChunkSize")
 }
 
 // TestExpandHome 验证 "~" 展开：用户习惯直接写 MANAGI_KNOWN_HOSTS=~/.ssh/known_hosts，
@@ -255,6 +226,7 @@ func TestExpandHome(t *testing.T) {
 func TestLoad_KnownHostsTilde(t *testing.T) {
 	home, err := os.UserHomeDir()
 	require.NoError(t, err)
+	clearEnv(t)
 	t.Setenv("MANAGI_KNOWN_HOSTS", "~/.ssh/known_hosts")
 
 	cfg := Load()

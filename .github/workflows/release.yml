@@ -89,8 +89,8 @@ jobs:
           name: frontend-dist
           path: frontend/dist/
 
-  build-windows-app:
-    name: Windows App
+  build-desktop:
+    name: Windows Desktop Build
     needs: build-frontend
     runs-on: ubuntu-latest
     steps:
@@ -106,14 +106,15 @@ jobs:
       - name: Copy embedded assets
         shell: bash
         run: |
-          cp frontend/dist/index.html backend/cmd/windows-app/index.html
-          cp desktop/icon.ico backend/cmd/windows-app/icon.ico
+          cp frontend/dist/index.html backend/internal/desktop/index.html
+          cp desktop/icon.ico backend/internal/desktop/icon.ico
+      # .syso 提供 exe 图标，必须落在 main 包目录（cmd/managi）
       - name: Generate Windows resource
-        working-directory: backend/cmd/windows-app
+        working-directory: backend/cmd/managi
         shell: bash
         run: |
-          go run github.com/akavel/rsrc@latest -ico icon.ico -arch amd64 -o rsrc_windows_amd64.syso
-      - name: Build windows-app.exe
+          go run github.com/akavel/rsrc@latest -ico ../../internal/desktop/icon.ico -arch amd64 -o rsrc_windows_amd64.syso
+      - name: Build desktop exe
         working-directory: backend
         shell: bash
         env:
@@ -122,15 +123,16 @@ jobs:
           CGO_ENABLED: 0
         run: |
           mkdir -p ../artifacts
-          go build -ldflags="-H=windowsgui -s -w" -o "../artifacts/windows-app.exe" ./cmd/windows-app
+          go build -tags desktop -ldflags="-H=windowsgui -s -w" \
+            -o "../artifacts/managi-desktop-windows-amd64.exe" ./cmd/managi
       - uses: actions/upload-artifact@v4
         with:
-          name: windows-app
-          path: artifacts/windows-app.exe
+          name: managi-desktop-windows-amd64
+          path: artifacts/managi-desktop-windows-amd64.exe
 
   release:
     name: Publish Release
-    needs: [build-go-binaries, build-frontend, build-windows-app]
+    needs: [build-go-binaries, build-frontend, build-desktop]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -145,8 +147,7 @@ jobs:
         # install.sh 自身不出 sidecar：脚本与它的 sidecar 同源，等于没多验出什么。
         run: |
           set -eu
-          for f in release-assets/managi-*/* release-assets/frontend-dist/index.html \
-                   release-assets/windows-app/windows-app.exe; do
+          for f in release-assets/managi-*/* release-assets/frontend-dist/index.html; do
             [ -f "$f" ] || continue
             ( cd "$(dirname "$f")" && sha256sum "$(basename "$f")" > "$(basename "$f").sha256" )
           done
@@ -158,5 +159,4 @@ jobs:
           files: |
             release-assets/managi-*/*
             release-assets/frontend-dist/index.html*
-            release-assets/windows-app/windows-app.exe*
             deploy/install.sh

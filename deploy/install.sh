@@ -1,6 +1,6 @@
 #!/bin/sh
 # Managi v3 一键部署脚本（Alpine / Debian / Ubuntu 跳板机）
-# 设计见 ../design-v3.md §8.3
+# 设计见 design-v5.md §8.3
 #
 # 用法:
 #   ./install.sh              # 启动交互式菜单
@@ -108,33 +108,34 @@ read_config_value() {
 load_config_env() {
     if [ -f "$CONFIG_DIR/config.env" ]; then
         PORT="$(read_config_value MANAGI_PORT)"
-        AUTH_ENABLED="$(read_config_value MANAGI_BASICAUTH_ENABLED)"
-        AUTH_USER="$(read_config_value MANAGI_BASICAUTH_USERNAME)"
-        AUTH_PASS="$(read_config_value MANAGI_BASICAUTH_PASSWORD)"
+        AUTH="$(read_config_value MANAGI_AUTH)"
+        # 旧配置（MANAGI_AUTH 之前）把鉴权拆成三项写：迁移成一行的 MANAGI_AUTH=user:pass，
+        # 否则选了「沿用旧配置」却读出空凭据，升级后服务会静默变成免鉴权。
+        if [ -z "$AUTH" ] && [ "$(read_config_value MANAGI_BASICAUTH_ENABLED)" = "true" ]; then
+            _old_user="$(read_config_value MANAGI_BASICAUTH_USERNAME)"
+            _old_pass="$(read_config_value MANAGI_BASICAUTH_PASSWORD)"
+            [ -n "$_old_pass" ] && AUTH="${_old_user:-admin}:$_old_pass"
+        fi
     fi
 }
 
 # ===== 写入配置 =====
 write_config_env() {
     # 绝不再写 admin123 这类固定弱口令：配置文件一旦留在跳板机上就是公开的秘密。
-    # 启用认证却没有口令属于安装流程出错，宁可中止也不留下可用的弱凭据；
-    # 未启用认证则不写口令，磁盘上不留用不到的凭据。
-    if [ "${AUTH_ENABLED:-false}" = "true" ] && [ -z "${AUTH_PASS:-}" ]; then
-        error "已选择启用 BASICAUTH 但未取得密码，安装中止（不写入弱默认口令）"
+    # MANAGI_AUTH 非空即启用鉴权；只有用户名没有口令等于让服务端每次重启随机生成口令，
+    # 那状态无人能登录，属安装流程出错，宁可中止也不留下半截凭据。
+    if [ -n "$AUTH" ] && [ -z "${AUTH#*:}" ]; then
+        error "MANAGI_AUTH 只有用户名、缺少密码，安装中止（不写入会随机换口令的配置）"
     fi
 
     mkdir -p "$CONFIG_DIR"
-    # 口令用单引号写入：systemd EnvironmentFile 与 OpenRC 的 `. config.env` 都按字面取值，
+    # 凭据用单引号写入：systemd EnvironmentFile 与 OpenRC 的 `. config.env` 都按字面取值，
     # 不加引号则 $ 和 ` 会被 shell 二次展开，含这些字符的口令会变形。
     cat > "$CONFIG_DIR/config.env" <<EOF
 MANAGI_HOST=0.0.0.0
 MANAGI_PORT=${PORT:-18001}
 MANAGI_INDEX_HTML=$INSTALL_DIR/index.html
-MANAGI_BASICAUTH_ENABLED=${AUTH_ENABLED:-false}
-MANAGI_BASICAUTH_USERNAME='${AUTH_USER:-admin}'
-MANAGI_BASICAUTH_PASSWORD='${AUTH_PASS:-}'
-MANAGI_SSH_TIMEOUT=15
-MANAGI_KEEPALIVE=30
+MANAGI_AUTH='${AUTH:-}'
 EOF
     chmod 600 "$CONFIG_DIR/config.env"
     info "配置已写入 $CONFIG_DIR/config.env"
@@ -288,7 +289,8 @@ write_service_unit() {
 name="managi"
 description="Managi v3 SSH management"
 command="$INSTALL_DIR/managi"
-command_args="-port \${MANAGI_PORT:-18001}"
+# 不设 command_args：它在 start_pre 之前就已展开，写 -port 只会永远取到默认端口，
+# 让 config.env 里的 MANAGI_PORT 静默失效。端口一律走环境变量。
 command_background=true
 pidfile="/run/managi.pid"
 output_log="/var/log/managi.log"
@@ -320,7 +322,9 @@ After=network.target
 Type=simple
 User=$SERVICE_USER
 EnvironmentFile=$CONFIG_DIR/config.env
-ExecStart=$INSTALL_DIR/managi -port \${MANAGI_PORT}
+# 端口只由 config.env 里的 MANAGI_PORT 决定：命令行 flag 的优先级更高，
+# 在这里写死 -port 会让用户改 MANAGI_PORT 静默失效。
+ExecStart=$INSTALL_DIR/managi
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536
@@ -420,22 +424,17 @@ do_install() {
     fi
 
     PORT="${MANAGI_PORT:-${PORT:-18001}}"
-    AUTH_ENABLED="${MANAGI_BASICAUTH_ENABLED:-${AUTH_ENABLED:-false}}"
-    AUTH_USER="${MANAGI_BASICAUTH_USERNAME:-${AUTH_USER:-admin}}"
-    AUTH_PASS="${MANAGI_BASICAUTH_PASSWORD:-${AUTH_PASS:-}}"
-
-    if read_yes_no "是否启用 BASICAUTH（HTTP 基本认证）"; then
-        AUTH_ENABLED="true"
-        AUTH_USER="$(read_value "请输入用户名")"
-        # 留空交给服务端会随机生成口令，但每次重启都会变化、等于无法登录，
-        # 因此交互安装要求一个固定口令（环境变量已提供时不再追问）。
-        if [ -z "$AUTH_PASS" ]; then
-            AUTH_PASS="$(read_password "请输入密码")"
+    # MANAGI_AUTH 非空即启用鉴权：凭据本身就是开关，不再有独立的启用项。
+    # 留空 = 免鉴权，因此这一步的唯一决定是「要不要往配置里写凭据」。
+    AUTH="${MANAGI_AUTH:-${AUTH:-}}"
+    if [ -n "$AUTH" ]; then
+        info "检测到 BASICAUTH 凭据（用户 ${AUTH%%:*}）"
+        if ! read_yes_no "是否使用该凭据启用 BASICAUTH（HTTP 基本认证）"; then
+            AUTH=""
         fi
-    else
-        AUTH_ENABLED="false"
-        # 不启用认证就不把用不到的凭据写进磁盘
-        AUTH_PASS=""
+    elif read_yes_no "是否启用 BASICAUTH（HTTP 基本认证）"; then
+        # 让服务端随机生成口令等于每次重启都无法登录，因此交互安装必须取得一个固定口令。
+        AUTH="$(read_value "请输入用户名"):$(read_password "请输入密码")"
     fi
 
     install_deps

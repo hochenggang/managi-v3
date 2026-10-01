@@ -1,17 +1,16 @@
 // API 客户端：HTTP 请求封装，含重试与超时。
-// 修复 v2 缺陷：网络响应丢失（无重试）。设计见 ../../../design-v3.md §6.2。
+// 修复 v2 缺陷：网络响应丢失（无重试）。设计见 design-v5.md §6.2。
 
 import { useRetry } from '@/composables/useRetry'
 import type { ApiNode, BatchCmdRequest, CmdsTestResult, OldApiNode } from '@/protocol/types'
 
 const API_URI = {
-  sshTest: '/api/ssh/test',
   sshBatch: '/api/ssh/batch',
   sftpDownload: '/api/sftp/download',
 } as const
 
 /** getApiBase 推导当前部署的 HTTP API 基址（含协议+主机+端口）。
- *  修复 R5：与 useWebSocket.getWsHost 共享同一推导逻辑，避免两处重复实现漂移。
+ *  WS 端点（composables/useWSHub.ts）也以此为基准推导，避免两处 host/port 逻辑漂移。
  */
 export function getApiBase(): string {
   const stored = localStorage.getItem('managi-api-host')
@@ -65,12 +64,6 @@ async function fetchWithRetry(url: string, body: unknown, timeoutMs = 30000): Pr
   )
 }
 
-export async function testSSH(node: ApiNode, cmds: string[]): Promise<CmdsTestResult> {
-  const resp = await fetchWithRetry(`${getApiUrl()}${API_URI.sshTest}`, { node, cmds })
-  if (!resp.ok) throw new Error(await readApiError(resp))
-  return resp.json()
-}
-
 export async function batchSSH(nodes: ApiNode[], cmds: string[]): Promise<CmdsTestResult[]> {
   const req: BatchCmdRequest = { nodes, cmds }
   const resp = await fetchWithRetry(`${getApiUrl()}${API_URI.sshBatch}`, req)
@@ -78,7 +71,7 @@ export async function batchSSH(nodes: ApiNode[], cmds: string[]): Promise<CmdsTe
   return resp.json()
 }
 
-// v3 新增：HTTP Range 下载（断点续传）。设计见 design-v3.md §6.5。
+// v3 新增：HTTP Range 下载（断点续传）。设计见 design-v5.md §6.5。
 // 节点凭据走 POST body 而非 URL 查询串：URL 会被浏览器历史与各级访问日志记录。
 // 续传偏移用 Range 请求头表达，不进入 URL。
 export async function downloadWithRange(

@@ -1,6 +1,6 @@
 // Package terminal 封装 SSH 交互式终端会话。
 // 对应 v2 routers.py 的 terminal 部分，修复 resize 与心跳缺陷。
-// 设计见 ../design-v3.md §6.1（换行）与 §6.3（心跳）。
+// 设计见 design-v5.md §6.1（换行）与 §6.3（心跳）。
 package terminal
 
 import (

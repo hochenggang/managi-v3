@@ -1,5 +1,5 @@
 // Package handler - HTTP Basic Auth 中间件、认证失败速率限制、WS Origin 校验。
-// 设计见 ../design-v3.md §4.1 与 plan: managi-v3-auth-conn-stability-fixes.md。
+// 设计见 design-v5.md §4.1 与 plan: managi-v3-auth-conn-stability-fixes.md。
 package handler
 
 import (
@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -121,7 +120,7 @@ func BasicAuthMiddleware(cfg *config.Config, done <-chan struct{}) func(http.Han
 				next.ServeHTTP(w, r)
 				return
 			}
-			ip := clientIP(r, cfg.TrustProxy)
+			ip := clientIP(r)
 			if limiter.tooMany(ip) {
 				writeJSONError(w, http.StatusTooManyRequests, "too many auth failures, retry later")
 				return
@@ -143,19 +142,11 @@ func BasicAuthMiddleware(cfg *config.Config, done <-chan struct{}) func(http.Han
 	}
 }
 
-// clientIP 提取客户端 IP。
-// 仅当 trustProxy 为真（MANAGI_TRUST_PROXY=true，即前面确实有可信反代）时才采信
-// X-Forwarded-For 首段；直连部署下任何人都能伪造这个头，限流就会按伪造 IP 计数而失效。
+// clientIP 提取客户端 IP：只取真实连接地址。
+// 不采信 X-Forwarded-For：本项目的默认可信边界就是「谁连我谁就是客户端」，
+// 任何人都能伪造该头，采信后限流会按伪造 IP 计数而形同虚设。
 // 复用 net.SplitHostPort 正确处理 IPv6 地址（原手写按 ':' 截断会破坏 IPv6）。
-func clientIP(r *http.Request, trustProxy bool) string {
-	if trustProxy {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			if idx := strings.IndexByte(xff, ','); idx >= 0 {
-				return strings.TrimSpace(xff[:idx])
-			}
-			return strings.TrimSpace(xff)
-		}
-	}
+func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr

@@ -79,8 +79,8 @@ jobs:
       - name: Verify single HTML
         run: ls -lh dist/index.html
 
-  build-windows-app:
-    name: Windows App Build
+  build-desktop:
+    name: Windows Desktop Build
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
@@ -105,14 +105,15 @@ jobs:
       - name: Copy embedded assets
         shell: bash
         run: |
-          cp frontend/dist/index.html backend/cmd/windows-app/index.html
-          cp desktop/icon.ico backend/cmd/windows-app/icon.ico
+          cp frontend/dist/index.html backend/internal/desktop/index.html
+          cp desktop/icon.ico backend/internal/desktop/icon.ico
+      # .syso 提供 exe 图标，必须落在 main 包目录（cmd/managi）
       - name: Generate Windows resource
-        working-directory: backend/cmd/windows-app
+        working-directory: backend/cmd/managi
         shell: bash
         run: |
-          go run github.com/akavel/rsrc@latest -ico icon.ico -arch amd64 -o rsrc_windows_amd64.syso
-      - name: Build windows-app.exe
+          go run github.com/akavel/rsrc@latest -ico ../../internal/desktop/icon.ico -arch amd64 -o rsrc_windows_amd64.syso
+      - name: Build desktop exe
         working-directory: backend
         shell: bash
         env:
@@ -120,10 +121,10 @@ jobs:
           GOARCH: amd64
           CGO_ENABLED: 0
         run: |
-          go build -ldflags="-H=windowsgui -s -w" -o ../desktop/windows-app.exe ./cmd/windows-app
+          go build -tags desktop -ldflags="-H=windowsgui -s -w" -o ../desktop/managi-desktop-windows-amd64.exe ./cmd/managi
       - name: Verify build artifact
         shell: bash
-        run: ls -lh desktop/windows-app.exe
+        run: ls -lh desktop/managi-desktop-windows-amd64.exe
 
   deploy-scripts:
     name: Deploy Script Tests

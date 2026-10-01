@@ -51,7 +51,8 @@
           <div class="file-modified">{{ t('finder.mtime') }}</div>
         </div>
 
-        <Transition name="finder-state" mode="out-in">
+        <!-- 不加 out-in 淡入淡出：隐藏标签页里 CSS transition 不推进、transitionend 永不到来，
+             列表会卡在「空文件夹」的 leave 状态而整块不渲染。目录列表的正确性优先于这一下淡入。 -->
         <div v-if="loading" key="loading" class="loading">
           {{ t('finder.loading') }}
         </div>
@@ -90,7 +91,6 @@
             <div class="file-modified">{{ formatDate(file.mtime) }}</div>
           </div>
         </div>
-        </Transition>
       </div>
 
       <div class="status-bar">
@@ -131,9 +131,7 @@
 </template>
 
 <script setup lang="ts">
-// SFTP 文件管理器：基于 useSFTP composable。
-// 修正 v2 缺陷 N3：上传改用分片协议（upload_init/upload_chunk/upload_complete），
-// 替代 v2 裸二进制 ws.send(data)（无分片、无断点续传、无进度）。
+// SFTP 文件管理器：基于 useSFTP composable（共享 /ws 上的一路 SFTP 通道）。
 import { ref, computed, nextTick, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import CirclePercent from '@/components/CirclePercent.vue'
@@ -142,7 +140,7 @@ import { useConfirm } from '@/composables/useConfirm'
 import { handleError, handleMsg, toErrorMessage } from '@/helper'
 import type { ApiNode } from '@/protocol/types'
 import type { SFTPFile } from '@/protocol/sftp'
-import type { ConnectionStatus } from '@/composables/useWebSocket'
+import type { ConnectionStatus } from '@/composables/useWSHub'
 
 const props = defineProps<{ node: ApiNode }>()
 const { t } = useI18n()
@@ -189,17 +187,14 @@ const cancelPathEdit = (): void => {
   pathEditing.value = false
 }
 
-// SFTP 连接状态 UI。原 Finder 仅在 status bar 显示节点名，
-// 连接断开/重连/登录失败时用户无感知。补充状态文本与颜色提示。
+// 连接状态 UI：断开/重连/开不起来都得让用户看见，否则只剩一个不动的目录列表。
 const statusText = computed(() => {
   const map: Record<ConnectionStatus, string> = {
     idle: '',
     connecting: t('finder.connecting'),
     connected: t('finder.connected'),
-    first_failed: t('finder.error'),
     reconnecting: t('finder.reconnecting'),
-    reconnect_failed: t('finder.error'),
-    disconnected: t('finder.disconnected'),
+    failed: t('finder.error'),
   }
   return map[status.value]
 })
@@ -208,10 +203,8 @@ const statusClass = computed(() => {
     idle: '',
     connecting: 'connecting',
     connected: 'connected',
-    first_failed: 'failed',
     reconnecting: 'connecting',
-    reconnect_failed: 'failed',
-    disconnected: 'disconnected',
+    failed: 'failed',
   }
   return map[status.value]
 })
@@ -364,9 +357,7 @@ const currentPathParts = computed(() => {
   return ['/'].concat(parts)
 })
 
-// 服务端登录成功后主动推送 list /，无需前端 onMounted 主动请求。
-// 若首屏空白，用户可点击工具栏刷新按钮触发 list(currentPath)。
-
+// 首屏目录列表由 useSFTP 在通道就绪后自动发出（起始目录用服务端报出的 home）。
 onBeforeUnmount(() => {
   close()
 })
@@ -597,7 +588,6 @@ onBeforeUnmount(() => {
 .sftp-status.connecting { color: var(--color-yellow); }
 .sftp-status.connected { color: var(--color-green); }
 .sftp-status.failed { color: var(--color-red); }
-.sftp-status.disconnected { color: var(--color-font-3); }
 
 .dialog-overlay {
   position: fixed;
@@ -660,17 +650,6 @@ onBeforeUnmount(() => {
   padding: 0.35rem 0.75rem;
   border-radius: 0;
   cursor: pointer;
-}
-
-/* 文件列表三态切换：淡入淡出 */
-.finder-state-enter-active,
-.finder-state-leave-active {
-  transition: opacity 0.2s ease;
-}
-
-.finder-state-enter-from,
-.finder-state-leave-to {
-  opacity: 0;
 }
 
 /* 新建文件夹对话框遮罩淡入淡出 */

@@ -1,6 +1,6 @@
 // Package handler 实现 HTTP 与 WebSocket 端点。
-// 对应 v2 的 routers.py，路由保持兼容。
-// 设计见 ../design-v3.md §4.1 与 §4.4。
+// 对应 v2 的 routers.py，但路由已换代：/ws/ssh + /ws/sftp 合成单条 /ws。
+// 设计见 design-v5.md §4.1 与 §4.4。
 package handler
 
 import (
@@ -26,14 +26,12 @@ func Register(mux *http.ServeMux, cfg *config.Config, done <-chan struct{}) *ssh
 	// 静态首页（v2 GET /）
 	mux.HandleFunc("/", indexHandler(cfg))
 
-	// SSH 命令执行
-	mux.HandleFunc("/api/ssh/test", postOnly(testHandler(pool)))
+	// SSH 命令执行（「测试连接」已由终端/SFTP 通道本身承担，无需单独端点）
 	mux.HandleFunc("/api/ssh/batch", postOnly(batchHandler(pool)))
 
-	// WebSocket 端点
+	// WebSocket：一条连接承载全部通道（终端 = PTY 通道，文件管理 = SFTP 通道）
 	mgr := newSessionManager(pool, cfg)
-	mux.HandleFunc("/ws/ssh", terminalWSHandler(mgr, cfg))
-	mux.HandleFunc("/ws/sftp", sftpWSHandler(pool, cfg))
+	mux.HandleFunc("/ws", wsHandler(mgr, pool, cfg))
 
 	// v3 新增：SFTP 下载（HTTP Range，断点续传）
 	mux.HandleFunc("/api/sftp/download", postOnly(sftpDownloadHandler(pool)))

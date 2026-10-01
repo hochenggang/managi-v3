@@ -1,6 +1,6 @@
 import { afterEach, vi } from 'vitest'
 
-// 全局 mock localStorage（api.ts / useWebSocket.ts 读取 managi-api-host / cached-nodes）
+// 全局 mock localStorage（api.ts / useWSHub.ts 读取 managi-api-host / cached-nodes）
 const localStorageStore: Record<string, string> = {}
 Object.defineProperty(globalThis, 'localStorage', {
   value: {

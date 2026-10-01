@@ -7,7 +7,7 @@ import vueDevTools from 'vite-plugin-vue-devtools'
 import { viteSingleFile } from 'vite-plugin-singlefile'
 
 // Vite 配置：保留 v2 的 singlefile + alias，便于 Tauri 内嵌与后端静态服务。
-// 设计见 ../../design-v3.md §2.2 与 §5.1。
+// 设计见 design-v5.md §2.2 与 §5.1。
 export default defineConfig({
   plugins: [
     vue(),

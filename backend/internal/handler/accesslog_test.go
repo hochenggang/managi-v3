@@ -47,14 +47,14 @@ func TestAccessLog_LogsRequest(t *testing.T) {
 
 	h := AccessLog(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("hi"))
-	}), false)
+	}))
 
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/api/ssh/test", nil))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/api/ssh/batch", nil))
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/health", nil))
 
 	require.Len(t, *lines, 1, "/health 不应产生日志")
 	assert.Contains(t, (*lines)[0], "method=POST")
-	assert.Contains(t, (*lines)[0], "path=/api/ssh/test")
+	assert.Contains(t, (*lines)[0], "path=/api/ssh/batch")
 	assert.Contains(t, (*lines)[0], "status=200")
 	assert.Contains(t, (*lines)[0], "bytes=2")
 	assert.Contains(t, (*lines)[0], "remote=192.0.2.1")
@@ -72,14 +72,14 @@ func TestAccessLog_NeverLogsCredentials(t *testing.T) {
 
 	h := AccessLog(BasicAuthMiddleware(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))
-	})), false)
+	})))
 
 	// 错误口令（401）与正确口令（200）都要留痕，但都不能带出凭据
-	req := httptest.NewRequest("POST", "/api/ssh/test?auth_value=query-secret", nil)
+	req := httptest.NewRequest("POST", "/api/ssh/batch?auth_value=query-secret", nil)
 	req.SetBasicAuth("admin", "header-secret")
 	h.ServeHTTP(httptest.NewRecorder(), req)
 
-	req2 := httptest.NewRequest("GET", "/api/ssh/test", nil)
+	req2 := httptest.NewRequest("GET", "/api/ssh/batch", nil)
 	req2.SetBasicAuth("admin", cfg.BasicAuthPassword)
 	h.ServeHTTP(httptest.NewRecorder(), req2)
 
@@ -104,19 +104,18 @@ func TestAccessLog_PreservesHijacker(t *testing.T) {
 		if ok {
 			f.Flush()
 		}
-	}), false)
+	}))
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil))
 
 	assert.True(t, isHijacker)
 	assert.True(t, isFlusher)
 }
 
-// TestAccessLog_TrustProxyOptIn 验证访问日志里的 remote 与登录限流同源：
-// 默认只记真实连接地址，MANAGI_TRUST_PROXY=true 才采信 X-Forwarded-For 首段。
-// 伪造该头即可让限流与日志按假 IP 计数，因此采信必须是显式选择。
-func TestAccessLog_TrustProxyOptIn(t *testing.T) {
+// TestAccessLog_IgnoresForwardedFor 验证访问日志里的 remote 与登录限流同源：
+// 一律记真实连接地址。X-Forwarded-For 谁都能伪造，采信后日志与限流都会按假 IP 计数。
+func TestAccessLog_IgnoresForwardedFor(t *testing.T) {
 	lines := captureLogs(t)
-	h := AccessLog(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}), true)
+	h := AccessLog(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
 
 	req := httptest.NewRequest("GET", "/", nil)
 	req.RemoteAddr = "203.0.113.9:55555"
@@ -124,7 +123,7 @@ func TestAccessLog_TrustProxyOptIn(t *testing.T) {
 	h.ServeHTTP(httptest.NewRecorder(), req)
 
 	require.Len(t, *lines, 1)
-	assert.Contains(t, (*lines)[0], "remote=198.51.100.7")
+	assert.Contains(t, (*lines)[0], "remote=203.0.113.9")
 }
 
 // 编译期断言：包装类型必须自带这两个接口，否则上面的透传只是空话

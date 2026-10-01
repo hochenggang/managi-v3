@@ -1,5 +1,5 @@
 # Managi v3 Dockerfile - 多阶段构建
-# 设计见 ../design-v3.md §8.1
+# 设计见 design-v5.md §8.1
 # 目标镜像体积 <25MB
 
 # ===== 阶段1: 前端构建 =====

@@ -3,7 +3,7 @@ import { mount } from '@vue/test-utils'
 import { ref, nextTick } from 'vue'
 import Finder from '@/components/Finder.vue'
 import type { ApiNode } from '@/protocol/types'
-import type { ConnectionStatus } from '@/composables/useWebSocket'
+import type { ConnectionStatus } from '@/composables/useWSHub'
 
 // 持有 useSFTP 返回的响应式引用，供测试中控制状态
 const mockCurrentPath = ref('/')
@@ -186,7 +186,7 @@ describe('Finder', () => {
     })
 
     it('shows failed status with red class', async () => {
-      mockStatus.value = 'first_failed'
+      mockStatus.value = 'failed'
       const wrapper = mountFinder()
       await nextTick()
       const statusEl = wrapper.find('.sftp-status')

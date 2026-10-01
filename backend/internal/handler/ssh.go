@@ -1,6 +1,6 @@
 // Package handler - SSH 命令执行端点。
-// 对应 v2 routers.py 的 execute_single_command / test_ssh_connection / batch_execute_commands。
-// 设计见 ../design-v3.md §4.3（并发模型）与 §6.2（重试幂等）。
+// 对应 v2 routers.py 的 batch_execute_commands。
+// 设计见 design-v5.md §4.3（并发模型）与 §6.2（重试幂等）。
 package handler
 
 import (
@@ -17,22 +17,6 @@ import (
 
 // maxRequestBodySize 限制请求体大小（修复 B12：防止超大请求体导致 OOM）。
 const maxRequestBodySize = 10 << 20 // 10MB
-
-// testHandler POST /api/ssh/test
-// 请求体: {node, cmds}  响应: CmdsTestResult
-func testHandler(pool *sshpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Node model.Node `json:"node"`
-			Cmds []string   `json:"cmds"`
-		}
-		if !decodeJSONRequest(w, r, &req) {
-			return
-		}
-		result := executeSingle(r.Context(), pool, req.Node, req.Cmds)
-		writeJSON(w, result)
-	}
-}
 
 // batchHandler POST /api/ssh/batch
 // 请求体: {nodes, cmds}  响应: []CmdsTestResult

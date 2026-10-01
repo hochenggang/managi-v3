@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -236,14 +237,6 @@ func TestCloseAll(t *testing.T) {
 		"CloseAll should close old conn, forcing new dial")
 }
 
-// TestJoinLines 验证命令拼接。
-func TestJoinLines(t *testing.T) {
-	assert.Equal(t, "a", joinLines([]string{"a"}))
-	assert.Equal(t, "a\nb", joinLines([]string{"a", "b"}))
-	assert.Equal(t, "a\nb\nc", joinLines([]string{"a", "b", "c"}))
-	assert.Equal(t, "", joinLines([]string{}))
-}
-
 // TestSplitLines 验证行拆分。
 func TestSplitLines(t *testing.T) {
 	assert.Equal(t, []string{"a", "b"}, splitLines("a\nb\n"))
@@ -253,7 +246,7 @@ func TestSplitLines(t *testing.T) {
 	assert.Empty(t, splitLines("\n\n"))
 	// 中间空行是内容（cat/df 输出），不得被吞掉
 	assert.Equal(t, []string{"a", "", "b"}, splitLines("a\n\nb\n"))
-	assert.Equal(t, "a\n\nb", joinLines(splitLines("a\n\nb\n")))
+	assert.Equal(t, "a\n\nb", strings.Join(splitLines("a\n\nb\n"), "\n"))
 }
 
 // TestPool_HardCap 验证触达 hardCap 且无空闲连接可淘汰时返回 errPoolFull（B3 修复）。
@@ -437,7 +430,7 @@ func TestHostKeyCallback_TOFU(t *testing.T) {
 	remote := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 2222}
 	first, other := genHostKey(t), genHostKey(t)
 
-	cb := pool.hostKeyCallback(node)
+	cb := pool.hostKeys.callback(addr)
 	require.NoError(t, cb(addr, remote, first))
 	require.NoError(t, cb(addr, remote, first), "同一公钥重复出现应继续接受")
 
@@ -446,8 +439,7 @@ func TestHostKeyCallback_TOFU(t *testing.T) {
 	assert.Contains(t, err.Error(), "ssh host key mismatch")
 	assert.Contains(t, err.Error(), ssh.FingerprintSHA256(first), "报错需给出期望指纹，便于用户核对")
 
-	pool.mu.Lock()
-	recorded := pool.hostKeys[addr].key
-	pool.mu.Unlock()
+	recorded, ok := pool.hostKeys.recorded(addr)
+	require.True(t, ok)
 	assert.True(t, bytes.Equal(recorded.Marshal(), first.Marshal()), "TOFU 只记录首次公钥，不因拒绝而改写")
 }

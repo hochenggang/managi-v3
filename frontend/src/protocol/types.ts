@@ -1,6 +1,6 @@
 // 协议层：集中定义所有 WebSocket 与 HTTP 消息类型。
 // 取代 v2 散落在组件内的隐式约定，与后端 internal/model/types.go 对齐。
-// 设计见 ../../../design-v3.md §5.2.1。
+// 设计见 design-v5.md §5.2.1。
 
 /** 节点：远程 SSH 服务器描述（与 v2 typeApiNode 兼容）。 */
 export interface ApiNode {

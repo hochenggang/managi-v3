@@ -7,7 +7,7 @@ import { ref, computed } from 'vue'
 import { i18n } from '@/i18n'
 import { nodeSessionKey, type ApiNode } from '@/protocol/types'
 
-export type TabType = 'welcome' | 'batch' | 'terminal' | 'sftp' | 'settings'
+export type TabType = 'batch' | 'terminal' | 'sftp' | 'settings'
 
 export interface TabItem {
   id: string

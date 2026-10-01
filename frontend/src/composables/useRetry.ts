@@ -1,6 +1,6 @@
 // useRetry：通用指数退避重试 composable。
 // 修复 v2 网络响应丢失缺陷：HTTP 请求失败直接抛异常无重试。
-// 设计见 ../../../design-v3.md §6.2。
+// 设计见 design-v5.md §6.2。
 
 import { ref } from 'vue'
 

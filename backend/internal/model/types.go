@@ -1,6 +1,6 @@
 // Package model 定义后端核心数据结构。
 // 对应 v2 的 models.py，与前端 protocol/types.ts 对齐。
-// 设计见 ../design-v3.md §4.1。
+// 设计见 design-v5.md §4.1。
 package model
 
 import (

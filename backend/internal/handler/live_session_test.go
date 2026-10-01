@@ -1,41 +1,17 @@
 package handler
 
 import (
-	"bytes"
 	"strconv"
-	"strings"
 	"testing"
-	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"managi/internal/model"
+	"managi/internal/ring"
 	"managi/internal/sshpool"
 	"managi/internal/testutil"
 )
-
-// TestAppendScrollback_Truncation 验证 scrollback 超限时截断头部保留尾部。
-// 覆盖 appendScrollbackLocked 的截断逻辑。
-func TestAppendScrollback_Truncation(t *testing.T) {
-	ls := &liveSession{buf: make([]byte, 0, scrollbackMax+100)}
-	data := make([]byte, 100)
-	// 填充超过 scrollbackMax
-	iterations := scrollbackMax/100 + 2
-	for i := 0; i < iterations; i++ {
-		ls.appendScrollbackLocked(data)
-	}
-	assert.LessOrEqual(t, len(ls.buf), scrollbackMax, "scrollback should be truncated to scrollbackMax")
-	assert.Greater(t, len(ls.buf), 0, "scrollback should not be empty after data")
-}
-
-// TestAppendScrollback_SmallData 验证小数据不截断。
-func TestAppendScrollback_SmallData(t *testing.T) {
-	ls := &liveSession{buf: make([]byte, 0, 1024)}
-	ls.appendScrollbackLocked([]byte("hello"))
-	assert.Equal(t, "hello", string(ls.buf))
-	assert.Len(t, ls.buf, 5)
-}
 
 // TestLiveSession_IsClosed 验证 isClosed 状态检测。
 func TestLiveSession_IsClosed(t *testing.T) {
@@ -62,9 +38,8 @@ func TestLiveSession_IsClosedLocked(t *testing.T) {
 }
 
 // TestSessionManager_KeyLocksReclaimed 验证 per-sessionID 锁字典随使用回收：
-// 会话 ID 由前端每次打开标签页新生成，旧实现的锁字典只增不删会累积，
-// 此处用大量必然拨号失败的 ID 依次 AttachOrCreate，断言结束后字典归零。
-// 失败路径在触碰 wsConn 之前即返回，故传 nil 安全。
+// 会话 ID 由前端每次打开标签页新生成，锁字典若只增不删，长期运行必然累积。
+// 这里用 50 个必然拨号失败的 ID 依次 getOrCreate，断言结束后字典归零。
 func TestSessionManager_KeyLocksReclaimed(t *testing.T) {
 	pool := sshpool.New(testutil.TestConfig())
 	defer pool.CloseAll()
@@ -72,47 +47,76 @@ func TestSessionManager_KeyLocksReclaimed(t *testing.T) {
 
 	bad := model.Node{Host: "127.0.0.1", Port: 1, Username: "x", AuthType: model.AuthPassword, AuthValue: "p"}
 	for i := 0; i < 50; i++ {
-		id := "sess-" + strconv.Itoa(i)
-		_, _, err := mgr.AttachOrCreate(id, bad, nil, 80, 24)
+		_, _, err := mgr.getOrCreate("sess-"+strconv.Itoa(i), bad, 80, 24)
 		assert.Error(t, err)
 	}
 	assert.Equal(t, 0, mgr.keyLocks.Len(), "per-session lock entries must be reclaimed")
 }
 
-// TestSplitScrollback 验证回放切片的硬要求：不丢字节、不切断多字节字符、必然终止。
-func TestSplitScrollback(t *testing.T) {
-	// 1) 中文 + emoji 长文本：chunk=7 与 3/4 字节字符不整除，切点必然落在字符中间
-	data := []byte(strings.Repeat("终端输出😀", 20000))
-	parts := splitScrollback(data, 7)
-	assert.Equal(t, data, bytes.Join(parts, nil))
-	for _, p := range parts {
-		assert.NotEmpty(t, p, "切片不应为空")
-		assert.LessOrEqual(t, len(p), 7)
-		assert.True(t, utf8.Valid(p), "切片不应落在字符中间: %q", p)
-	}
+// TestGetOrCreate_FallsBackToConnectionKey 验证未传 session_id 时以连接键兜底：
+// 同一节点的两次 open 必须落到同一个会话，而不是各建一个 shell。
+func TestGetOrCreate_FallsBackToConnectionKey(t *testing.T) {
+	srv := testutil.Start(t)
+	t.Cleanup(srv.Close)
 
-	// 2) chunk 比一个字符还小：只能逐字节切，但不得死循环
-	emoji := []byte("😀😀")
-	assert.Equal(t, emoji, bytes.Join(splitScrollback(emoji, 1), nil))
+	cfg := testutil.TestConfig()
+	pool := sshpool.New(cfg)
+	t.Cleanup(pool.CloseAll)
+	mgr := newSessionManager(pool, cfg)
 
-	// 3) 任意二进制（终端里合法存在）：不丢字节即可
-	raw := bytes.Repeat([]byte{0x80, 0x81, 0x01, 0x02}, 100)
-	assert.Equal(t, raw, bytes.Join(splitScrollback(raw, 7), nil))
+	node := testutil.TestNode(srv.Host(), srv.Port())
+	ls1, reattached, err := mgr.getOrCreate("", node, 80, 24)
+	require.NoError(t, err)
+	assert.False(t, reattached, "首次 open 不该被判为复用")
+	t.Cleanup(func() { mgr.close(ls1.id) })
 
-	// 4) 边界：空输入 / 短于 chunk / chunk<=0
-	assert.Empty(t, splitScrollback(nil, 8))
-	assert.Equal(t, [][]byte{[]byte("abc")}, splitScrollback([]byte("abc"), 8))
-	assert.Equal(t, [][]byte{[]byte("abc")}, splitScrollback([]byte("abc"), 0))
+	ls2, reattached, err := mgr.getOrCreate("", node, 80, 24)
+	require.NoError(t, err)
+	assert.True(t, reattached, "同一连接键的第二次 open 必须复用会话")
+	assert.Same(t, ls1, ls2)
 }
 
-// TestAppendScrollback_TruncationKeepsWholeChars 验证超限截断后的缓冲区
-// 不以半个字符开头（回放首帧前端会渲染出乱码）。
-func TestAppendScrollback_TruncationKeepsWholeChars(t *testing.T) {
-	ls := &liveSession{}
-	one := []byte("中") // 3 字节：256KB 上限不能整除，截断点必然落在字符中间
-	for i := 0; i < scrollbackMax/len(one)+4; i++ {
-		ls.appendScrollbackLocked(one)
-	}
-	require.LessOrEqual(t, len(ls.buf), scrollbackMax)
-	assert.True(t, utf8.Valid(ls.buf), "截断后的 scrollback 应是完整字符序列")
+// TestLiveSession_AttachReplaysSnapshot 验证 attach 的原子约定：
+// 返回挂载前累积的 scrollback，并把输出目的地换成自己——此后实时输出都走新 sink。
+func TestLiveSession_AttachReplaysSnapshot(t *testing.T) {
+	ls := &liveSession{history: ring.New(1024), done: make(chan struct{})}
+	ls.history.Append([]byte("HISTORY"))
+	sink := &outSink{chanID: 7}
+
+	snapshot := ls.attach(sink)
+
+	assert.Equal(t, "HISTORY", string(snapshot))
+	assert.Same(t, sink, ls.sink)
+}
+
+// TestLiveSession_AttachOnClosedIsNoop 验证已关闭会话不给快照也不挂 sink：
+// 否则前端会连上一个再也读不到输出的 shell。
+func TestLiveSession_AttachOnClosedIsNoop(t *testing.T) {
+	ls := &liveSession{history: ring.New(1024), done: make(chan struct{})}
+	ls.history.Append([]byte("HISTORY"))
+	close(ls.done)
+
+	assert.Nil(t, ls.attach(&outSink{chanID: 1}))
+	assert.Nil(t, ls.sink)
+}
+
+// TestSessionManager_DetachIdentity 验证 detach 按 sink 身份摘除：
+// 旧通道（重连后被顶替的那路）的 detach 不能把当前通道正在用的 sink 摘掉。
+func TestSessionManager_DetachIdentity(t *testing.T) {
+	pool := sshpool.New(testutil.TestConfig())
+	defer pool.CloseAll()
+	mgr := newSessionManager(pool, testutil.TestConfig())
+
+	current := &outSink{chanID: 1}
+	stale := &outSink{chanID: 2}
+	ls := &liveSession{id: "s", done: make(chan struct{}), sink: current}
+
+	mgr.detach(ls, stale)
+	assert.Same(t, current, ls.sink, "别的通道的 detach 不应摘掉当前 sink")
+	assert.Nil(t, ls.closeTimer, "仍有输出通道时不该启动空闲计时器")
+
+	mgr.detach(ls, current)
+	assert.Nil(t, ls.sink)
+	require.NotNil(t, ls.closeTimer, "最后一个通道摘除后应启动空闲计时器")
+	ls.closeTimer.Stop()
 }

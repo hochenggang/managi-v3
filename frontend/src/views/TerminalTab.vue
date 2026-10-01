@@ -11,15 +11,14 @@
 </template>
 
 <script setup lang="ts">
-// 终端标签页：每个标签独立维护 xterm.js 实例与 WebSocket 连接。
+// 终端标签页：每个标签一个 xterm 实例，共用页面里那一条 /ws 连接（各自一路 PTY 通道）。
 // 组件被隐藏（v-show）时不会卸载，连接保持后台运行。
-// 连接状态细分为：首次连接(进行中/成功/失败) + 重试连接(进行中/成功/失败)。
-// 所有状态仅通过工具栏 status 文本+颜色呈现，不使用覆盖层。
+// 状态由「链路 + 通道」折成五态，全部只通过工具栏 status 文本+颜色呈现，不使用覆盖层。
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
 import { useTerminal, getTerminalTheme } from '@/composables/useTerminal'
-import type { ConnectionStatus } from '@/composables/useWebSocket'
+import type { ConnectionStatus } from '@/composables/useWSHub'
 import { useI18n } from 'vue-i18n'
 import type { ApiNode } from '@/protocol/types'
 import { useSettingsStore } from '@/stores/settingsStore'
@@ -38,28 +37,25 @@ let cleanup: (() => void) | null = null
 const generateGreenText = (text: string) => `\x1B[32m${text}\x1B[0m`
 
 const statusText = computed(() => {
-  const map: Record<string, string> = {
+  const map: Record<ConnectionStatus, string> = {
     idle: t('xtermPanel.idle'),
     connecting: t('xtermPanel.connecting'),
     connected: t('finder.connected'),
-    first_failed: t('xtermPanel.firstFailed'),
     reconnecting: t('xtermPanel.reconnecting'),
-    reconnect_failed: t('xtermPanel.reconnectFailed'),
-    disconnected: t('finder.disconnected'),
+    failed: t('xtermPanel.failed'),
   }
-  return map[status.value] ?? ''
+  return map[status.value]
 })
 
 const statusClass = computed(() => {
-  const map: Record<string, string> = {
+  const map: Record<ConnectionStatus, string> = {
+    idle: 'idle',
     connecting: 'connecting',
     connected: 'connected',
-    first_failed: 'failed',
     reconnecting: 'connecting',
-    reconnect_failed: 'failed',
-    disconnected: 'disconnected',
+    failed: 'failed',
   }
-  return map[status.value] ?? ''
+  return map[status.value]
 })
 
 onMounted(() => {
@@ -86,9 +82,9 @@ onMounted(() => {
     )
     return
   }
-  const { status: wsStatus } = useTerminal(terminalContainer.value, props.node)
+  const { status: termStatus } = useTerminal(terminalContainer.value, props.node)
   // immediate: true 确保首帧即同步，后续状态变更由 watch 驱动
-  cleanup = watch(wsStatus, (val) => { status.value = val }, { immediate: true })
+  cleanup = watch(termStatus, (val) => { status.value = val }, { immediate: true })
 })
 
 onUnmounted(() => {
@@ -144,7 +140,7 @@ onUnmounted(() => {
   color: var(--color-red);
 }
 
-.status.disconnected {
+.status.idle {
   color: var(--color-font-3, #4C566A);
 }
 

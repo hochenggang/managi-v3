@@ -1,6 +1,12 @@
-// Package handler - WebSocket 消息协议定义。
-// 所有 WS 文本帧统一为 {type, data} envelope，集中定义避免前后端协议漂移。
-// 与前端 protocol/ws.ts 对齐。
+// Package handler - WS 协议层：控制面 JSON envelope + 数据面二进制帧。
+//
+// 一条 /ws 连接服务整个页面：每个终端标签占一路 PTY 通道，每个文件管理标签占一路
+// SFTP 通道。两类帧各走各的平面：
+//   - 文本帧 = 控制面：{type, data, seq}，一问一答，靠 seq 关联。
+//   - 二进制帧 = 数据面（internal/wire）：[chan][flags][原始字节]，
+//     PTY 输出、粘贴输入、文件分片都在此处，不经过 string→JSON。
+//
+// 与前端 protocol/ws.ts、protocol/frames.ts 一一对应。
 package handler
 
 import (
@@ -11,68 +17,53 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"managi/internal/model"
+	"managi/internal/wire"
 )
 
-// WS 消息类型常量。
+// 通道种类（open.kind）。
 const (
-	msgTypeLogin         = "login"           // 登录（首帧）/ 登录结果
-	msgTypeMsg           = "msg"             // 终端输入/输出
-	msgTypeResize        = "resize"          // 终端尺寸调整
-	msgTypePing          = "ping"            // 心跳请求
-	msgTypePong          = "pong"            // 心跳响应
-	msgTypeError         = "error"           // 错误
-	msgTypeList          = "list"            // SFTP 列目录
-	msgTypeOk            = "ok"              // SFTP 操作成功
-	msgTypeDownloadStart = "download_start"  // SFTP 下载开始
-	msgTypeComplete      = "complete"        // SFTP 下载完成
-	msgTypeChunkAck      = "chunk_ack"       // SFTP 分片确认
-	msgTypeUploadInit    = "upload_init"     // SFTP 上传初始化
-	msgTypeUploadDone    = "upload_complete" // SFTP 上传完成
-	msgTypeMkdir         = "mkdir"
-	msgTypeDelete        = "delete"
-	msgTypeRename        = "rename"
-	msgTypeDownload      = "download"
+	kindPTY  = "pty"
+	kindSFTP = "sftp"
 )
 
-// wsEnvelope 统一消息信封 {type, data, seq?}。
-// seq 用于 SFTP 请求-响应关联：响应回填请求的 seq，前端据此丢弃迟到的旧响应；
-// 无请求-响应语义的消息（终端输出/登录/心跳）保持 0，序列化时省略。
+// 控制面动词。
+// 请求 seq>0 ⇒ 同 type、同 seq 回且只回一次；seq=0 ⇒ 不等回复（resize/ping）。
+const (
+	msgOpen      = "open"       // 打开通道（pty 或 sftp）
+	msgClose     = "close"      // 关闭通道
+	msgResize    = "resize"     // PTY 窗口尺寸
+	msgPing      = "ping"       // 客户端心跳请求
+	msgPong      = "pong"       // 服务端心跳响应
+	msgError     = "error"      // 错误（带 chan 表示某通道上的流错误）
+	msgLS        = "ls"         // 列目录
+	msgMkdir     = "mkdir"      // 建目录
+	msgRM        = "rm"         // 删除
+	msgUpload    = "upload"     // 开始上传（后续数据走数据面）
+	msgUploadEnd = "upload_end" // 上传落定（服务端主动推）
+	msgDownload  = "download"   // 开始下载（数据走数据面，以 FlagEnd 收尾）
+)
+
+// wsEnvelope 控制面信封 {type, data, seq?}。
+// seq 回填请求的 seq，前端据此丢弃迟到的旧响应；服务端主动推的消息 seq=0，序列化时省略。
 type wsEnvelope struct {
 	Type string          `json:"type"`
 	Data json.RawMessage `json:"data,omitempty"`
 	Seq  int64           `json:"seq,omitempty"`
 }
 
-// wsLoginResult 登录结果 data 负载。
-type wsLoginResult struct {
-	Success    bool   `json:"success"`
-	Message    string `json:"message,omitempty"`
-	Reattached bool   `json:"reattached,omitempty"` // true=复用了已存在的终端会话
-}
-
-// wsErrorData 错误 data 负载。
+// wsErrorData 错误 data 负载。chan 为 0 表示与具体通道无关。
 type wsErrorData struct {
+	Chan    uint32 `json:"chan,omitempty"`
 	Message string `json:"message"`
 }
 
-// wsResizeData resize data 负载。
-type wsResizeData struct {
-	Cols int `json:"cols"`
-	Rows int `json:"rows"`
-}
+// wsUpgrader /ws 的升级器。
+// 不在此配置缓冲与消息上限：handler 升级后、读首帧前会按自己的帧大小 SetReadLimit，
+// 此处再配一份只会漂移成第二个真相。
+var wsUpgrader = websocket.Upgrader{CheckOrigin: checkOrigin}
 
-// loginFrame 新版 login 首帧 data 负载：{node, session_id, cols, rows}。
-// 兼容旧格式（data 直接为 Node）：readLoginFrame 检测后回退。
-type loginFrame struct {
-	Node      model.Node `json:"node"`
-	SessionID string     `json:"session_id"`
-	Cols      int        `json:"cols"`
-	Rows      int        `json:"rows"`
-}
-
-// wsConn 封装 *websocket.Conn，加互斥锁保护并发写。
-// 读方法不加锁（由调用方保证单线程读）。
+// wsConn 封装 *websocket.Conn：一把写锁保护所有写（含控制帧）。
+// 读方法不加锁，由 hub 的单读协程独占。
 type wsConn struct {
 	conn *websocket.Conn
 	mu   sync.Mutex
@@ -94,10 +85,11 @@ func (w *wsConn) setReadDeadline(t time.Time) error {
 // 内核发送缓冲区上；没有写超时，回放与输出协程会永久挂住并拖住整条会话。
 const wsWriteDeadline = 30 * time.Second
 
-// writeLocked 在所有写操作持 mu 的前提下统一加写超时。
+// lock 持锁执行 fn：一次锁内可以连续写多帧，用于「响应 + 回放」这类必须成原子段的输出。
+// 锁顺序：wc.mu → 通道自己的锁，通道锁内不做网络 I/O。
 // 写失败即关闭连接：gorilla 语义下写失败/超时后连接不可再用（半截帧已发出），
 // 留着只会让对端一直等待，关掉才能让读侧及时退出并触发会话清理。
-func (w *wsConn) writeLocked(fn func() error) error {
+func (w *wsConn) lock(fn func() error) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
@@ -108,74 +100,85 @@ func (w *wsConn) writeLocked(fn func() error) error {
 	return nil
 }
 
+// writeJSON 写一个文本帧（调用方需未持锁；持锁时直接用 w.conn.WriteJSON）。
 func (w *wsConn) writeJSON(v any) error {
-	return w.writeLocked(func() error { return w.conn.WriteJSON(v) })
+	return w.lock(func() error { return w.conn.WriteJSON(v) })
 }
 
-func (w *wsConn) writeRaw(messageType int, data []byte) error {
-	return w.writeLocked(func() error { return w.conn.WriteMessage(messageType, data) })
-}
-
-// writeEnvelope 写入 {type, data} 消息。data 为 nil 时不带 data 字段。
-func (w *wsConn) writeEnvelope(msgType string, data any) error {
-	return w.writeEnvelopeSeq(msgType, data, 0)
-}
-
-// writeEnvelopeSeq 写入带 seq 的消息：SFTP 响应回填请求的 seq，前端据此丢弃迟到的旧响应。
-// seq=0 时序列化省略，与旧协议兼容。
-func (w *wsConn) writeEnvelopeSeq(msgType string, data any, seq int64) error {
-	var dataBytes json.RawMessage
+// writeEnvelope 写控制面响应。data 为 nil 时不带 data 字段。
+func (w *wsConn) writeEnvelope(msgType string, data any, seq int64) error {
+	var raw json.RawMessage
 	if data != nil {
 		b, err := json.Marshal(data)
 		if err != nil {
 			return err
 		}
-		dataBytes = b
+		raw = b
 	}
-	return w.writeJSON(wsEnvelope{Type: msgType, Data: dataBytes, Seq: seq})
+	return w.writeJSON(wsEnvelope{Type: msgType, Data: raw, Seq: seq})
 }
 
-func (w *wsConn) writeError(message string) error {
-	return w.writeEnvelope(msgTypeError, wsErrorData{Message: message})
+// writeError 写错误响应/通知：seq 回填失败请求的 seq，chan 指出出问题的通道。
+func (w *wsConn) writeError(chanID uint32, seq int64, message string) error {
+	return w.writeEnvelope(msgError, wsErrorData{Chan: chanID, Message: message}, seq)
 }
 
-// writeLoginResult 发送登录结果。reattached=true 表示复用了已存在的终端会话。
-func (w *wsConn) writeLoginResult(success bool, message string, reattached bool) error {
-	return w.writeEnvelope(msgTypeLogin, wsLoginResult{Success: success, Message: message, Reattached: reattached})
+// frameWriter 数据面写出口：*wsConn 实现它，pump 因此能对着收集器单测。
+type frameWriter interface {
+	writeFrame(f wire.Frame) error
 }
 
-func (w *wsConn) writeMsg(data string) error {
-	return w.writeEnvelope(msgTypeMsg, data)
+// writeFrame 写一个数据面二进制帧。
+func (w *wsConn) writeFrame(f wire.Frame) error {
+	return w.lock(func() error { return w.writeFrameLocked(f) })
 }
 
-func (w *wsConn) writePong() error {
-	return w.writeEnvelope(msgTypePong, nil)
+// writeFrameLocked 编码并写出一帧。调用方必须持写锁。
+func (w *wsConn) writeFrameLocked(f wire.Frame) error {
+	buf := make([]byte, 0, wire.HeaderLen+len(f.Payload))
+	return w.conn.WriteMessage(websocket.BinaryMessage, f.AppendTo(buf))
 }
 
-func (w *wsConn) writePing() error {
-	// WriteControl 亦属写操作，gorilla/websocket 要求所有写（含控制帧）串行，
-	// 必须复用 w.mu 与 writeJSON/writeRaw 互斥，否则并发写会破坏连接。
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(10*time.Second))
-}
-
-// installPongHandler 安装「收到 Pong 即续期读超时」的回调。
-// 必须在启动心跳协程之前、由读侧调用：gorilla 把 handler 存为连接上的普通字段，
-// 与 ReadMessage 并发赋值属数据竞争。
-func installPongHandler(wc *wsConn, deadline time.Duration) {
-	wc.conn.SetPongHandler(func(string) error {
-		return wc.setReadDeadline(time.Now().Add(deadline))
+// writeOpen 原子写出「open 响应 + 回放快照」：二者之间不允许任何实时帧插队，
+// 否则用户会先看到最新一行、再看到历史 scrollback。
+// mount 在响应已发出后调用，负责挂载输出目的地并返回挂载前累积的快照；
+// 此后实时帧都要抢同一把写锁，天然排在回放之后。
+func (w *wsConn) writeOpen(chanID uint32, resp any, seq int64, frameSize int, mount func() []byte) error {
+	return w.lock(func() error {
+		if err := writeEnvelopeLocked(w.conn, msgOpen, resp, seq); err != nil {
+			return err
+		}
+		frame := wire.Frame{Chan: chanID}
+		for _, part := range splitBytes(mount(), frameSize) {
+			frame.Payload = part
+			if err := w.writeFrameLocked(frame); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 
-// startPingLoop 启动服务端 WS Ping 循环：定期发送控制帧 Ping。
+// writeEnvelopeLocked 在已持写锁的路径上写控制面帧（避免自锁）。
+func writeEnvelopeLocked(conn *websocket.Conn, msgType string, data any, seq int64) error {
+	var raw json.RawMessage
+	if data != nil {
+		b, err := json.Marshal(data)
+		if err != nil {
+			return err
+		}
+		raw = b
+	}
+	return conn.WriteJSON(wsEnvelope{Type: msgType, Data: raw, Seq: seq})
+}
+
+// startPingLoop 服务端 WS 心跳：定期发控制帧 Ping，避免浏览器后台定时器节流导致断连。
 // Pong 回调由 installPongHandler 提前装好，此处只负责发包。
 func startPingLoop(ctx context.Context, wc *wsConn, intervalSec int) {
-	if intervalSec <= 0 {
-		intervalSec = 30
-	}
 	interval := time.Duration(intervalSec) * time.Second
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -183,17 +186,37 @@ func startPingLoop(ctx context.Context, wc *wsConn, intervalSec int) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := wc.writePing(); err != nil {
+			// PingMessage 亦属写操作，gorilla 要求所有写（含控制帧）串行，故复用写锁。
+			if err := wc.lock(func() error {
+				return wc.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(10*time.Second))
+			}); err != nil {
 				return
 			}
 		}
 	}
 }
 
-// parseEnvelope 解析 envelope，失败返回 ok=false。
+// installPongHandler 安装「收到 Pong 即续期读超时」的回调。
+// 必须在第一次 ReadMessage 之前调用：gorilla 把 handler 存为连接上的普通字段，
+// 与 ReadMessage 并发赋值属数据竞争。
+func installPongHandler(wc *wsConn, deadline time.Duration) {
+	wc.conn.SetPongHandler(func(string) error {
+		return wc.setReadDeadline(time.Now().Add(deadline))
+	})
+}
+
+// parseEnvelope 解析控制面帧，失败返回 ok=false。
 func parseEnvelope(data []byte) (env wsEnvelope, ok bool) {
 	if err := json.Unmarshal(data, &env); err != nil {
 		return wsEnvelope{}, false
 	}
 	return env, true
+}
+
+// decodeData 把 envelope.data 解进 dst；空 data 视作零值，由调用方的校验兜住。
+func decodeData(raw json.RawMessage, dst any) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	return json.Unmarshal(raw, dst)
 }

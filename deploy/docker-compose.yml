@@ -1,5 +1,5 @@
 # Managi v3 docker-compose
-# 设计见 ../design-v3.md §8.2
+# 设计见 design-v5.md §8.2
 
 services:
   managi:
@@ -15,16 +15,14 @@ services:
       - MANAGI_HOST=0.0.0.0
       - MANAGI_PORT=18001
       - MANAGI_INDEX_HTML=/app/index.html
-      # 安全默认值：默认启用 BasicAuth，避免误暴露在公网成为开放跳板机。
-      # 密码必须由宿主环境或同目录 .env 提供：
-      #   echo 'MANAGI_BASICAUTH_PASSWORD=你的密码' > .env
+      # 安全默认值：MANAGI_AUTH 非空即启用 BasicAuth（凭据本身就是开关），
+      # 避免误暴露在公网成为开放跳板机。凭据必须由宿主环境或同目录 .env 提供：
+      #   echo 'MANAGI_AUTH=admin:你的密码' > .env
       # 留空的后果不是「无密码」，而是每次启动生成一个新随机口令并写进启动日志：
       # 配合 restart: unless-stopped，容器每次重启口令都变，日志里还留着历史明文。
-      - MANAGI_BASICAUTH_ENABLED=true
-      - "MANAGI_BASICAUTH_USERNAME=${MANAGI_BASICAUTH_USERNAME:-admin}"
-      - "MANAGI_BASICAUTH_PASSWORD=${MANAGI_BASICAUTH_PASSWORD:?请先设置 MANAGI_BASICAUTH_PASSWORD（留空会每次重启换随机口令并打印到日志）}"
-      - MANAGI_SSH_TIMEOUT=15
-      - MANAGI_KEEPALIVE=30
+      - "MANAGI_AUTH=${MANAGI_AUTH:?请先在 .env 设置 MANAGI_AUTH=user:pass（留空会每次重启换随机口令并打印到日志）}"
+      # 严格主机密钥校验（可选）：挂载 known_hosts 后设 MANAGI_KNOWN_HOSTS 指向它
+      # - MANAGI_KNOWN_HOSTS=/app/known_hosts
     restart: unless-stopped
     # 容器硬化：只读根文件系统、最小权限、禁用特权升级
     read_only: true
