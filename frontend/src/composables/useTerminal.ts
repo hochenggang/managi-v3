@@ -102,6 +102,8 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
   // 单帧载荷上限：服务端定（超限的帧会被 WS 读上限掐断整条连接）。
   let frameBudget = DEFAULT_INPUT_FRAME_BYTES
   let openedOnce = false
+  // 字体加载是异步的，落地时终端可能已经卸载，dispose 过的实例不能再 fit。
+  let disposed = false
 
   const channel = hub.attach({
     openData: (): OpenPTY => ({
@@ -249,6 +251,21 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
   const resizeObserver = new ResizeObserver(onResize)
   resizeObserver.observe(container)
 
+  // 内嵌字体是异步生效的：字体没加载完就 fit()，字符宽高按兜底字体测出来，
+  // 行列数会一直错下去（xterm 自己不等字体）。加载落地后再校正一次。
+  // happy-dom 没有 FontFaceSet，此时直接 fit（测试里字体由 mock 决定）。
+  function refitWhenFontsReady(): void {
+    const loading = document.fonts?.load(`${term.options.fontSize}px ${term.options.fontFamily}`)
+    if (!loading) {
+      onResize()
+      return
+    }
+    loading.catch(() => undefined).then(() => {
+      if (!disposed) onResize()
+    })
+  }
+  refitWhenFontsReady()
+
   // 监听终端字体/主题变化，热更新 xterm 实例并重新 fit
   const stopSettingsWatch = watch(
     () => settings.settings,
@@ -260,6 +277,8 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
       // 字体/主题变化影响字符宽高，需重新 fit 同步行列数到后端
       fitAddon.fit()
       sendResize()
+      // 新字体可能还没生效，fit 一次不算完，加载落地后再校正一次
+      refitWhenFontsReady()
     },
     { deep: true },
   )
@@ -268,6 +287,7 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
   const status = computed(() => uiStatus(hub.status.value, channel.state.value))
 
   onUnmounted(() => {
+    disposed = true
     stopStateWatch()
     stopSettingsWatch()
     container.removeEventListener('contextmenu', handleContextMenu)

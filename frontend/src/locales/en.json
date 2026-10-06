@@ -164,7 +164,13 @@
         "terminal": {
             "title": "Terminal",
             "fontSize": "Font Size",
-            "fontFamily": "Font Family"
+            "fontFamily": "Font Family",
+            "fonts": {
+                "jetbrains": "JetBrains Mono ExtraLight",
+                "oldtimey": "OldTimeyCode Light",
+                "honchoko": "Honchoko Mono Light",
+                "system": "System Font"
+            }
         },
         "security": {
             "title": "Security",

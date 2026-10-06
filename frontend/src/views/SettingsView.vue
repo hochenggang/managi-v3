@@ -49,7 +49,12 @@
           </div>
           <div class="setting-item">
             <label>{{ t('settings.terminal.fontFamily') }}</label>
-            <input type="text" v-model="settingsStore.settings.terminalFontFamily" />
+            <select :value="settingsStore.settings.terminalFontFamily" @change="onFontFamilyChange">
+              <option v-for="font in fontOptions" :key="font.labelKey" :value="font.fontFamily"
+                :style="{ fontFamily: font.fontFamily }">
+                {{ t(font.labelKey) }}
+              </option>
+            </select>
           </div>
         </div>
 
@@ -80,7 +85,7 @@
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useSettingsStore, type ThemeName, type Settings } from '@/stores/settingsStore'
+import { useSettingsStore, TERMINAL_FONT_OPTIONS, type ThemeName, type Settings } from '@/stores/settingsStore'
 import { useNodesStore } from '@/stores/nodesStore'
 import { useShortcutsStore } from '@/stores/shortcutsStore'
 import { handleError, handleMsg, toErrorMessage } from '@/helper'
@@ -111,6 +116,8 @@ const themes = [
   { key: 'github-dark', label: 'GitHub Dark', preview: '#0D1117' },
   { key: 'github-light', label: 'GitHub Light', preview: '#FFFFFF' },
 ]
+
+const fontOptions = TERMINAL_FONT_OPTIONS
 
 function exportConfig(): void {
   shortcutsStore.ensureLoaded()
@@ -214,6 +221,10 @@ function handleLanguageChange(): void {
 function onFontSizeChange(e: Event): void {
   const val = Number((e.target as HTMLInputElement).value)
   settingsStore.setTerminalFontSize(val)
+}
+
+function onFontFamilyChange(e: Event): void {
+  settingsStore.setTerminalFontFamily((e.target as HTMLSelectElement).value)
 }
 
 watch(

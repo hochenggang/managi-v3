@@ -164,7 +164,13 @@
         "terminal": {
             "title": "终端",
             "fontSize": "字体大小",
-            "fontFamily": "字体"
+            "fontFamily": "字体",
+            "fonts": {
+                "jetbrains": "JetBrains Mono ExtraLight",
+                "oldtimey": "OldTimeyCode Light",
+                "honchoko": "Honchoko Mono Light",
+                "system": "系统字体"
+            }
         },
         "security": {
             "title": "安全",
