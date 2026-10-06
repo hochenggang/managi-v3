@@ -37,7 +37,7 @@ func newTOFUStore(path string) (*tofuStore, error) {
 		slog.Warn("TOFU 信任库路径不可用，主机密钥仅进程内记录（重启即忘）")
 		return s, nil
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: 路径来自部署配置（默认 ~/.managi/known_hosts，或 MANAGI_KNOWN_HOSTS 指向的文件），非请求输入
 	switch {
 	case err == nil:
 		if err := s.load(data); err != nil {
