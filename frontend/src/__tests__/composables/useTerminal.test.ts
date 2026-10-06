@@ -25,6 +25,8 @@ vi.mock('@/composables/useConfirm', () => ({
 
 vi.mock('@/stores/settingsStore', () => ({
   useSettingsStore: () => mockSettingsHolder,
+  // 测试环境没有真实字体，直接兑现：等字体的重测路径照走，断言才覆盖得到
+  waitForTerminalFont: () => Promise.resolve(),
 }))
 
 // 只替换 useWSHub() 这个取单例的入口，uiStatus 等纯函数保持真实实现
@@ -294,21 +296,41 @@ describe('useTerminal', () => {
     })
   })
 
-  // 敲键是同步快路径：不进队列、不等水位，手感不能被背压拖慢
+  // 刷新后首开时内嵌字体还没解码，xterm 量到的是兜底字体的字符宽高；
+  // 同值赋值不会触发它重测（OptionsService 显式跳过未变化的选项），
+  // 所以字体落地必须走「字号推一格再退回」把测量逼出来，再按新宽高发 resize。
+  it('字体落地后重测字符宽高并按新宽高发 resize', async () => {
+    const writes: unknown[] = []
+    Object.defineProperty(mockTerminal.options, 'fontSize', {
+      configurable: true,
+      get: () => 14,
+      set: (value: unknown) => { writes.push(value) },
+    })
+    try {
+      const { chan } = mountTerminal()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(writes).toEqual([15, 14])
+      expect(chan.notifies[chan.notifies.length - 1]).toMatchObject({ type: 'resize' })
+    } finally {
+      delete mockTerminal.options.fontSize
+    }
+  })
+
+  // 敲键是同步快路径：不进队列、不等 ack，手感不能被背压拖慢
   it('输入：单帧且链路就绪时同步发出，不经队列', () => {
     const { chan } = mountTerminal(1024)
     onDataCb!('ls\r')
     expect(sizes(chan)).toEqual([3])
-    expect(chan.drainCalls).toBe(0)
+    expect(chan.ackWaits).toBe(0)
   })
 
-  it('输入按服务端下发的 chunk_size 分帧，逐帧等发送缓冲回落后才发下一片', async () => {
+  it('输入按服务端下发的 chunk_size 分帧，逐帧等输入窗口放行后才发下一片', async () => {
     const { chan } = mountTerminal(4)
     onDataCb!('abcdefghij')
     await settled(chan, 3)
     expect(sizes(chan)).toEqual([4, 4, 2])
     expect(chan.frames.every((f) => !f.end)).toBe(true)
-    expect(chan.drainCalls).toBe(3)
+    expect(chan.ackWaits).toBe(3)
     expect(joinParts(chan.frames.map((f) => f.payload))).toBe('abcdefghij')
   })
 

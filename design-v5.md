@@ -10,7 +10,7 @@
 | 交付形态 | 一个 `managi` 二进制两种形态：默认 HTTP 服务器；`-tags desktop` + `-tray` 为 Windows 托盘 |
 | 协议 | 单一 `/ws`：控制面 JSON `{type,data,seq}`，数据面二进制 `[chan u32][flags u16][raw]` |
 | HTTP 端点 | `/`（前端单页）、`/health`、`/ws`、`/api/ssh/batch`、`/api/sftp/download`；未注册的 `/api/*` 回 JSON 404 |
-| 环境变量 | 5 个：`MANAGI_HOST`/`PORT`/`AUTH`/`INDEX_HTML`/`KNOWN_HOSTS`，其余参数为编译期默认值 |
+| 环境变量 | 8 个：`MANAGI_HOST`/`PORT`/`AUTH`/`INDEX_HTML`/`KNOWN_HOSTS`/`TLS_CERT`/`TLS_KEY`/`TRUSTED_PROXIES`，其余参数为编译期默认值 |
 | 认证 | 无状态中转：凭据只来自请求，不落盘；BasicAuth 由 `MANAGI_AUTH=user:pass` 自身开关 |
 | 兼容 | 前后端同仓同步迭代，**不承诺**与 v2 协议兼容 |
 
@@ -103,7 +103,7 @@ managi-v3/
 ├── backend/                    # Go 后端（单 main，两种形态）
 │   ├── cmd/managi/main.go      # 入口：默认服务器，-tray 走托盘
 │   ├── internal/
-│   │   ├── config/             # 5 个环境变量 + Normalize 兜底
+│   │   ├── config/             # 8 个环境变量 + Normalize 兜底 + Validate 拒启动
 │   │   ├── server/             # 路由/中间件/超时的统一装配
 │   │   ├── handler/            # HTTP + WS 端点
 │   │   │   ├── handler.go      # 路由表
@@ -115,8 +115,9 @@ managi-v3/
 │   │   │   ├── chan_sftp.go    # SFTP 通道（ls/mkdir/rm/upload/download）
 │   │   │   ├── live_session.go # 会话复用与空闲回收
 │   │   │   ├── auth.go         # BasicAuth + clientIP
-│   │   │   ├── accesslog.go    # 访问日志（真实连接 IP）
+│   │   │   ├── accesslog.go    # 访问日志（归因 IP，可配可信代理）
 │   │   │   ├── headers.go      # 安全响应头
+│   │   │   ├── input_queue.go  # 每通道有界输入队列（读循环只入队）
 │   │   │   └── stream.go       # 数据面分片收发组合子
 │   │   ├── wire/               # 协议编解码：envelope + 二进制帧头
 │   │   ├── sshpool/            # SSH 连接池(复用/保活/淘汰)
@@ -194,7 +195,7 @@ managi-v3/
 | 模块 | 职责 | 对应 v2 |
 |------|------|---------|
 | `cmd/managi/main.go` | 解析 flag、加载配置、按形态分派（服务器 / 托盘） | `app.py` |
-| `internal/config` | 5 个环境变量加载 + `Normalize()` 兜底非法值 | `setting.py` |
+| `internal/config` | 8 个环境变量加载 + `Normalize()` 兜底非法值 + `Validate()` 拒绝启动级错误 | `setting.py` |
 | `internal/server` | 路由与中间件装配、优雅关闭（服务器与托盘共用） | `app.py` 装配部分 |
 | `internal/sshpool` | SSH 连接池(复用/保活/淘汰) | `ssh_pool.py` |
 | `internal/handler` | HTTP + WebSocket 端点 | `routers.py` |
@@ -231,18 +232,20 @@ managi-v3/
 - **命令执行也复用**：Get → 执行 → Release（减引用，不关闭），下次同节点命令直接复用。
 - **保活**：每 30s 发送 keepalive packet；探测失败即从池中剔除，不滞留到 cleanIdle。
 - **并发安全**：per-key `sync.Mutex` 串行化连接创建，连接本身 goroutine 安全。
-- **主机密钥**：默认进程内 TOFU（首次记录公钥，之后不符即拒）；设 `MANAGI_KNOWN_HOSTS`
-  走 OpenSSH known_hosts 严格校验，文件无法解析时拒绝所有连接而不退回 TOFU。
+- **主机密钥**：默认文件化 TOFU（首次记录公钥，之后不符即拒），信任库为
+  `~/.managi/known_hosts`（OpenSSH known_hosts 格式），跨进程重启有效；库文件损坏即拒绝所有连接（坏行会让信任锚静默消失，
+  下次连接被当成「首次」而信任任意密钥），库不可写（如容器只读根文件系统）才降级为进程内记录并告警。
+  设 `MANAGI_KNOWN_HOSTS` 走 OpenSSH known_hosts 严格校验，文件无法解析时拒绝所有连接而不退回 TOFU。
 
 ### 4.3 并发模型
 
 | 场景 | 模型 |
 |------|------|
-| 批量命令 | `errgroup.Group` 并发执行多节点，`SetLimit` 控制并发数；单节点失败不取消其它节点 |
+| 批量命令 | 入口闸：节点数 ≤100、总时限 15min；`errgroup.Group` 并发执行（SetLimit 10）、单路输出 4MB 截断；单节点失败不取消其它节点 |
 | 终端输出 | 一路会话一个 `outputLoop` goroutine：读 shell stdout → 追加 scrollback → 转发给当前挂载的 outSink |
-| 终端输入 | `/ws` 的唯一读协程把数据面帧原样写进 PTY stdin；大粘贴的规模护栏在前端（`useTerminal`），后端靠帧大小上限兜住 |
-| 会话复用 | `sessionManager` 按 session_id 索引；标签/连接断开后保留 60s，重开同一 id 复用同一 shell（CWD/进程/scrollback 都在） |
-| SFTP 上传 | 同一条读协程按 chan 落盘 `.part`（无后台写者，天然无并发写冲突） |
+| 终端输入 | 每路通道一个输入协程消费有界队列后写 PTY stdin：`/ws` 读协程只做入队与记账，远端不读时绝不堵住整条连接；队列溢出丢帧并以补偿 ack + 提示保通道存活 |
+| 会话复用 | `sessionManager` 按 session_id 索引；标签/连接断开后保留 60s，重开同一 id 复用同一 shell（CWD/进程/scrollback 都在）。命中已有会话时核对节点连接键：id 与节点身份失配即拒绝（会话不跨节点复用） |
+| SFTP 上传 | 每路通道一个输入协程按序把帧写入 `.part`（一通道一写入者，无并发写冲突）；积压溢出中止整条通道（error + 补偿 ack），已落盘字节留在 `.part` 供续传 |
 | SFTP 下载 | `pump` goroutine 逐块读 + 单帧写出，`ctx` 取消时关掉读侧解阻塞；EOF 补 `FlagEnd`，读错**不补**（前端据此判失败） |
 | WS 心跳 | 服务端 `time.Ticker` 定时 Ping（30s），`SetReadDeadline`（90s）在 Pong 回调里重置 |
 | 写并发 | 一条连接一把写锁（`wsConn.mu`）保护所有写，含控制帧；每次写设 30s 写截止（页面冻结/半断网时 `WriteMessage` 会一直堵在内核发送缓冲区上，没有写超时会拖住整条会话）；锁顺序固定 `wc.mu → ls.mu`，锁内不做网络 I/O |
@@ -254,30 +257,41 @@ managi-v3/
 
 | 端点 | 方法 | 协议 | 说明 |
 |------|------|------|------|
-| `/api/ssh/batch` | POST | `{nodes, cmds}` | 批量命令执行（errgroup 并发），回 `[]CmdsTestResult` |
+| `/api/ssh/batch` | POST | `{nodes, cmds}` | 批量命令执行（errgroup 并发），回 `[]CmdsTestResult`；入口闸：节点 ≤100、总时限 15min、单路输出 4MB 截断 |
 | `/api/sftp/download` | POST | `{node, path}` + `Range` 头 | HTTP Range 下载（断点续传），凭据走 body 不落 URL |
 | `/ws` | WS | 文本帧=控制面，二进制帧=数据面 | 终端 + SFTP 全部走这一条连接 |
 | `/health` | GET | — | 探活（不经鉴权，供桌面端开浏览器与容器 HEALTHCHECK） |
 | `/` | GET | — | 前端单页 |
 | `/api/*` | 任意 | — | 未注册路径回 JSON 404（不回落首页 HTML） |
 
+**`/api/*` 写端点的跨站闸**：统一经 `apiPost` 包装——仅 POST；`Sec-Fetch-Site` 非 `same-origin`/`none`
+（即 cross-site/same-site，空值=非浏览器客户端）回 403；请求体强制 `application/json`（跨站表单发不出该
+类型）。浏览器自动携带 BasicAuth 的场景下，跨站页面无法再借道发起写操作（CSRF）。
+
 **控制面**（文本帧，`{type, data, seq}`）：
 
 ```
 open      {kind:"pty"|"sftp", node, session_id?, cols?, rows?}
-          → {kind, chan, home?, reattached?, chunk_size?}
+          → {kind, chan, home?, reattached?, chunk_size?, window?}
           // home：该账号的初始目录（SFTP）；reattached：命中 60s 会话复用
           // chunk_size：PTY 的入站单帧上限（SFTP 的切片大小随 upload 响应下发）
+          // window：输入窗口（字节），客户端发送方向的节流依据
 close     {chan}                         → 关一路通道
 resize    {chan, cols, rows}             // seq=0，不等回复
 ping / pong                              → 心跳，服务端据此重置读超时
 error     {chan, message}                // chan=0 表示与通道无关
+ack       {chan, bytes}                  // seq=0，已消费或已作废的累计输入字节
 ls / mkdir / rm / upload / download  {chan, path, filename, size, offset}
 upload_end {chan, size}                  // 服务端主动推，seq=0
 ```
 
 **数据面**（二进制帧，`internal/wire`）：`[chan:4 BE][flags:2 BE][原始字节]`，`HeaderLen=6`。
 PTY 输出、粘贴输入、文件分片都在此处，不经 `string→JSON`；`FlagEnd` 表示该通道这路流到此结束。
+
+**输入流控**（发送方向背压）：服务端在 open 响应里给出 `window`，客户端"已发 − 已确认"不超过它才继续
+发送（`useWSHub.waitAck`）；服务端每消费完一帧即回 `ack`（累计值，含丢弃补偿），重连换通道即重置账本。
+服务端输入队列预算 = 窗口 + 一片余量：合规客户端永远填不满，溢出只是防线的防线——PTY 溢出丢帧并以补偿
+ack 催齐账本（通道存活），SFTP 溢出中止整条通道（error + 补偿 ack，`.part` 保留可续传）。
 
 **seq 关联**：请求 `seq>0` ⇒ 同 type、同 seq 回且只回一次；服务端主动推的消息 `seq=0`（序列化时省略）。
 前端按 seq 匹配当前请求，seq 不符或迟到的帧一律丢弃。协议换代后**不再兼容 v2**：
@@ -395,27 +409,34 @@ protocol/
 **实现方案**（控制面开路径，字节走数据面）：
 
 ```
-开上传:  {type:"upload", data:{chan, path, filename, size}, seq}
+开上传:  {type:"upload", data:{chan, path, filename, size, mtime}, seq}
          ← {type:"upload", data:{chan, offset, chunk_size}, seq}
-             // offset = 远端已有 .part 大小（续传起点）
+             // offset = 同身份残片 <filename>.<size>-<mtime>.part 的大小（续传起点）
              // path 是目标目录，空即报错回帧
              // chunk_size 由服务端下发（config 里的固定值），客户端按它切帧
 分片:    二进制帧 [chan:4][flags:2][payload]      // 无 seq/无 index：TCP 有序 + 一通道一写入者
 落定:    二进制帧 [chan][FlagEnd]                 // 载荷可为空，只是"结束了"这个信号
          ← {type:"upload_end", data:{chan, size}}  // 服务端主动推，seq=0
 出错:    {type:"error", data:{chan, message}}
+流控:    每片落盘后 ← {type:"ack", data:{chan, bytes}}（累计值）；客户端"已发 − 已确认 ≤ window"才继续
 ```
 
 **服务端**：
-- `upload` 在远端建/续 `.part`，回其已有大小作为续传起点；比本次 `size` 还大的脏 `.part` 直接丢弃重传。
+- `upload` 在远端建/续 `<filename>.<size>-<mtime>.part`：身份（大小 + 修改时间）写进残片文件名，
+  只有身份吻合的残片才作为续传起点；失配残片与旧版无身份的 `.part` 一并清掉重传——
+  同名换内容后若续到旧残片上，新旧字节会拼成静默损坏的文件。
+  身份段两侧必须都是纯数字才认（用户自建的同前缀文件不碰）；负 mtime 归零以保持可解析。
 - 该通道后续的数据帧按序直接写入 `.part`；带 `FlagEnd` 的帧触发 `rename` 为目标文件并推 `upload_end`。
 - 同通道收到第二个 `upload` 视为前一路已被客户端放弃：中止旧写入者（已落盘字节留在 `.part`）并接管，
   而不是拒绝——否则一次中断会让这条连接余生都传不了文件。
 - 写入失败即 `Abort` 并回 error：`.part` 保留，重开通道即可续传。
+- 输入队列溢出（只会由不合规客户端触发）中止整条通道：error + 补偿 ack，已落盘字节留在 `.part`。
 - 进度与 `.part` 状态为会话级内存，不落盘（无状态中转的定位）。
 
 **前端**：
+- 请求携带 `size` 与 `mtime`（取 `file.lastModified`）作为续传身份；服务端据此决定从旧残片续传还是重传。
 - 分片大小取 `upload` 响应的 `chunk_size`，`File.slice(pos, pos+chunk)`；该值非正即中止（步长为 0 会让循环永不结束）。
+- 每片发送前 `await channel.waitAck(bytes)` 按输入窗口节流；等待期间通道被判死（error 已到）即以该错误收尾，不对死通道续发。
 - 响应按 `seq` 严格匹配当前请求；`seq=0` 的帧（如 `upload_end`）是服务端主动推，不参与匹配。
 - 进度：`min(pos + 已写字节, file.size) / file.size`，封顶 100%。
 
@@ -561,12 +582,15 @@ ENTRYPOINT ["/app/managi"]
 **凭据与端口约定**：
 - `MANAGI_AUTH=user:pass` 非空即启用 BasicAuth（**凭据本身就是开关**，没有第二个布尔变量），
   由宿主环境或同目录 `.env` 注入（样板见 `deploy/.env.example`）。
-  compose 用 `${MANAGI_AUTH:?…}` 强校验：留空不是「无密码」，而是每次启动换随机口令并打印进日志，
-  配合 `restart: unless-stopped` 等于口令天天变、历史明文留在 `docker logs`。
-  值按**第一个冒号**切分，所以密码可以含冒号；只给用户名不给密码会被判为非法配置。
+  值按**第一个冒号**切分，所以密码可以含冒号；只给用户名不给密码（空口令）是非法配置：
+  配置层 `Validate` 直接拒绝启动（空口令绝不构成有效凭据），compose 的 `${MANAGI_AUTH:?…}` 更早一步拦住。
+  未设置 = 明确不鉴权，监听非回环地址时启动打 WARN 提醒，但不拒绝启动（反代终结鉴权的部署合法）。
 - 端口只由 `MANAGI_PORT` 决定。镜像的 `CMD` 不写 `-port`：命令行 flag 优先级高于环境变量，
   写死会让用户改的 `MANAGI_PORT` 静默失效。需要追加参数时用 compose 的 `command:` 覆盖。
 - 容器硬化：`read_only: true` + `tmpfs /tmp` + `no-new-privileges` + `cap_drop: ALL`。
+- TOFU 信任库默认在 `$HOME/.managi/known_hosts`。容器以 nobody 运行且根文件系统只读：
+  HOME 未设或路径不可写时降级为「进程内信任、重启即忘」（启动日志告警），
+  要跨重启保留首次信任就设 `HOME=/data` 并挂一个可写卷（compose 里有注释样板）。
 
 ### 8.3 install.sh（三系跳板机部署）
 
@@ -597,25 +621,29 @@ ENTRYPOINT ["/app/managi"]
 - 卸载：菜单项 2 停服 + 删 unit + 删二进制与前端，保留配置目录。
 - 升级：菜单项 3 仅替换二进制与前端 + 重启服务，不动配置。
 
-### 8.4 配置面：5 个环境变量，其余参数固定
+### 8.4 配置面：8 个环境变量，其余参数固定
 
-M4 把配置面收敛到只剩"部署者必须回答的问题"，其余都是协议调优参数而非用户选项：
+M4 把配置面收敛到只剩"部署者必须回答的问题"，其余都是协议调优参数而非用户选项；
+R1 审查后补回 TLS 与可信代理 3 项（安全边界上不可省略的部署问题）：
 
 | 环境变量 | 默认 | 语义 |
 |----------|------|------|
 | `MANAGI_HOST` | `0.0.0.0` | 监听地址（托盘形态强制 `127.0.0.1`） |
 | `MANAGI_PORT` | `18001` | 监听端口（托盘形态被占用时顺延 5 个） |
-| `MANAGI_AUTH` | 空=不启用 | BasicAuth 凭据 `user:pass`，**非空即启用**；按第一个冒号切分，缺冒号则整串当密码、用户名回退 `admin` 并告警 |
+| `MANAGI_AUTH` | 空=不启用 | BasicAuth 凭据 `user:pass`，**非空即启用**；按第一个冒号切分，缺冒号则整串当密码、用户名回退 `admin` 并告警；空口令（`user:`）拒绝启动，未启用且非回环监听时启动告警 |
 | `MANAGI_INDEX_HTML` | `index.html` | 前端单页路径（相对路径会被改成绝对路径；托盘形态用内嵌内容，不读它） |
-| `MANAGI_KNOWN_HOSTS` | 空=进程内 TOFU | 指向 OpenSSH known_hosts 即启用严格主机密钥校验；文件解析失败即拒绝所有连接，不退回 TOFU |
+| `MANAGI_KNOWN_HOSTS` | 空=TOFU（信任库落盘 `~/.managi/known_hosts`） | 指向 OpenSSH known_hosts 即启用严格主机密钥校验；文件解析失败即拒绝所有连接，不退回 TOFU |
+| `MANAGI_TLS_CERT` / `MANAGI_TLS_KEY` | 空=明文 | 证书与私钥路径，**成对**设置即启用 HTTPS（`wss://` 随之可用）；只配一半拒绝启动（静默退明文=安全降级） |
+| `MANAGI_TRUSTED_PROXIES` | 空=不信任 XFF | 可信反向代理网段（逗号分隔 CIDR 或裸 IP）。仅来自这些地址的连接才采信 `X-Forwarded-For`，取最右侧非代理地址；用于反代之后的登录限流与日志归因 |
 
 命令行 `-host` / `-port` 优先级高于环境变量（用 `flag.Visit` 判断是否显式传入，而非比较值）。
 
-**已移除的 13 个环境变量**（原有 17 个，保留 4 个 + 新增 `MANAGI_AUTH`）：
+**已移除的 12 个环境变量**（原有 17 个，保留 4 个 + 新增 `MANAGI_AUTH`；后补回 TLS/代理 3 项，
+`MANAGI_TRUST_PROXY` 以 `MANAGI_TRUSTED_PROXIES` 的白名单语义回归）：
 `MANAGI_SSH_TIMEOUT`、`MANAGI_KEEPALIVE`、`MANAGI_SSH_IDLE_TIMEOUT`、`MANAGI_SSH_POOL_SIZE`、
 `MANAGI_WS_READ_DEADLINE`、`MANAGI_WS_PING_INTERVAL`、`MANAGI_SESSION_IDLE_TIMEOUT`、
 `MANAGI_SFTP_CHUNK_SIZE`、`MANAGI_SFTP_DOWNLOAD_CHUNK`、`MANAGI_BASICAUTH_ENABLED`、
-`MANAGI_BASICAUTH_USERNAME`、`MANAGI_BASICAUTH_PASSWORD`、`MANAGI_TRUST_PROXY`。
+`MANAGI_BASICAUTH_USERNAME`、`MANAGI_BASICAUTH_PASSWORD`。
 （install.sh 仍会把沿用旧配置时读到的 `MANAGI_BASICAUTH_*` 迁移成 `MANAGI_AUTH`。）
 调优值改为 `config` 包内的 `Default*` 常量（SSH 15s / 保活 30s / 空闲 120s / 池 20 / 读超时 90s /
 心跳 30s / 会话保留 60s / 上行 1MiB / WS 下行 64KiB），字段仍可被装配与测试覆写，
@@ -714,9 +742,25 @@ Docker + compose + install.sh 三系部署、CI/CD 双流水线。
 | **M1 协议换代** | 一条连接、两个平面 | `/ws/ssh`+`/ws/sftp` 合成单 `/ws`；控制面 JSON `{type,data,seq}`，数据面二进制 `[chan][flags][raw]`（`internal/wire`） |
 | **M2 组合子化** | 每个函数只做一件事 | 拆 `handler` 为 chan_pty/chan_sftp/stream/wsmsg；`server.New` 统一装配；连接池/会话按职责归位 |
 | **M3 稳定性** | 通道状态机与传输语义 | 帧大小单一来源、`FlagEnd` 收尾、写锁与背压、`.part` 接管续传、下载截断必须出声 |
-| **M4 收敛** | 配置面与交付形态 | 删 `/api/ssh/test` 与 `mv`；环境变量 17→5；删 `MANAGI_TRUST_PROXY`（不再信任 XFF）；桌面托盘并入 `cmd/managi`（`-tags desktop` + `-tray`） |
+| **M4 收敛** | 配置面与交付形态 | 删 `/api/ssh/test` 与 `mv`；环境变量 17→5；删 `MANAGI_TRUST_PROXY`（不再无条件信任 XFF；后续以 `MANAGI_TRUSTED_PROXIES` 白名单语义补回）；桌面托盘并入 `cmd/managi`（`-tags desktop` + `-tray`） |
 
-### 11.3 下一步
+### 11.3 已完成：v0.5.3 稳定 + 安全加固
+
+后端稳定+安全审阅的 10 项全量修复（按严重度排序执行；各项的协议与部署细节已写入 §4.3/§4.4/§6.4/§8.2/§8.4）：
+
+| 级别 | 项 | 落点 |
+|------|----|------|
+| P0 | 批量命令三道闸 | 节点 ≤100、总时限 15min、单路输出 4MB 截断（`handler/ssh.go`、`sshpool/exec.go`） |
+| P0 | `/api/*` 跨站闸 | 仅 POST + `Sec-Fetch-Site` 校验 + 强制 `application/json` 且拒尾随字节（`handler/handler.go`） |
+| P1 | 存活探测超时 | `SendRequest` 上限 5s，超时按已死处理并关闭连接（`sshpool/dial.go`） |
+| P1 | 输入方向流控 | 每通道输入队列 + 工作协程；open 下发 `window`，`ack` 累计值滑动窗口（`handler/input_queue.go`、`stream.go`） |
+| P1 | TLS 与可信代理 | `MANAGI_TLS_CERT/KEY` 成对生效；`MANAGI_TRUSTED_PROXIES` 控制 XFF 采信（`handler/auth.go`、`accesslog.go`） |
+| P2 | 上传续传身份 | `.part` 命名带 `<size>-<mtime>`，失配重传并清理陈旧残片（`sftp/ops.go`） |
+| P2 | TOFU 落盘 | 信任库 `~/.managi/known_hosts`；损坏拒连、不可写降级进程内（`sshpool/tofu.go`） |
+| P2 | 部署安全默认值 | 空口令（`user:`）拒绝启动（废除随机口令机制）；免鉴权 + 非回环监听启动告警 |
+| P3 | reattach 身份 | 会话命中时核对节点连接键，失配拒绝——会话不跨节点复用（`handler/live_session.go`） |
+
+### 11.4 下一步
 
 推进到 `0.5.*`：协议与配置面已定形，后续只做"改错的代价大于收益就不开放"这一原则下的收口。
 动调优参数前先回到 §8.4 的取舍依据。
@@ -732,12 +776,12 @@ Managi 从"可用"走到"可分发、可部署、高性能"，再在 v0.4/v0.5 �
 3. **单二进制两形态**：同一份 `cmd/managi`，默认是服务器，`-tags desktop` + `-tray` 是 Windows 托盘；
    桌面端从 50MB（Nuitka）降到约 9MB，且两形态共用 `server.New`，装配不会漂移。
 4. **协议一次到位**：一条 `/ws`、控制面 JSON + 数据面二进制，断点续传、结构化 resize、原生心跳。
-5. **配置面收敛**：无状态中转（凭据只来自请求、不落盘），用户可调项只剩 5 个环境变量，
+5. **配置面收敛**：无状态中转（凭据只来自请求、不落盘），用户可调项只剩 8 个环境变量，
    调优参数一律编译期定死——可观测的失败比可配置的参数更有价值。
 
 整体设计以"性能、可靠、可分发"为三角目标，并以"更少moving parts"为第四约束。
 
 ---
 
-*文档版本: 5.0（原 design-v3.md，随 v0.5.* 架构收敛更名并对齐实现）*
-*更新日期: 2026-10-01*
+*文档版本: 5.1（原 design-v3.md，随 v0.5.* 架构收敛更名并对齐实现；v0.5.3 稳定+安全加固已同步）*
+*更新日期: 2026-10-06*

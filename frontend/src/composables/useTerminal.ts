@@ -16,7 +16,7 @@ import { splitBytes } from '@/protocol/frames'
 import type { ErrorData, OpenPTY, OpenResponse } from '@/protocol/ws'
 import { nodeSessionKey, type ApiNode } from '@/protocol/types'
 import { handleError } from '@/helper'
-import { useSettingsStore } from '@/stores/settingsStore'
+import { useSettingsStore, waitForTerminalFont } from '@/stores/settingsStore'
 
 // 会话 ID 缓存：按 nodeSessionKey（含凭据指纹）索引，同节点复用同一 sessionId。
 // 前端断线重连时携带相同 sessionId，后端即可复用已维护的 shell 会话。
@@ -159,9 +159,10 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
   }
   term.onData(sendInput)
 
-  /** pumpOutbound 逐帧发出缓冲：每帧之间等浏览器发送缓冲降回水位。
-   *  一次性把整段粘贴塞进 ws.send() 会让发送队列无界增长，慢链路下标签页直接卡死。
-   *  链路断开时 frame() 返回 false，整体留着等通道重开，既不重发也不丢。
+  /** pumpOutbound 逐帧发出缓冲：每片先等输入窗口腾出空间（服务端 ack 推进）再发送。
+   *  一次性把整段粘贴塞进 ws.send() 会让发送队列无界增长，慢链路下标签页直接卡死；
+   *  按窗口发送则每一片都在服务端可追踪的账内，其队列预算永远填不满。
+   *  链路断开时 waitAck 立即放行、frame() 返回 false，整体留着等通道重开，既不重发也不丢。
    */
   async function pumpOutbound(): Promise<void> {
     if (pumping) return
@@ -169,10 +170,13 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
     try {
       while (outbound.length) {
         const head = outbound[0]
+        await channel.waitAck(head.byteLength)
+        // 等待期间缓冲可能已被清空（会话结束）或换过头：以醒来时的队列为准，
+        // 别把已作废的字节塞回通道
+        if (outbound[0] !== head) continue
         if (!channel.frame(head)) return
         outbound.shift()
         outboundBytes -= head.byteLength
-        await channel.waitDrain()
       }
     } finally {
       pumping = false
@@ -251,17 +255,16 @@ export function useTerminal(container: HTMLElement, node: ApiNode) {
   const resizeObserver = new ResizeObserver(onResize)
   resizeObserver.observe(container)
 
-  // 内嵌字体是异步生效的：字体没加载完就 fit()，字符宽高按兜底字体测出来，
-  // 行列数会一直错下去（xterm 自己不等字体）。加载落地后再校正一次。
-  // happy-dom 没有 FontFaceSet，此时直接 fit（测试里字体由 mock 决定）。
+  // 内嵌字体是异步解码的，而 xterm 只在 fontFamily/fontSize 真的变化时才重新量字符宽高
+  // （同值赋值是显式 no-op），所以刷新后首开可能一直按兜底字体排版。字体落地后把字号
+  // 推一格再退回，逼它重测，然后按新宽高重新 fit 并把行列数同步给后端。
   function refitWhenFontsReady(): void {
-    const loading = document.fonts?.load(`${term.options.fontSize}px ${term.options.fontFamily}`)
-    if (!loading) {
+    const { terminalFontFamily: family, terminalFontSize: size } = settings.settings
+    void waitForTerminalFont(family, size).then(() => {
+      if (disposed) return
+      term.options.fontSize = size + 1
+      term.options.fontSize = size
       onResize()
-      return
-    }
-    loading.catch(() => undefined).then(() => {
-      if (!disposed) onResize()
     })
   }
   refitWhenFontsReady()

@@ -169,7 +169,7 @@
                 "jetbrains": "JetBrains Mono ExtraLight",
                 "oldtimey": "OldTimeyCode Light",
                 "honchoko": "Honchoko Mono Light",
-                "system": "System Font"
+                "system": "System Monospace"
             }
         },
         "security": {

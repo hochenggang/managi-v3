@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -20,11 +19,11 @@ import (
 // ===== POST /api/sftp/download =====
 
 // downloadBody 构造 POST /api/sftp/download 的 JSON 请求体。
-func downloadBody(t *testing.T, node model.Node, path string) *bytes.Reader {
+func downloadBody(t *testing.T, node model.Node, path string) []byte {
 	t.Helper()
 	b, err := json.Marshal(sftpDownloadRequest{Node: node, Path: path})
 	require.NoError(t, err)
-	return bytes.NewReader(b)
+	return b
 }
 
 // newDownloadHandler 创建连到 mock server 的下载 handler 及其连接池。
@@ -43,7 +42,7 @@ func TestSftpDownloadHandler_Full(t *testing.T) {
 	content := []byte("0123456789ABCDEFGHIJ") // 20 bytes
 	require.NoError(t, os.WriteFile(filepath.Join(srv.RootDir(), "test.txt"), content, 0644))
 
-	req := httptest.NewRequest("POST", "/api/sftp/download",
+	req := jsonPost("/api/sftp/download",
 		downloadBody(t, testutil.TestNode(srv.Host(), srv.Port()), "/test.txt"))
 	rec := httptest.NewRecorder()
 	newDownloadHandler(t).ServeHTTP(rec, req)
@@ -65,7 +64,7 @@ func TestSftpDownloadHandler_Range(t *testing.T) {
 	content := []byte("0123456789ABCDEFGHIJ") // 20 bytes
 	require.NoError(t, os.WriteFile(filepath.Join(srv.RootDir(), "test.txt"), content, 0644))
 
-	req := httptest.NewRequest("POST", "/api/sftp/download",
+	req := jsonPost("/api/sftp/download",
 		downloadBody(t, testutil.TestNode(srv.Host(), srv.Port()), "/test.txt"))
 	req.Header.Set("Range", "bytes=10-")
 	rec := httptest.NewRecorder()
@@ -85,7 +84,7 @@ func TestSftpDownloadHandler_RangeBeyondEOF(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(srv.RootDir(), "small.txt"), []byte("0123456789"), 0644))
 
 	for _, header := range []string{"bytes=10-", "bytes=999-"} {
-		req := httptest.NewRequest("POST", "/api/sftp/download",
+		req := jsonPost("/api/sftp/download",
 			downloadBody(t, testutil.TestNode(srv.Host(), srv.Port()), "/small.txt"))
 		req.Header.Set("Range", header)
 		rec := httptest.NewRecorder()
@@ -106,7 +105,7 @@ func TestSftpDownloadHandler_ClosedRange(t *testing.T) {
 	content := []byte("0123456789ABCDEFGHIJ") // 20 bytes
 	require.NoError(t, os.WriteFile(filepath.Join(srv.RootDir(), "closed.txt"), content, 0644))
 
-	req := httptest.NewRequest("POST", "/api/sftp/download",
+	req := jsonPost("/api/sftp/download",
 		downloadBody(t, testutil.TestNode(srv.Host(), srv.Port()), "/closed.txt"))
 	req.Header.Set("Range", "bytes=5-9")
 	rec := httptest.NewRecorder()
@@ -117,7 +116,7 @@ func TestSftpDownloadHandler_ClosedRange(t *testing.T) {
 	assert.Equal(t, content[5:10], rec.Body.Bytes())
 
 	// 结束位越过文件尾：按标准截到最后一字节，而不是报错或多发
-	req2 := httptest.NewRequest("POST", "/api/sftp/download",
+	req2 := jsonPost("/api/sftp/download",
 		downloadBody(t, testutil.TestNode(srv.Host(), srv.Port()), "/closed.txt"))
 	req2.Header.Set("Range", "bytes=15-200")
 	rec2 := httptest.NewRecorder()
@@ -135,7 +134,7 @@ func TestSftpDownloadHandler_SuffixRange(t *testing.T) {
 	content := []byte("0123456789ABCDEFGHIJ")
 	require.NoError(t, os.WriteFile(filepath.Join(srv.RootDir(), "suffix.txt"), content, 0644))
 
-	req := httptest.NewRequest("POST", "/api/sftp/download",
+	req := jsonPost("/api/sftp/download",
 		downloadBody(t, testutil.TestNode(srv.Host(), srv.Port()), "/suffix.txt"))
 	req.Header.Set("Range", "bytes=-4")
 	rec := httptest.NewRecorder()
@@ -155,13 +154,13 @@ func TestSftpDownloadHandler_MissingParams(t *testing.T) {
 	node := testutil.TestNode(srv.Host(), srv.Port())
 
 	// 缺 path
-	req := httptest.NewRequest("POST", "/api/sftp/download", downloadBody(t, node, ""))
+	req := jsonPost("/api/sftp/download", downloadBody(t, node, ""))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 
 	// 缺 node（host 为空）
-	req = httptest.NewRequest("POST", "/api/sftp/download", downloadBody(t, model.Node{}, "/test.txt"))
+	req = jsonPost("/api/sftp/download", downloadBody(t, model.Node{}, "/test.txt"))
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -169,7 +168,7 @@ func TestSftpDownloadHandler_MissingParams(t *testing.T) {
 
 // TestSftpDownloadHandler_InvalidBody 验证非法请求体返回 400。
 func TestSftpDownloadHandler_InvalidBody(t *testing.T) {
-	req := httptest.NewRequest("POST", "/api/sftp/download", bytes.NewReader([]byte("notjson")))
+	req := jsonPost("/api/sftp/download", []byte("notjson"))
 	rec := httptest.NewRecorder()
 	newDownloadHandler(t).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -180,7 +179,7 @@ func TestSftpDownloadHandler_AuthFailure(t *testing.T) {
 	srv := testutil.Start(t)
 	defer srv.Close()
 
-	req := httptest.NewRequest("POST", "/api/sftp/download",
+	req := jsonPost("/api/sftp/download",
 		downloadBody(t, testutil.BadPasswordNode(srv.Host(), srv.Port()), "/test.txt"))
 	rec := httptest.NewRecorder()
 	newDownloadHandler(t).ServeHTTP(rec, req)

@@ -26,8 +26,10 @@ export interface FakeChannel {
   readonly requests: FakeRequest[]
   readonly notifies: Array<{ type: Verb; data: RequestData }>
   readonly frames: FakeFrame[]
-  readonly drainCalls: number
+  readonly ackWaits: number
   readonly closeCalls: number
+  /** 让此后的 waitAck 悬挂（模拟窗口耗尽），直到出错/断链/通道关闭/ready 时放行 */
+  holdAcks: () => void
   /** 通道就绪：hub 重开成功，回调 onOpen 并放行后续帧 */
   ready: (resp?: Partial<OpenResponse> & { chan?: number; kind?: Kind }) => void
   /** 链路断开：chan 作废、state 退回 opening，真实重开由 ready() 模拟 */
@@ -59,8 +61,15 @@ export function createFakeHub(link: ConnectionStatus = 'connected'): FakeHub {
     const requests: FakeRequest[] = []
     const notifies: Array<{ type: Verb; data: RequestData }> = []
     const frames: FakeFrame[] = []
-    const counters = { drain: 0, close: 0 }
+    const counters = { ack: 0, close: 0 }
     let chan = 0
+    // holdAcks 后的悬挂者。真实枢纽在出错/断链/摘除时无条件放行（waitAck 的注释），
+    // 这里照搬同一套放行时机，让被测代码的"等窗口→复核"路径能被确定性驱动。
+    const pendingAcks: Array<() => void> = []
+    let holdingAcks = false
+    const flushAcks = (): void => {
+      for (const release of pendingAcks.splice(0)) release()
+    }
 
     const fake: FakeChannel = {
       state,
@@ -68,29 +77,39 @@ export function createFakeHub(link: ConnectionStatus = 'connected'): FakeHub {
       requests,
       notifies,
       frames,
-      get drainCalls() {
-        return counters.drain
+      get ackWaits() {
+        return counters.ack
       },
       get closeCalls() {
         return counters.close
       },
+      holdAcks: () => {
+        holdingAcks = true
+      },
       ready: (resp) => {
         chan = resp?.chan ?? ++chanSeq
         state.value = 'open'
+        flushAcks() // 重开成功：与真实枢纽一致，等窗口的挂起者按新账本复核放行
         spec.onOpen({ ...resp, kind: resp?.kind ?? 'sftp', chan })
       },
       lost: () => {
         chan = 0
         // 链路断了，在途请求等不到回复：与真实枢纽一样立即失败，不留悬等
         for (const r of requests) r.err('连接已断开')
+        flushAcks()
         if (state.value === 'open') state.value = 'opening'
       },
       fail: () => {
         chan = 0
         state.value = 'error'
+        flushAcks()
       },
       push: (payload, end = false) => spec.onData(payload, end),
-      emit: (type, data) => spec.onNotify(type, data),
+      emit: (type, data) => {
+        spec.onNotify(type, data)
+        // 与真实枢纽一致：通道级错误随后放行等窗口的挂起者
+        if (type === 'error') flushAcks()
+      },
       lastRequest: (type) => {
         const found = type ? [...requests].reverse().find((r) => r.type === type) : requests[requests.length - 1]
         if (!found) throw new Error(`未发出${type ? ` ${type} ` : ''}请求`)
@@ -124,15 +143,17 @@ export function createFakeHub(link: ConnectionStatus = 'connected'): FakeHub {
         frames.push({ payload, end })
         return true
       },
-      waitDrain: () => {
-        counters.drain++
-        return Promise.resolve()
+      waitAck: () => {
+        counters.ack++
+        if (!holdingAcks) return Promise.resolve()
+        return new Promise<void>((resolve) => pendingAcks.push(resolve))
       },
       close: () => {
         counters.close++
         chan = 0
-        // 与真实枢纽一致：摘除通道时了在途请求，不留悬等 Promise（已了结的是 no-op）
+        // 与真实枢纽一致：摘除通道时了在途请求并放行等窗口者，不留悬等 Promise（已了结的是 no-op）
         for (const r of requests) r.err('通道已关闭')
+        flushAcks()
       },
     }
 

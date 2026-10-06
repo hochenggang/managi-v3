@@ -9,7 +9,6 @@ package sshpool
 import (
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -228,7 +227,7 @@ func (p *Pool) StartCleaner(done <-chan struct{}) {
 	}()
 }
 
-// cleanIdle 回收空闲超时的连接，并顺带清理超期的主机密钥条目。
+// cleanIdle 回收空闲超时的连接。
 func (p *Pool) cleanIdle() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -238,21 +237,6 @@ func (p *Pool) cleanIdle() {
 			p.dropLocked(k)
 		}
 	}
-	// 主机密钥按 host:port 记录，连接键是完整 ConnectionKey（host:port:user:指纹），
-	// 故用前缀匹配判断该主机是否仍有任意用户/凭据的活跃连接。
-	p.hostKeys.reap(now, p.hasActiveConnLocked)
-}
-
-// hasActiveConnLocked 判断指定 host:port 是否仍有任意用户的连接在池中。
-// 调用方需持 p.mu。
-func (p *Pool) hasActiveConnLocked(hostPort string) bool {
-	prefix := hostPort + ":"
-	for k := range p.conns {
-		if strings.HasPrefix(k, prefix) {
-			return true
-		}
-	}
-	return false
 }
 
 // evictOldestLocked 淘汰最久未使用的空闲连接。全部占用时什么也不做（由 hardCap 兜底）。
@@ -270,8 +254,9 @@ func (p *Pool) evictOldestLocked() {
 	}
 }
 
-// keepalive 周期发送 keepalive 请求，探到死亡即从池中清理（仅当连接仍是这一条且空闲），
+// keepalive 周期探测连接活性，探到死亡即从池中清理（仅当连接仍是这一条且空闲），
 // 避免死连接滞留到下一次 cleanIdle。
+// 探测请求（keepalive@openssh.com）本身就是保活报文，已刷新链路空闲状态，无需再补发一条。
 func (p *Pool) keepalive(key string, c *Connection) {
 	ticker := time.NewTicker(p.timing.keepalive)
 	defer ticker.Stop()
@@ -291,6 +276,5 @@ func (p *Pool) keepalive(key string, c *Connection) {
 			p.mu.Unlock()
 			return
 		}
-		_, _, _ = c.client.SendRequest("keepalive@openssh.com", true, nil)
 	}
 }

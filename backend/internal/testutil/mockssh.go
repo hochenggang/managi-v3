@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,7 +29,15 @@ type Server struct {
 	rootDir  string
 	password string
 	accepts  int32 // 累计 accept 连接数（测试连接复用）
-	stopOnce sync.Once
+	// silentGlobals 为真时对全局请求只收不回（模拟半开链路），见 SilentGlobalRequests。
+	silentGlobals atomic.Bool
+	// stalledShell 为真时 shell 不读 stdin（模拟远端读端卡死），见 StalledShell。
+	stalledShell atomic.Bool
+	// writesStalled 为真时 SFTP 写句柄的每次写入都先等 writeGate（模拟落盘卡死），见 StallWrites。
+	writesStalled atomic.Bool
+	writeGate     chan struct{}
+	writeGateOnce sync.Once
+	stopOnce      sync.Once
 }
 
 // Start 启动一个 mock SSH/SFTP 服务器在 127.0.0.1 随机端口。
@@ -52,10 +61,11 @@ func Start(t *testing.T) *Server {
 	}
 
 	s := &Server{
-		listener: listener,
-		hostKey:  signer,
-		rootDir:  t.TempDir(),
-		password: "testpass",
+		listener:  listener,
+		hostKey:   signer,
+		rootDir:   t.TempDir(),
+		password:  "testpass",
+		writeGate: make(chan struct{}),
 	}
 
 	sshConfig := &ssh.ServerConfig{
@@ -92,7 +102,15 @@ func (s *Server) handleConn(nconn net.Conn, cfg *ssh.ServerConfig) {
 		return
 	}
 	defer func() { _ = conn.Close() }()
-	go ssh.DiscardRequests(reqs)
+	if s.silentGlobals.Load() {
+		// 只收不回：want-reply 的全局请求（保活探测）在客户端侧会一直等——半开链路的样子
+		go func() {
+			for range reqs {
+			}
+		}()
+	} else {
+		go ssh.DiscardRequests(reqs)
+	}
 
 	for newChannel := range chans {
 		if newChannel.ChannelType() != "session" {
@@ -116,11 +134,15 @@ func (s *Server) handleSession(channel ssh.Channel, reqs <-chan *ssh.Request) {
 		case "exec":
 			cmd := parseStringPayload(req.Payload)
 			_ = req.Reply(true, nil)
-			s.handleExec(channel, cmd)
+			s.handleExec(channel, reqs, cmd)
 			return
 		case "shell":
 			_ = req.Reply(true, nil)
-			s.handleShell(channel)
+			if s.stalledShell.Load() {
+				s.handleStalledShell(channel, reqs)
+			} else {
+				s.handleShell(channel)
+			}
 			return
 		case "subsystem":
 			if parseStringPayload(req.Payload) == "sftp" {
@@ -139,7 +161,8 @@ func (s *Server) handleSession(channel ssh.Channel, reqs <-chan *ssh.Request) {
 }
 
 // handleExec 模拟命令执行（支持多行命令，用 \n 分隔）。
-func (s *Server) handleExec(channel ssh.Channel, cmd string) {
+// reqs 为通道请求流，仅在「挂死」模式使用：它随通道关闭而关闭，是唯一的关闭信号。
+func (s *Server) handleExec(channel ssh.Channel, reqs <-chan *ssh.Request, cmd string) {
 	defer func() { _ = channel.Close() }()
 
 	// 多行命令：按 \n 拆分逐行执行（模拟 shell）
@@ -154,6 +177,33 @@ func (s *Server) handleExec(channel ssh.Channel, cmd string) {
 		case line == "false":
 			_, _ = channel.Stderr().Write([]byte("command failed\n"))
 			exitCode = 1
+		case line == "hang":
+			// 模拟挂死命令（如 sleep）：保持通道打开，直到客户端关闭通道。
+			// 不能等 channel.Read：客户端未设 Stdin 时 x/crypto/ssh 在启动后
+			// 立即发 stdin EOF，Read 会马上返回 EOF，与通道关闭区分不开。
+			// reqs 只在客户端发 CHANNEL_CLOSE 或连接断开时关闭。
+			for req := range reqs {
+				_ = req.Reply(false, nil)
+			}
+			return
+		case strings.HasPrefix(line, "flood "):
+			// 模拟大输出命令（如 cat 大文件）：向 stdout 写 n 字节。
+			// 用命令生成输出而不是把大载荷塞进命令串：SSH 单包上限约 256KB，
+			// 超大的 exec 命令根本发不出去（连接会被直接掐断）。
+			n, err := strconv.Atoi(strings.TrimSpace(line[len("flood "):]))
+			if err != nil || n < 0 {
+				_, _ = channel.Stderr().Write([]byte("flood: bad size\n"))
+				exitCode = 1
+				break
+			}
+			chunk := []byte(strings.Repeat("a", 32*1024))
+			for written := 0; written < n; {
+				size := min(len(chunk), n-written)
+				if _, err := channel.Write(chunk[:size]); err != nil {
+					return
+				}
+				written += size
+			}
 		case strings.HasPrefix(line, "echo "):
 			_, _ = channel.Write([]byte(line[5:] + "\n"))
 		case line == "echo":
@@ -180,10 +230,20 @@ func (s *Server) handleShell(channel ssh.Channel) {
 	}
 }
 
+// handleStalledShell 模拟读端卡死的 shell：不读 stdin。
+// 客户端在 SSH 通道窗口（x/crypto 默认 2MB）耗尽后写不进去，用来测输入队列的溢出策略。
+// reqs 随通道关闭而关闭，是这里唯一的关闭信号（同 handleExec 的 hang）。
+func (s *Server) handleStalledShell(channel ssh.Channel, reqs <-chan *ssh.Request) {
+	defer func() { _ = channel.Close() }()
+	for req := range reqs {
+		_ = req.Reply(false, nil)
+	}
+}
+
 // handleSFTP 启动 SFTP request server 服务 rootDir。
 func (s *Server) handleSFTP(channel ssh.Channel) {
 	defer func() { _ = channel.Close() }()
-	handler := &osHandler{root: s.rootDir}
+	handler := &osHandler{root: s.rootDir, srv: s}
 	srv := sftp.NewRequestServer(channel, sftp.Handlers{
 		FileGet:  handler,
 		FilePut:  handler,
@@ -229,6 +289,26 @@ func (s *Server) HostKey() ssh.PublicKey { return s.hostKey.PublicKey() }
 // Password 返回认证密码。
 func (s *Server) Password() string { return s.password }
 
+// SilentGlobalRequests 使服务器对全局请求只收不回（含各类保活探测），
+// 模拟「TCP 连着但对端不响应」的半开链路，供存活探测超时测试使用。
+// 对调用后新接入的连接生效（拨号前调用即可）。
+func (s *Server) SilentGlobalRequests() { s.silentGlobals.Store(true) }
+
+// StalledShell 使后续 shell 不读 stdin（模拟远端读端卡死）：
+// 客户端的 stdin 写会在 SSH 通道窗口耗尽后阻塞，供输入队列溢出测试使用。
+// 对调用后新开的 shell 通道生效（open pty 前调用）。
+func (s *Server) StalledShell() { s.stalledShell.Store(true) }
+
+// StallWrites 使此后打开的 SFTP 写句柄每次 WriteAt 都先等 UnstallWrites（模拟落盘卡死）。
+// 对调用后新打开的写句柄生效（即上传请求前调用）。
+func (s *Server) StallWrites() { s.writesStalled.Store(true) }
+
+// UnstallWrites 放行所有被 StallWrites 卡住的写入（幂等；Close 亦会放行）。
+func (s *Server) UnstallWrites() { s.writeGateOnce.Do(func() { close(s.writeGate) }) }
+
+// gate 返回写锁定用的信号通道。
+func (s *Server) gate() chan struct{} { return s.writeGate }
+
 // RootDir 返回 SFTP 根目录（本地 temp 路径）。
 func (s *Server) RootDir() string { return s.rootDir }
 
@@ -237,9 +317,10 @@ func (s *Server) Accepts() int32 {
 	return atomic.LoadInt32(&s.accepts)
 }
 
-// Close 关闭服务器。
+// Close 关闭服务器。被 StallWrites 卡住的写入一并放行，测试清理不必手动解卡。
 func (s *Server) Close() {
 	s.stopOnce.Do(func() {
+		s.UnstallWrites()
 		_ = s.listener.Close()
 	})
 }
@@ -268,6 +349,7 @@ func parseStringPayload(payload []byte) string {
 // osHandler 将 SFTP 请求映射到本地 temp 目录的 os 操作。
 type osHandler struct {
 	root string
+	srv  *Server
 }
 
 func (h *osHandler) abs(p string) string {
@@ -306,8 +388,26 @@ func (h *osHandler) Filewrite(r *sftp.Request) (io.WriterAt, error) {
 	if err != nil {
 		return nil, err
 	}
+	// StallWrites 下写入被闸住：落在 WriteAt 上而不是 open 上，
+	// 上传响应照常返回，测的是「客户端在等落盘」而不是「开不了文件」。
+	if h.srv.writesStalled.Load() {
+		return &gatedWriter{f: f, gate: h.srv.gate()}, nil
+	}
 	return f, nil
 }
+
+// gatedWriter 写前先等闸的 *os.File 包装：模拟落盘卡死。
+type gatedWriter struct {
+	f    *os.File
+	gate chan struct{}
+}
+
+func (w *gatedWriter) WriteAt(p []byte, off int64) (int, error) {
+	<-w.gate
+	return w.f.WriteAt(p, off)
+}
+
+func (w *gatedWriter) Close() error { return w.f.Close() }
 
 // Filecmd 处理 rename/remove/mkdir 等命令。
 func (h *osHandler) Filecmd(r *sftp.Request) error {

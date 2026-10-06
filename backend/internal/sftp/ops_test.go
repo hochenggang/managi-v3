@@ -176,21 +176,21 @@ func TestUpload_BeginFresh(t *testing.T) {
 	sc, _, cleanup := newClient(t)
 	defer cleanup()
 
-	u, err := sc.BeginUpload("/upload", "test.bin", 1024)
+	u, err := sc.BeginUpload("/upload", "test.bin", 1024, 0)
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), u.Offset())
 }
 
-// TestUpload_BeginResume 验证断点续传：已有 .part 时从其大小续传，且新数据接在尾部。
+// TestUpload_BeginResume 验证断点续传：已有同身份 .part 时从其大小续传，且新数据接在尾部。
 func TestUpload_BeginResume(t *testing.T) {
 	sc, srv, cleanup := newClient(t)
 	defer cleanup()
 
 	require.NoError(t, os.MkdirAll(filepath.Join(srv.RootDir(), "upload"), 0755))
-	partPath := filepath.Join(srv.RootDir(), "upload", "test.bin.part")
+	partPath := filepath.Join(srv.RootDir(), "upload", "test.bin.8-0.part")
 	require.NoError(t, os.WriteFile(partPath, []byte("AAAA"), 0644))
 
-	u, err := sc.BeginUpload("/upload", "test.bin", 8)
+	u, err := sc.BeginUpload("/upload", "test.bin", 8, 0)
 	require.NoError(t, err)
 	assert.Equal(t, int64(4), u.Offset())
 
@@ -206,38 +206,64 @@ func TestUpload_BeginResume(t *testing.T) {
 	assert.Equal(t, "AAAABBBB", string(content))
 }
 
-// TestUpload_BeginDiscardsOversizedStalePart 验证脏 .part 被丢弃：
-// 残留 .part 比本次要传的文件还大时，续传点永远追不上，只能从头传。
-func TestUpload_BeginDiscardsOversizedStalePart(t *testing.T) {
+// TestUpload_BeginDiscardsOversizedIdentityPart 验证同身份残片被外部写大时丢弃：
+// 续传点永远追不上客户端，只能从头传。
+func TestUpload_BeginDiscardsOversizedIdentityPart(t *testing.T) {
 	sc, srv, cleanup := newClient(t)
 	defer cleanup()
 
 	require.NoError(t, os.MkdirAll(filepath.Join(srv.RootDir(), "upload"), 0755))
-	partPath := filepath.Join(srv.RootDir(), "upload", "stale.bin.part")
+	partPath := filepath.Join(srv.RootDir(), "upload", "stale.bin.1024-0.part")
 	require.NoError(t, os.WriteFile(partPath, make([]byte, 4096), 0644))
 
-	u, err := sc.BeginUpload("/upload", "stale.bin", 1024)
+	u, err := sc.BeginUpload("/upload", "stale.bin", 1024, 0)
 	require.NoError(t, err)
-	assert.Equal(t, int64(0), u.Offset(), "stale .part larger than the payload must restart from 0")
+	assert.Equal(t, int64(0), u.Offset(), "part larger than the payload must restart from 0")
 	// 脏内容必须真正丢弃（重开后为 0 字节），否则客户端会续到错误数据之上
 	info, err := os.Stat(partPath)
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), info.Size())
 }
 
-// TestUpload_BeginKeepsUsablePart 验证正常续传点不会被误删（.part 小于总大小）。
+// TestUpload_BeginKeepsUsablePart 验证正常续传点不会被误删（同身份 .part 小于总大小）。
 func TestUpload_BeginKeepsUsablePart(t *testing.T) {
 	sc, srv, cleanup := newClient(t)
 	defer cleanup()
 
 	require.NoError(t, os.MkdirAll(filepath.Join(srv.RootDir(), "upload"), 0755))
-	partPath := filepath.Join(srv.RootDir(), "upload", "ok.bin.part")
+	partPath := filepath.Join(srv.RootDir(), "upload", "ok.bin.1024-0.part")
 	require.NoError(t, os.WriteFile(partPath, make([]byte, 512), 0644))
 
-	u, err := sc.BeginUpload("/upload", "ok.bin", 1024)
+	u, err := sc.BeginUpload("/upload", "ok.bin", 1024, 0)
 	require.NoError(t, err)
 	assert.Equal(t, int64(512), u.Offset())
 	require.FileExists(t, partPath)
+}
+
+// TestUpload_BeginCleansStaleParts 验证失配残片被清理、身份吻合的才保留：
+// 续到内容已变的旧残片上会把新旧字节拼成静默损坏的文件；
+// 名字不像身份的（用户自建）一律不碰，清理的边界不能越过误删。
+func TestUpload_BeginCleansStaleParts(t *testing.T) {
+	sc, srv, cleanup := newClient(t)
+	defer cleanup()
+
+	dir := filepath.Join(srv.RootDir(), "upload")
+	require.NoError(t, os.MkdirAll(dir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "data.bin.part"), []byte("legacy"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "data.bin.99-7.part"), []byte("old"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "data.bin.8-0.part"), []byte("AAAA"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "data.bin.1-2-3.part"), []byte("odd"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "other.bin.part"), []byte("keep"), 0644))
+
+	u, err := sc.BeginUpload("/upload", "data.bin", 8, 0)
+	require.NoError(t, err)
+	assert.Equal(t, int64(4), u.Offset(), "只有身份吻合的残片可续")
+
+	assert.NoFileExists(t, filepath.Join(dir, "data.bin.part"), "旧版无身份的残片必须清掉")
+	assert.NoFileExists(t, filepath.Join(dir, "data.bin.99-7.part"), "身份失配的残片必须清掉")
+	assert.FileExists(t, filepath.Join(dir, "data.bin.8-0.part"))
+	assert.FileExists(t, filepath.Join(dir, "data.bin.1-2-3.part"), "身份段不合法的名字不认（可能不是残片）")
+	assert.FileExists(t, filepath.Join(dir, "other.bin.part"), "别的文件的残片不碰")
 }
 
 // TestUpload_BeginRejectsPathEscapeFilenames 验证含路径成分的文件名被拒绝。
@@ -260,7 +286,7 @@ func TestUpload_BeginRejectsPathEscapeFilenames(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := sc.BeginUpload("/upload", tc.filename, 1024)
+			_, err := sc.BeginUpload("/upload", tc.filename, 1024, 0)
 			assert.Error(t, err, "filename %q must be rejected", tc.filename)
 		})
 	}
@@ -271,7 +297,7 @@ func TestUpload_BeginTraversalFilenameWritesNowhere(t *testing.T) {
 	sc, srv, cleanup := newClient(t)
 	defer cleanup()
 
-	_, err := sc.BeginUpload("/upload", "../escaped.bin", 1024)
+	_, err := sc.BeginUpload("/upload", "../escaped.bin", 1024, 0)
 	require.Error(t, err)
 
 	_, statErr := os.Stat(filepath.Join(srv.RootDir(), "escaped.bin"))
@@ -283,7 +309,7 @@ func TestUpload_WriteAppendsInFrameOrder(t *testing.T) {
 	sc, srv, cleanup := newClient(t)
 	defer cleanup()
 
-	u, err := sc.BeginUpload("/upload", "chunk.bin", 100)
+	u, err := sc.BeginUpload("/upload", "chunk.bin", 100, 0)
 	require.NoError(t, err)
 
 	// 分片边界与 pkg/sftp 的 maxPacket 无关：一次写一帧即可
@@ -294,7 +320,7 @@ func TestUpload_WriteAppendsInFrameOrder(t *testing.T) {
 	}
 	assert.Equal(t, int64(12), u.Offset())
 
-	content, err := os.ReadFile(filepath.Join(srv.RootDir(), "upload", "chunk.bin.part"))
+	content, err := os.ReadFile(filepath.Join(srv.RootDir(), "upload", "chunk.bin.100-0.part"))
 	require.NoError(t, err)
 	assert.Equal(t, "AAAABBBBCCCC", string(content))
 }
@@ -304,7 +330,7 @@ func TestUpload_FinishRenames(t *testing.T) {
 	sc, srv, cleanup := newClient(t)
 	defer cleanup()
 
-	u, err := sc.BeginUpload("/upload", "done.bin", 10)
+	u, err := sc.BeginUpload("/upload", "done.bin", 10, 0)
 	require.NoError(t, err)
 	_, err = u.Write([]byte(" Completed"))
 	require.NoError(t, err)
@@ -312,7 +338,7 @@ func TestUpload_FinishRenames(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(10), size)
 
-	_, err = os.Stat(filepath.Join(srv.RootDir(), "upload", "done.bin.part"))
+	_, err = os.Stat(filepath.Join(srv.RootDir(), "upload", "done.bin.10-0.part"))
 	assert.True(t, os.IsNotExist(err))
 
 	content, err := os.ReadFile(filepath.Join(srv.RootDir(), "upload", "done.bin"))
@@ -326,7 +352,7 @@ func TestUpload_FinishRejectsShortPart(t *testing.T) {
 	sc, srv, cleanup := newClient(t)
 	defer cleanup()
 
-	u, err := sc.BeginUpload("/upload", "short.bin", 100)
+	u, err := sc.BeginUpload("/upload", "short.bin", 100, 0)
 	require.NoError(t, err)
 	_, err = u.Write([]byte("only a part"))
 	require.NoError(t, err)
@@ -337,7 +363,7 @@ func TestUpload_FinishRejectsShortPart(t *testing.T) {
 
 	_, err = os.Stat(filepath.Join(srv.RootDir(), "upload", "short.bin"))
 	assert.True(t, os.IsNotExist(err), "落定必须失败")
-	require.FileExists(t, filepath.Join(srv.RootDir(), "upload", "short.bin.part"), ".part 必须保留供续传")
+	require.FileExists(t, filepath.Join(srv.RootDir(), "upload", "short.bin.100-0.part"), ".part 必须保留供续传")
 }
 
 // TestUpload_FinishRetryAfterRenameFailure 验证 rename 失败后可重试：
@@ -346,7 +372,7 @@ func TestUpload_FinishRetryAfterRenameFailure(t *testing.T) {
 	sc, srv, cleanup := newClient(t)
 	defer cleanup()
 
-	u, err := sc.BeginUpload("/upload", "retry.bin", 4)
+	u, err := sc.BeginUpload("/upload", "retry.bin", 4, 0)
 	require.NoError(t, err)
 	_, err = u.Write([]byte("data"))
 	require.NoError(t, err)
@@ -374,7 +400,7 @@ func TestUpload_WriteRejectsAfterFinalize(t *testing.T) {
 	sc, _, cleanup := newClient(t)
 	defer cleanup()
 
-	u, err := sc.BeginUpload("/upload", "finalized.bin", 4)
+	u, err := sc.BeginUpload("/upload", "finalized.bin", 4, 0)
 	require.NoError(t, err)
 	_, err = u.Write([]byte("data"))
 	require.NoError(t, err)
@@ -392,7 +418,7 @@ func TestUpload_WriteRejectsOversized(t *testing.T) {
 	sc, _, cleanup := newClient(t)
 	defer cleanup()
 
-	u, err := sc.BeginUpload("/upload", "oversize.bin", 4)
+	u, err := sc.BeginUpload("/upload", "oversize.bin", 4, 0)
 	require.NoError(t, err)
 	_, err = u.Write([]byte("data"))
 	require.NoError(t, err)
@@ -409,7 +435,7 @@ func TestUpload_AbortKeepsPartForResume(t *testing.T) {
 	defer cleanup()
 
 	// 完整内容为 "halftime data"（13 字节），第一次只传到第 8 字节就放弃
-	u, err := sc.BeginUpload("/upload", "abort.bin", 13)
+	u, err := sc.BeginUpload("/upload", "abort.bin", 13, 0)
 	require.NoError(t, err)
 	_, err = u.Write([]byte("halftime"))
 	require.NoError(t, err)
@@ -418,7 +444,7 @@ func TestUpload_AbortKeepsPartForResume(t *testing.T) {
 	_, err = u.Write([]byte("more"))
 	require.Error(t, err, "Abort 之后不得继续写")
 
-	reopened, err := sc.BeginUpload("/upload", "abort.bin", 13)
+	reopened, err := sc.BeginUpload("/upload", "abort.bin", 13, 0)
 	require.NoError(t, err)
 	assert.Equal(t, int64(len("halftime")), reopened.Offset())
 

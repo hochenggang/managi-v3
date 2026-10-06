@@ -13,10 +13,11 @@ export type Verb =
   | 'open'
   | 'close'
   | 'resize'
-  // 心跳与错误
+  // 心跳、错误与流控
   | 'ping'
   | 'pong'
   | 'error'
+  | 'ack'
   // SFTP 目录操作
   | 'ls'
   | 'mkdir'
@@ -39,9 +40,17 @@ export interface ErrorData {
   message: string
 }
 
+/** ack 负载：服务端确认本通道输入流「已消费或已作废」的累计字节数。
+ *  枢纽据此滑动发送窗口（见 useWSHub.waitAck），业务层看不到这个动词。 */
+export interface AckData {
+  chan: number
+  bytes: number
+}
+
 /** open 响应负载。
  *  home：sftp 子系统的初始目录（通常为主目录），无根目录读权限的账号据此起步。
  *  chunk_size：客户端→服务端单帧载荷上限，仅 PTY 下发；上传的切片大小随 upload 响应给。
+ *  window：输入窗口字节数（两类通道都下发），上传与粘贴按它节流发送。
  */
 export interface OpenResponse {
   kind: Kind
@@ -49,6 +58,7 @@ export interface OpenResponse {
   reattached?: boolean
   home?: string
   chunk_size?: number
+  window?: number
 }
 
 /** open 请求负载。PTY 靠 session_id 复用后端 shell；SFTP 只需节点描述。 */

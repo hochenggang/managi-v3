@@ -3,13 +3,11 @@
 package handler
 
 import (
-	"crypto/rand"
 	"crypto/subtle"
-	"encoding/hex"
 	"net"
 	"net/http"
 	"net/url"
-	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -104,6 +102,8 @@ func (l *authFailLimiter) pruneExpired() {
 // BasicAuthMiddleware 返回 Basic Auth 中间件。
 // cfg.BasicAuthEnabled == false 时透传（零开销）。
 // 浏览器在首次 401+WWW-Authenticate 后缓存凭据，后续同源 HTTP 与 WebSocket 升级请求自动携带。
+// 凭据为空（配置层 Validate 已拒绝这种配置启动）时例外：一切请求直接 401，
+// 空口令绝不能被当作有效凭据比对通过。
 // done 用于停止 limiter 后台 goroutine。
 func BasicAuthMiddleware(cfg *config.Config, done <-chan struct{}) func(http.Handler) http.Handler {
 	if !cfg.BasicAuthEnabled {
@@ -120,7 +120,14 @@ func BasicAuthMiddleware(cfg *config.Config, done <-chan struct{}) func(http.Han
 				next.ServeHTTP(w, r)
 				return
 			}
-			ip := clientIP(r)
+			// 兜底闸门：空用户名或空口令一律拒绝。ConstantTimeCompare 对两个空串判等，
+			// 少了这段，绕过配置层（直连 server.New）的「启用但无口令」会变成人人可进的假鉴权。
+			if len(expectedUser) == 0 || len(expectedPass) == 0 {
+				w.Header().Set("WWW-Authenticate", `Basic realm="managi", charset="UTF-8"`)
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			ip := clientIP(r, cfg.TrustedProxies)
 			if limiter.tooMany(ip) {
 				writeJSONError(w, http.StatusTooManyRequests, "too many auth failures, retry later")
 				return
@@ -142,16 +149,43 @@ func BasicAuthMiddleware(cfg *config.Config, done <-chan struct{}) func(http.Han
 	}
 }
 
-// clientIP 提取客户端 IP：只取真实连接地址。
-// 不采信 X-Forwarded-For：本项目的默认可信边界就是「谁连我谁就是客户端」，
-// 任何人都能伪造该头，采信后限流会按伪造 IP 计数而形同虚设。
+// clientIP 提取客户端 IP。默认只取真实连接地址：任何人都能伪造 X-Forwarded-For，
+// 无条件采信会让限流按伪造 IP 计数而形同虚设。
+// 部署在反向代理（如 nginx）之后时用 MANAGI_TRUSTED_PROXIES 声明代理网段：
+// 仅当对端落在可信网段内，才从 XFF 右侧取其后的第一个非代理地址——
+// 代理是追加式的（$proxy_add_x_forwarded_for），最右侧才是真正连上来的地址，
+// 客户端自己塞进前缀的伪造值不影响归属。
 // 复用 net.SplitHostPort 正确处理 IPv6 地址（原手写按 ':' 截断会破坏 IPv6）。
-func clientIP(r *http.Request) string {
+func clientIP(r *http.Request, trusted []*net.IPNet) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr // 无端口的异常形态：原样使用，后续按不可信处理
 	}
-	return host
+	if !ipInNets(net.ParseIP(host), trusted) {
+		return host
+	}
+	parts := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		cand := strings.TrimSpace(parts[i])
+		ip := net.ParseIP(cand)
+		if ip == nil {
+			continue // 畸形条目跳过：宁可落回连接地址，也不采信解析不了的值
+		}
+		if !ipInNets(ip, trusted) {
+			return cand
+		}
+	}
+	return host // XFF 缺失或整条链都是可信代理：归因到直连的那一跳
+}
+
+// ipInNets ip 是否落在任一网段内；ip 为 nil（解析失败）或网段表为空一律 false。
+func ipInNets(ip net.IP, nets []*net.IPNet) bool {
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // checkOrigin 校验 WebSocket 升级请求来源。
@@ -167,15 +201,4 @@ func checkOrigin(r *http.Request) bool {
 		return false
 	}
 	return u.Host == r.Host
-}
-
-// RandomBasicAuthPassword 生成随机 BasicAuth 密码（16 字节 → 32 字符十六进制）。
-// 供启用 BasicAuth 但未显式配置密码的部署自动生成强口令，取代固定弱默认值。
-func RandomBasicAuthPassword() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		// crypto/rand 在受支持平台上实际不会失败；极端情况下退化为时间戳派生，仍优于固定弱口令
-		return "managi-" + strconv.FormatInt(time.Now().UnixNano(), 36)
-	}
-	return hex.EncodeToString(b)
 }

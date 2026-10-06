@@ -68,7 +68,8 @@ async function settleAutoList(chan: FakeChannel, path: string): Promise<void> {
   await nextTick()
 }
 
-const file = (name: string, size: number) => new File([new Uint8Array(size)], name)
+const file = (name: string, size: number, mtime = 0) =>
+  new File([new Uint8Array(size)], name, { lastModified: mtime })
 
 /** 打桩 File System Access：happy-dom 没有 showSaveFilePicker，测试里按需给一个。 */
 function stubPicker(impl: (() => Promise<any>) | undefined): void {
@@ -159,11 +160,12 @@ describe('useSFTP', () => {
     const { s, chan } = mountSFTP()
     await settleAutoList(chan, '/home/user')
 
-    const p = s.upload('/remote', file('t.bin', 10))
+    const p = s.upload('/remote', file('t.bin', 10, 1728000000000))
     expect(chan.lastRequest('upload').data).toEqual({
       path: '/remote',
       filename: 't.bin',
       size: 10,
+      mtime: 1728000000000,
       chan: 1,
     })
     chan.lastRequest('upload').ok({ offset: 0, chunk_size: 4 })
@@ -175,12 +177,29 @@ describe('useSFTP', () => {
       [2, false],
       [0, true],
     ])
-    // 每片发完都过一次水位，慢链路下不会把整个文件堆进浏览器
-    expect(chan.drainCalls).toBeGreaterThanOrEqual(3)
+    // 每片发送前都等过一次窗口放行：慢链路下不会把整个文件堆进浏览器发送队列
+    expect(chan.ackWaits).toBe(3)
 
     chan.emit('upload_end', { chan: 1, size: 10 })
     await expect(p).resolves.toBeUndefined()
     expect(s.uploadProgress.value).toBe(100)
+  })
+
+  // 服务端积压中止通道时会先回 error 再放行走完的等待者：上传循环必须在复核点收手，
+  // 否则会对着一条不会再回 ack 的死通道永远发下去
+  it('等窗口期间通道出错：以该错误收尾，不再续发数据帧', async () => {
+    const { s, chan } = mountSFTP()
+    await settleAutoList(chan, '/home/user')
+    chan.holdAcks() // 第一片起就挂在窗口上
+
+    const p = s.upload('/remote', file('t.bin', 10))
+    chan.lastRequest('upload').ok({ offset: 0, chunk_size: 4 })
+    await vi.waitFor(() => expect(chan.ackWaits).toBe(1))
+    expect(chan.frames).toHaveLength(0)
+
+    chan.emit('error', { chan: 1, message: '上传输入积压超过窗口，通道已中止' })
+    await expect(p).rejects.toThrow('积压')
+    expect(chan.frames).toHaveLength(0) // 死通道上一片也不发
   })
 
   // 服务端报了续传点：已落盘的字节不重发

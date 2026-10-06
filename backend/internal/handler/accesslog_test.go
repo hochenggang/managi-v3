@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"managi/internal/config"
 	"managi/internal/testutil"
 )
 
@@ -45,7 +46,7 @@ func captureLogs(t *testing.T) *[]string {
 func TestAccessLog_LogsRequest(t *testing.T) {
 	lines := captureLogs(t)
 
-	h := AccessLog(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	h := AccessLog(&config.Config{})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("hi"))
 	}))
 
@@ -70,7 +71,7 @@ func TestAccessLog_NeverLogsCredentials(t *testing.T) {
 	cfg.BasicAuthUser = "admin"
 	cfg.BasicAuthPassword = "s3cr3t-passphrase"
 
-	h := AccessLog(BasicAuthMiddleware(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	h := AccessLog(cfg)(BasicAuthMiddleware(cfg, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})))
 
@@ -97,7 +98,7 @@ func TestAccessLog_NeverLogsCredentials(t *testing.T) {
 // 缺 Hijacker 则 WS 升级直接失败，缺 Flusher 则流式下载无法及时刷新。
 func TestAccessLog_PreservesHijacker(t *testing.T) {
 	var isHijacker, isFlusher bool
-	h := AccessLog(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	h := AccessLog(&config.Config{})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, isHijacker = w.(http.Hijacker)
 		f, ok := w.(http.Flusher)
 		isFlusher = ok
@@ -112,10 +113,11 @@ func TestAccessLog_PreservesHijacker(t *testing.T) {
 }
 
 // TestAccessLog_IgnoresForwardedFor 验证访问日志里的 remote 与登录限流同源：
-// 一律记真实连接地址。X-Forwarded-For 谁都能伪造，采信后日志与限流都会按假 IP 计数。
+// 未声明可信代理时一律记真实连接地址。X-Forwarded-For 谁都能伪造，
+// 采信后日志与限流都会按假 IP 计数。
 func TestAccessLog_IgnoresForwardedFor(t *testing.T) {
 	lines := captureLogs(t)
-	h := AccessLog(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	h := AccessLog(&config.Config{})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
 
 	req := httptest.NewRequest("GET", "/", nil)
 	req.RemoteAddr = "203.0.113.9:55555"

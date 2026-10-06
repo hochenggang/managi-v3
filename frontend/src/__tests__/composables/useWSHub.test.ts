@@ -16,7 +16,6 @@ class FakeSocket {
 
   readyState = FakeSocket.CONNECTING
   binaryType = ''
-  bufferedAmount = 0
   sent: Array<string | Uint8Array> = []
   onopen: (() => void) | null = null
   onmessage: ((ev: { data: string | ArrayBuffer }) => void) | null = null
@@ -130,6 +129,16 @@ async function attachAndOpen(chan = 1): Promise<{ channel: Channel; sock: FakeSo
   const channel = attach(rec)
   const sock = lastSocket()
   openReply(sock, chan)
+  await tick()
+  return { channel, sock, rec }
+}
+
+/** 同上，但让 open 响应携带指定输入窗口：窗口语义要用小数值才断言得动。 */
+async function attachWithWindow(win: number, chan = 1): Promise<{ channel: Channel; sock: FakeSocket; rec: Recorder }> {
+  const rec = makeSpec()
+  const channel = attach(rec)
+  const sock = lastSocket()
+  openReply(sock, chan, { window: win })
   await tick()
   return { channel, sock, rec }
 }
@@ -384,29 +393,71 @@ describe('createHub：数据面路由', () => {
   })
 })
 
-describe('createHub：发送缓冲水位', () => {
-  it('waitDrain 高于水位时等待，降下来才放行', async () => {
-    const { channel, sock } = await attachAndOpen(1)
-    sock.bufferedAmount = 9 << 20
+describe('createHub：输入窗口（发送方向流控）', () => {
+  it('waitAck 超窗时等 ack 推进，ack 到达即放行；ack 不转发给业务回调', async () => {
+    const { channel, sock, rec } = await attachWithWindow(8)
+    expect(channel.frame(new Uint8Array(5))).toBe(true)
     let drained = false
-    const p = channel.waitDrain()
+    const p = channel.waitAck(5)
     p.then(() => {
       drained = true
     })
     await tick()
-    expect(drained).toBe(false)
+    expect(drained).toBe(false) // 占用 5 + 要发 5 超出窗口 8，等 ack
 
-    sock.bufferedAmount = 0
-    vi.advanceTimersByTime(50)
-    await tick()
-    expect(drained).toBe(true)
+    sock.reply({ type: 'ack', data: { chan: 1, bytes: 4 } })
+    await expect(p).resolves.toBeUndefined()
+    expect(rec.onNotify).not.toHaveBeenCalled() // ack 是枢纽自己的账，不打扰业务
+  })
+
+  it('窗口外的帧拒绝发出：客户端始终合规，服务端队列预算填不满', async () => {
+    const { channel, sock } = await attachWithWindow(8)
+    expect(channel.frame(new Uint8Array(8))).toBe(true)
+    expect(channel.frame(new Uint8Array(1))).toBe(false) // 占用 8 + 1 > 8
+    sock.reply({ type: 'ack', data: { chan: 1, bytes: 4 } })
+    expect(channel.frame(new Uint8Array(1))).toBe(true) // 8 + 1 - 4 ≤ 8
+    expect(sock.frames()).toHaveLength(2) // 被拒的帧没上过线
+  })
+
+  it('ack 只增不减：终止路径上乱序回退的 ack 不得缩小已确认字节', async () => {
+    const { channel, sock } = await attachWithWindow(8)
+    expect(channel.frame(new Uint8Array(5))).toBe(true)
+    const p = channel.waitAck(5)
+    sock.reply({ type: 'ack', data: { chan: 1, bytes: 4 } })
+    await expect(p).resolves.toBeUndefined()
+    sock.reply({ type: 'ack', data: { chan: 1, bytes: 2 } }) // 回退值：忽略
+    // 5 + 6 - 4 ≤ 8 立即放行；若 acked 被拉回 2，这里会悬等
+    await expect(channel.waitAck(6)).resolves.toBeUndefined()
+  })
+
+  it('通道出错时放行等待者，让上传循环立刻回去看错误状态', async () => {
+    const { channel, sock } = await attachWithWindow(8)
+    expect(channel.frame(new Uint8Array(8))).toBe(true)
+    const p = channel.waitAck(1)
+    sock.reply({ type: 'error', data: { chan: 1, message: '通道已中止' } })
     await expect(p).resolves.toBeUndefined()
   })
 
-  it('链路断开时 waitDrain 立即返回，让调用方在下一次 frame 上拿到 false', async () => {
-    const { channel, sock } = await attachAndOpen(1)
+  it('链路断开时 waitAck 立即返回，让调用方在下一次 frame 上拿到 false', async () => {
+    const { channel, sock } = await attachWithWindow(8)
     sock.drop()
-    await expect(channel.waitDrain()).resolves.toBeUndefined()
+    await expect(channel.waitAck(1)).resolves.toBeUndefined()
+    expect(channel.frame(new Uint8Array(1))).toBe(false)
+  })
+
+  it('重连后窗口账本重置：缓冲的发送按新窗口放行', async () => {
+    const { channel, sock } = await attachWithWindow(8)
+    expect(channel.frame(new Uint8Array(8))).toBe(true)
+    const p = channel.waitAck(1) // 等窗口，悬着
+    sock.drop()
+    await expect(p).resolves.toBeUndefined() // 断链先放行
+
+    vi.advanceTimersByTime(1000)
+    const next = lastSocket()
+    next.accept()
+    openReply(next, 9, { window: 8 })
+    await tick()
+    expect(channel.frame(new Uint8Array(8))).toBe(true) // 新账本 sent=0，可再发满窗
   })
 })
 

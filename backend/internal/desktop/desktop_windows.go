@@ -72,6 +72,12 @@ func Run(cfg *config.Config) error {
 	}
 	cfg.Host = loopbackHost
 	cfg.IndexHTML = indexHTML
+	// 桌面形态只监听回环，流量不出本机：TLS 在此没有保护对象，
+	// 且浏览器打开的是 http://127.0.0.1。配置了就明说忽略，不假装已启用。
+	if cfg.TLSEnabled() {
+		slog.Warn("桌面形态仅监听回环地址，忽略 MANAGI_TLS_CERT/MANAGI_TLS_KEY")
+		cfg.TLSCertFile, cfg.TLSKeyFile = "", ""
+	}
 
 	a := &trayApp{cfg: cfg, done: make(chan struct{}), events: make(chan startResult, 2)}
 	systray.Run(a.onReady, a.onExit)

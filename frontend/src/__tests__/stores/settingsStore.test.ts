@@ -1,21 +1,30 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { useSettingsStore, TERMINAL_FONT_OPTIONS } from '@/stores/settingsStore'
+import { useSettingsStore, TERMINAL_FONT_OPTIONS, waitForTerminalFont } from '@/stores/settingsStore'
 
 const STORAGE_KEY = 'managi-settings'
 
-// 最后一项是「系统字体」，其余内嵌字体都必须以它为兜底
-const SYSTEM_FONT_FAMILY = TERMINAL_FONT_OPTIONS[TERMINAL_FONT_OPTIONS.length - 1].fontFamily
+// 最后一项是「系统等宽字体」，其余内嵌字体都必须以它为兜底
+const SYSTEM_MONO_FAMILY = TERMINAL_FONT_OPTIONS[TERMINAL_FONT_OPTIONS.length - 1].fontFamily
 
 beforeEach(() => {
   setActivePinia(createPinia())
 })
 
 describe('终端字体选项', () => {
-  it('四个选项，全部以系统字体栈兜底', () => {
+  it('四个选项，全部以系统等宽字体栈兜底', () => {
     expect(TERMINAL_FONT_OPTIONS).toHaveLength(4)
     for (const option of TERMINAL_FONT_OPTIONS) {
-      expect(option.fontFamily.endsWith(SYSTEM_FONT_FAMILY)).toBe(true)
+      expect(option.fontFamily.endsWith(SYSTEM_MONO_FAMILY)).toBe(true)
+    }
+  })
+
+  // 比例字体（system-ui/Segoe UI 等）会让 xterm 的 measureText('W') 量出过宽的格子，
+  // 渲染时窄字形被 letter-spacing 撑开；兜底必须以 generic monospace 结尾。
+  it('兜底栈是等宽的，不会退到比例字体', () => {
+    for (const option of TERMINAL_FONT_OPTIONS) {
+      expect(option.fontFamily.trim().endsWith('monospace')).toBe(true)
+      expect(option.fontFamily).not.toMatch(/system-ui|sans-serif|-apple-system/)
     }
   })
 
@@ -43,5 +52,12 @@ describe('旧存档里的自定义字体串', () => {
     const store = useSettingsStore()
     store.setTerminalFontFamily("'Comic Sans MS', cursive")
     expect(store.settings.terminalFontFamily).toBe(TERMINAL_FONT_OPTIONS[0].fontFamily)
+  })
+
+  // happy-dom 没有 FontFaceSet：等字体必须照常兑现，否则终端的重测路径在测试里永远走不到
+  it('没有 FontFaceSet 时 waitForTerminalFont 立即兑现', async () => {
+    await expect(
+      waitForTerminalFont(TERMINAL_FONT_OPTIONS[0].fontFamily, 14),
+    ).resolves.toBeUndefined()
   })
 })

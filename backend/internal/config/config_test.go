@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
 		"MANAGI_HOST", "MANAGI_PORT", "MANAGI_AUTH", "MANAGI_KNOWN_HOSTS", "MANAGI_INDEX_HTML",
+		"MANAGI_TLS_CERT", "MANAGI_TLS_KEY", "MANAGI_TRUSTED_PROXIES",
 	} {
 		t.Setenv(k, "")
 	}
@@ -36,28 +38,40 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, 60, cfg.SessionIdleTimeout)
 	assert.Equal(t, 1<<20, cfg.ChunkSize) // 1MB
 	assert.Equal(t, 1<<16, cfg.DownloadChunkSize)
-	// MANAGI_AUTH 未填即不启用鉴权；填了才可能进入随机口令路径
+	// MANAGI_AUTH 未填即不启用鉴权
 	assert.False(t, cfg.BasicAuthEnabled)
 	assert.Equal(t, "", cfg.BasicAuthUser)
 	assert.Equal(t, "", cfg.BasicAuthPassword)
 	// 默认沿用 TOFU（不设 known_hosts）
 	assert.Equal(t, "", cfg.KnownHostsFile)
+	// TOFU 信任库默认落在 ~/.managi/known_hosts（不碰 OpenSSH 自己的 known_hosts）
+	home, err := os.UserHomeDir()
+	require.NoError(t, err, "测试依赖可用的用户目录")
+	assert.Equal(t, filepath.Join(home, ".managi", "known_hosts"), cfg.TOFUKnownHostsFile)
+	// 默认明文，且无可信代理：XFF 一律不采信
+	assert.False(t, cfg.TLSEnabled())
+	assert.Empty(t, cfg.TrustedProxies)
 	// IndexHTMLPath 在 Load 中转为绝对路径
 	assert.True(t, filepath.IsAbs(cfg.IndexHTMLPath), "IndexHTMLPath should be absolute")
 	assert.Equal(t, "index.html", filepath.Base(cfg.IndexHTMLPath))
 }
 
-// TestLoad_EnvOverride 验证 5 个受支持的环境变量覆盖默认值。
+// TestLoad_EnvOverride 验证受支持的环境变量覆盖默认值。
 func TestLoad_EnvOverride(t *testing.T) {
 	// 使用跨平台绝对路径，避免 Windows 上 /var/www 被视为相对路径
 	absPath := filepath.Join(t.TempDir(), "index.html")
 	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+	certPath := filepath.Join(t.TempDir(), "cert.pem")
+	keyPath := filepath.Join(t.TempDir(), "key.pem")
 	clearEnv(t)
 	t.Setenv("MANAGI_HOST", "192.168.1.1")
 	t.Setenv("MANAGI_PORT", "8080")
 	t.Setenv("MANAGI_AUTH", "ops:sec:ret")
 	t.Setenv("MANAGI_KNOWN_HOSTS", knownHosts)
 	t.Setenv("MANAGI_INDEX_HTML", absPath)
+	t.Setenv("MANAGI_TLS_CERT", certPath)
+	t.Setenv("MANAGI_TLS_KEY", keyPath)
+	t.Setenv("MANAGI_TRUSTED_PROXIES", "10.0.0.0/8, 127.0.0.1")
 
 	cfg := Load()
 	assert.Equal(t, "192.168.1.1", cfg.Host)
@@ -69,6 +83,55 @@ func TestLoad_EnvOverride(t *testing.T) {
 	assert.Equal(t, knownHosts, cfg.KnownHostsFile)
 	// 已是绝对路径，Load 不会修改
 	assert.Equal(t, absPath, cfg.IndexHTMLPath)
+	assert.True(t, cfg.TLSEnabled())
+	assert.Equal(t, certPath, cfg.TLSCertFile)
+	assert.Equal(t, keyPath, cfg.TLSKeyFile)
+	require.Len(t, cfg.TrustedProxies, 2)
+	assert.True(t, cfg.TrustedProxies[0].Contains(net.ParseIP("10.1.2.3")))
+	assert.True(t, cfg.TrustedProxies[1].Contains(net.ParseIP("127.0.0.1")))
+}
+
+// TestValidate_TLSPairing 验证 TLS 证书/私钥必须成对：
+// 只配一半时运维意图明确是 HTTPS，静默退回明文是一次安全降级，必须拒绝启动。
+func TestValidate_TLSPairing(t *testing.T) {
+	assert.NoError(t, (&Config{}).Validate())
+
+	cfg := &Config{TLSCertFile: "cert.pem"}
+	assert.Error(t, cfg.Validate())
+
+	cfg = &Config{TLSKeyFile: "key.pem"}
+	assert.Error(t, cfg.Validate())
+
+	cfg = &Config{TLSCertFile: "cert.pem", TLSKeyFile: "key.pem"}
+	assert.NoError(t, cfg.Validate())
+	assert.True(t, cfg.TLSEnabled())
+}
+
+// TestValidate_EmptyAuthPassword 验证启用鉴权但密码为空会拒绝启动：
+// 空口令不构成有效凭据，兜底生成随机口令等于把密码轮换进日志，必须让部署显式修配置。
+func TestValidate_EmptyAuthPassword(t *testing.T) {
+	assert.Error(t, (&Config{BasicAuthEnabled: true}).Validate())
+
+	cfg := &Config{BasicAuthEnabled: true, BasicAuthPassword: "secret"}
+	assert.NoError(t, cfg.Validate())
+
+	// 未启用鉴权时密码为空无妨：那是「明确不鉴权」的正常形态
+	assert.NoError(t, (&Config{}).Validate())
+}
+
+// TestParseTrustedProxies 验证网段解析：CIDR 与裸 IP 都接受，非法项出声跳过。
+func TestParseTrustedProxies(t *testing.T) {
+	nets := parseTrustedProxies(" 10.0.0.0/8 , 127.0.0.1 , ::1 , junk , , 192.168.1.0/24")
+	require.Len(t, nets, 4)
+
+	assert.True(t, nets[0].Contains(net.ParseIP("10.9.9.9")))
+	assert.True(t, nets[1].Contains(net.ParseIP("127.0.0.1")))
+	assert.False(t, nets[1].Contains(net.ParseIP("127.0.0.2")))
+	assert.True(t, nets[2].Contains(net.ParseIP("::1")))
+	assert.False(t, nets[2].Contains(net.ParseIP("::2")))
+	assert.True(t, nets[3].Contains(net.ParseIP("192.168.1.55")))
+
+	assert.Empty(t, parseTrustedProxies(""))
 }
 
 // TestParseBasicAuth 验证 MANAGI_AUTH 的解析：填了凭据就是要鉴权，
@@ -87,7 +150,7 @@ func TestParseBasicAuth(t *testing.T) {
 		{"密码含冒号", "admin:a:b", "admin", "a:b"},
 		{"缺冒号整串当密码", "pw-only", DefaultBasicAuthUser, "pw-only"},
 		{"空用户名", ":pw", DefaultBasicAuthUser, "pw"},
-		{"空密码（启用但待生成）", "admin:", "admin", ""},
+		{"空密码（解析保留，Validate 拒绝启动）", "admin:", "admin", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

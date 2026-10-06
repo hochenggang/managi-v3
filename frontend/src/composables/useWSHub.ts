@@ -1,9 +1,10 @@
 // useWSHub：一条 /ws 连接的共享枢纽。
 //
 // 页面里所有标签共用这一条连接：每路终端 = 一路 PTY 通道，每路文件管理 = 一路 SFTP 通道。
-// 枢纽只管两件事：
+// 枢纽只管三件事：
 //   1. 连接生命周期——心跳、响应看门狗、指数退避重连、重连后重开各通道；
-//   2. 帧路由——控制帧按 seq 了结等待中的请求，数据帧按 chan 投递给所属通道。
+//   2. 帧路由——控制帧按 seq 了结等待中的请求，数据帧按 chan 投递给所属通道；
+//   3. 输入窗口账本——服务端 ack 推进窗口，发送方向（粘贴/上传）按 waitAck 节流。
 // 业务语义（终端输入、目录操作、字节缓冲）都留在调用方，枢纽一概不知。
 // 协议见 ./../protocol/ws.ts 与 ./../protocol/frames.ts，后端为 handler/ws.go。
 
@@ -14,6 +15,7 @@ import { decodeFrame, encodeFrame } from '@/protocol/frames'
 import {
   decodeEnvelope,
   encodeEnvelope,
+  type AckData,
   type Envelope,
   type ErrorData,
   type OpenPayload,
@@ -48,8 +50,9 @@ export interface Channel {
   notify: (type: Verb, data?: RequestData) => boolean
   /** 数据面单帧。链路未就绪返回 false，由调用方缓冲后重试。 */
   frame: (payload: Uint8Array, end?: boolean) => boolean
-  /** 等发送缓冲降回水位：让上传跟着网络走，而不是把整个文件堆进浏览器。 */
-  waitDrain: () => Promise<void>
+  /** 等输入窗口腾出 bytes 字节：上传与粘贴按服务端 ack 节流，慢链路不堆内存。
+   *  断链、通道出错、摘除时立即放行，让调用方尽快回到 frame()/错误检查上。 */
+  waitAck: (bytes: number) => Promise<void>
   /** 摘除本通道：服务端随之释放其资源（PTY 的 shell 按空闲 TTL 保留，可再复用）。 */
   close: () => void
 }
@@ -69,9 +72,9 @@ const REQUEST_TIMEOUT_MS = 30_000
 // open 可能包含拨号、认证、起 shell，给足预算；超时后由重连再试。
 const OPEN_TIMEOUT_MS = 120_000
 const MAX_RECONNECT = 10
-// 发送缓冲水位：高于此值先等它降下来再发下一片。8MB 够几片在途（吞吐不受损）又有界。
-const DRAIN_TARGET_BYTES = 8 << 20
-const DRAIN_POLL_MS = 50
+// open 响应没有 window 时的兜底窗口（老服务端/协议漂移）：与后端默认值同量级，
+// 只影响发送节流精度，不影响正确性——服务端队列预算独立于它。
+const FALLBACK_INPUT_WINDOW = 8 << 20
 
 function hubUrl(): string {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
@@ -85,6 +88,19 @@ interface Binding {
   state: Ref<ChannelState>
   /** 本通道发出的、尚未了结的请求 seq：摘除通道时据此一并失败，不留悬等 Promise。 */
   pending: Set<number>
+
+  // 输入窗口账本（发送方向流控）：占用 = sent - acked，超过 window 就等 ack 滑动。
+  // sent 是本通道数据面已发出的字节，acked 是服务端 ack 里的累计值（含丢弃补偿）。
+  window: number
+  sent: number
+  acked: number
+  ackWaiters: Set<AckWaiter>
+}
+
+/** AckWaiter 在等窗口的挂起者：need 是它要发送的字节数。 */
+interface AckWaiter {
+  need: number
+  resolve: () => void
 }
 
 interface Pending {
@@ -160,6 +176,11 @@ export function createHub(url = hubUrl()): Hub {
     for (const b of bindings) {
       b.chan = 0
       b.pending.clear()
+      // 窗口账本随连接归零：新连接上的通道是全新的，ack 从 0 重新计。
+      // 等窗口的挂起者一并放行——调用方会在下一次 frame() 上拿到 false 并缓冲等待。
+      b.sent = 0
+      b.acked = 0
+      releaseAckWaiters(b)
       if (b.state.value === 'open') b.state.value = 'opening'
     }
   }
@@ -209,7 +230,11 @@ export function createHub(url = hubUrl()): Hub {
   function sendFrame(b: Binding, payload: Uint8Array, end: boolean): boolean {
     const conn = ws
     if (!conn || !b.chan || conn.readyState !== WebSocket.OPEN) return false
+    // 窗口外的帧不发出：调用方经 waitAck 等待或先缓冲。客户端因此始终在窗口内，
+    // 服务端队列预算（窗口 + 一片余量）对合规客户端永远填不满——溢出只是防线的防线。
+    if (!windowOpen(b, payload.byteLength)) return false
     conn.send(encodeFrame(b.chan, payload, end))
+    b.sent += payload.byteLength // 计入输入窗口：ack 里的累计值就对着它算占用
     return true
   }
 
@@ -301,7 +326,9 @@ export function createHub(url = hubUrl()): Hub {
     else p.resolve(env.data)
   }
 
-  /** routeNotification 把 seq=0 的主动推送投给所属通道（按 data.chan 定位）。 */
+  /** routeNotification 把 seq=0 的主动推送投给所属通道（按 data.chan 定位）。
+   *  ack 在枢纽就地消化（窗口账本是枢纽自己的事），其余交业务回调。
+   */
   function routeNotification(env: Envelope): void {
     const chan = (env.data as { chan?: number } | undefined)?.chan ?? 0
     const b = chan ? byChan.get(chan) : undefined
@@ -309,7 +336,58 @@ export function createHub(url = hubUrl()): Hub {
       console.warn(`[useWSHub] 无法归属的控制帧：${env.type}`)
       return
     }
+    if (env.type === 'ack') {
+      handleAck(b, env.data)
+      return
+    }
     b.spec.onNotify(env.type, env.data)
+    // 通道级错误：叫醒等窗口的挂起者，让调用方立刻回去看错误状态，
+    // 而不是悬在一个可能永远不来的 ack 上（服务端已把该通道判死时尤其如此）。
+    if (env.type === 'error') releaseAckWaiters(b)
+  }
+
+  // ===== 输入窗口（发送方向流控） =====
+
+  /** handleAck 服务端确认输入字节数：滑动窗口并放行已满足的等待者。
+   *  bytes 是「已消费或已作废」的累计值；用 max 吸收终止路径上可能的乱序到达。 */
+  function handleAck(b: Binding, data: unknown): void {
+    const bytes = (data as AckData | undefined)?.bytes
+    if (typeof bytes !== 'number' || bytes <= b.acked) return
+    b.acked = bytes
+    tryAckWaiters(b)
+  }
+
+  /** tryAckWaiters 放行所有已满足的等待者（ack 到达、通道重开后复核）。 */
+  function tryAckWaiters(b: Binding): void {
+    for (const w of [...b.ackWaiters]) {
+      if (windowOpen(b, w.need)) {
+        b.ackWaiters.delete(w)
+        w.resolve()
+      }
+    }
+  }
+
+  /** windowOpen 本通道再发 need 字节是否仍在窗口内。 */
+  function windowOpen(b: Binding, need: number): boolean {
+    return b.sent + need - b.acked <= b.window
+  }
+
+  /** waitAck 等窗口腾出 need 字节：有余量立即放行，否则登记等待者。 */
+  function waitAck(b: Binding, need: number): Promise<void> {
+    return new Promise((resolve) => {
+      if (windowOpen(b, need)) {
+        resolve()
+        return
+      }
+      b.ackWaiters.add({ need, resolve })
+    })
+  }
+
+  /** releaseAckWaiters 无条件放行全部等待者（断链/出错/摘除）：余量已无意义，
+   *  让调用方尽快回到 frame() 或错误检查上，而不是悬在永远不会到的 ack 上。 */
+  function releaseAckWaiters(b: Binding): void {
+    for (const w of b.ackWaiters) w.resolve()
+    b.ackWaiters.clear()
   }
 
   function errorText(data: unknown): string {
@@ -351,10 +429,17 @@ export function createHub(url = hubUrl()): Hub {
       if (!resp?.chan) throw new Error('open 响应缺少 chan')
       b.chan = resp.chan
       byChan.set(b.chan, b)
+      // 新通道 = 新窗口账本：ack 从 0 重新计。等窗口的挂起者在此复核——
+      // 缓冲输入的重连补发（断线时登记的等待者）走的就是这条路。
+      b.window = resp.window && resp.window > 0 ? resp.window : FALLBACK_INPUT_WINDOW
+      b.sent = 0
+      b.acked = 0
       b.state.value = 'open'
+      tryAckWaiters(b)
       b.spec.onOpen(resp)
     } catch (e) {
       b.state.value = 'error'
+      releaseAckWaiters(b) // 开不起来时别让发送循环悬在窗口上，它会立刻看到错误状态
       // 开不起来必须出声（密码错、目标不可达），否则用户只看到一直「正在连接」
       b.spec.onNotify('error', { message: toErrorMessage(e) })
     }
@@ -364,6 +449,7 @@ export function createHub(url = hubUrl()): Hub {
     if (!bindings.delete(b)) return
     for (const seq of b.pending) abandon(seq, new Error('通道已关闭'))
     b.pending.clear()
+    releaseAckWaiters(b) // 通道没了，等窗口的发送循环到此为止
     if (b.chan) {
       byChan.delete(b.chan)
       // seq 省略：不等回复，组件正在卸载，没人处理应答
@@ -373,7 +459,16 @@ export function createHub(url = hubUrl()): Hub {
   }
 
   function attach(spec: ChannelSpec): Channel {
-    const b: Binding = { spec, chan: 0, state: ref<ChannelState>('opening'), pending: new Set() }
+    const b: Binding = {
+      spec,
+      chan: 0,
+      state: ref<ChannelState>('opening'),
+      pending: new Set(),
+      window: 0,
+      sent: 0,
+      acked: 0,
+      ackWaiters: new Set(),
+    }
     bindings.add(b)
     if (isOpen()) void reopen(b)
     else connect()
@@ -388,25 +483,9 @@ export function createHub(url = hubUrl()): Hub {
       notify: (type, data) =>
         !!b.chan && sendText(encodeEnvelope({ type, data: { ...data, chan: b.chan } })),
       frame: (payload, end) => sendFrame(b, payload, end ?? false),
-      waitDrain,
+      waitAck: (bytes) => waitAck(b, bytes),
       close: () => detach(b),
     }
-  }
-
-  /** waitDrain 等发送缓冲降回水位。
-   *  上传按分片连续入队，慢链路下浏览器会把整个文件堆在内存里；这里让发送端跟着网络走。
-   *  链路断开时立即返回，让调用方在下一次 frame() 上拿到 false。
-   */
-  function waitDrain(): Promise<void> {
-    return new Promise((resolve) => {
-      const check = (): void => {
-        const conn = ws
-        if (!conn || conn.readyState !== WebSocket.OPEN) return resolve()
-        if (conn.bufferedAmount <= DRAIN_TARGET_BYTES) return resolve()
-        setTimeout(check, DRAIN_POLL_MS)
-      }
-      check()
-    })
   }
 
   function dispose(): void {

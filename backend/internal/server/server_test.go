@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"managi/internal/config"
 	"managi/internal/testutil"
@@ -85,28 +84,33 @@ func TestNew_BasicAuthChallenges(t *testing.T) {
 	assert.NotEqual(t, http.StatusUnauthorized, rec.Code)
 }
 
-// TestNew_GeneratesPasswordWhenMissing 验证启用 BasicAuth 但未配置密码时自动生成随机口令。
-// 取代固定弱默认值；生成的口令应为 32 位十六进制。
-func TestNew_GeneratesPasswordWhenMissing(t *testing.T) {
+// TestNew_EmptyPasswordFailsClosed 验证「启用鉴权但口令为空」不再兜底生成口令，
+// 且请求一律 401：空口令绝不能判等通过（配置层 Validate 已拒绝这种配置启动，
+// 本测试覆盖直连 server.New 绕过配置层时的兜底闸门）。
+func TestNew_EmptyPasswordFailsClosed(t *testing.T) {
 	cfg := testutil.TestConfig()
 	cfg.BasicAuthEnabled = true
 	cfg.BasicAuthPassword = ""
 
-	_, pool := New(cfg, make(chan struct{}))
+	srv, pool := New(cfg, make(chan struct{}))
 	defer pool.CloseAll()
 
-	require.NotEmpty(t, cfg.BasicAuthPassword, "password must be generated when missing")
-	assert.Len(t, cfg.BasicAuthPassword, 32)
-}
+	assert.Empty(t, cfg.BasicAuthPassword, "password must not be generated")
 
-// TestNew_KeepsExplicitPassword 验证显式配置的密码不被覆盖。
-func TestNew_KeepsExplicitPassword(t *testing.T) {
-	cfg := testutil.TestConfig()
-	cfg.BasicAuthEnabled = true
-	cfg.BasicAuthPassword = "my-explicit-pass"
+	// 无凭据 → 401
+	rec := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 
-	_, pool := New(cfg, make(chan struct{}))
-	defer pool.CloseAll()
+	// 空凭据（ConstantTimeCompare 会判等的组合）→ 同样 401
+	req := httptest.NewRequest("GET", "/", nil)
+	req.SetBasicAuth("", "")
+	rec = httptest.NewRecorder()
+	srv.Handler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 
-	assert.Equal(t, "my-explicit-pass", cfg.BasicAuthPassword)
+	// /health 是唯一例外：探活必须可达
+	rec = httptest.NewRecorder()
+	srv.Handler.ServeHTTP(rec, httptest.NewRequest("GET", "/health", nil))
+	assert.Equal(t, http.StatusOK, rec.Code)
 }

@@ -77,9 +77,25 @@ func authMethods(node model.Node) ([]ssh.AuthMethod, error) {
 	}
 }
 
-// isAlive 判断连接 transport 是否活跃。是一次阻塞网络调用，调用方不得持池锁。
-// 入池的连接 client 必然非空（见 Connection 注释），故只发探测请求。
+// probeTimeout 存活探测的超时上限（测试可缩短）。
+// 半开 TCP（对端消失、链路黑洞）上 SendRequest 要等系统 TCP 超时才回错（分钟级），
+// 而探测在 reuse 的请求路径上：不设上限，用户点「测试连接」会白等一刻钟。
+var probeTimeout = 5 * time.Second
+
+// isAlive 判断连接 transport 是否活跃。是一次阻塞网络调用（最长 probeTimeout），
+// 调用方不得持池锁。入池的连接 client 必然非空（见 Connection 注释），故只发探测请求。
+// 超时按「已死」处理并顺手关闭连接：等不回包与死亡等价，留着只会让下次再等一遍。
 func isAlive(client *ssh.Client) bool {
-	_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
-	return err == nil
+	done := make(chan error, 1) // 带缓冲：超时路径没人接结果，不能让探测协程卡住
+	go func() {
+		_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err == nil
+	case <-time.After(probeTimeout):
+		_ = client.Close() // 关连接让挂着的 SendRequest 立刻返回
+		return false
+	}
 }

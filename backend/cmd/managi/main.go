@@ -9,6 +9,7 @@ import (
 	"context"
 	"flag"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -46,6 +47,12 @@ func main() {
 		}
 	})
 
+	// 必须人工修正的配置（如 TLS 只配了证书或私钥）：拒绝启动，不静默降级
+	if err := cfg.Validate(); err != nil {
+		slog.Error("invalid config", "err", err)
+		os.Exit(1)
+	}
+
 	if *tray {
 		if err := desktop.Run(cfg); err != nil {
 			slog.Error("tray mode unavailable", "err", err)
@@ -58,7 +65,12 @@ func main() {
 	done := make(chan struct{})
 	srv, pool := server.New(cfg, done)
 
-	slog.Info("managi v3 starting", "addr", srv.Addr, "basicAuth", cfg.BasicAuthEnabled)
+	slog.Info("managi v3 starting", "addr", srv.Addr, "basicAuth", cfg.BasicAuthEnabled, "tls", cfg.TLSEnabled())
+	// 免鉴权 + 非回环监听 = 开放跳板机：任何能连通该端口的人都能免密操作 SSH。
+	// 不拒绝启动（反代终结鉴权的部署合法），但必须把后果说清楚。
+	if !cfg.BasicAuthEnabled && !isLoopbackHost(cfg.Host) {
+		slog.Warn("BasicAuth 未启用且监听地址非本机回环，端口可达者即可免密使用 SSH 跳板；建议设置 MANAGI_AUTH=user:pass 启用鉴权", "host", cfg.Host)
+	}
 
 	// 信号驱动的优雅关闭
 	go func() {
@@ -78,9 +90,26 @@ func main() {
 		}
 	}()
 
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		slog.Error("server failed", "err", err)
+	// TLS 证书对已配置就走 HTTPS/wss；否则明文（默认，前置反代终结 TLS 时也走这里）
+	var serveErr error
+	if cfg.TLSEnabled() {
+		serveErr = srv.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
+	} else {
+		serveErr = srv.ListenAndServe()
+	}
+	if serveErr != nil && serveErr != http.ErrServerClosed {
+		slog.Error("server failed", "err", serveErr)
 		os.Exit(1)
 	}
 	slog.Info("managi v3 stopped")
+}
+
+// isLoopbackHost 判断监听地址是否仅限本机回环（"localhost" 或回环 IP）。
+// 用于免鉴权告警的误报控制：绑 0.0.0.0 / 内网 IP / "::" 都算对外开放。
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

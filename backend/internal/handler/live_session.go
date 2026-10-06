@@ -6,6 +6,7 @@ package handler
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -65,7 +66,10 @@ func newSessionManager(pool *sshpool.Pool, cfg *config.Config) *sessionManager {
 // liveSession 一个后端维护的终端会话：SSH shell + scrollback + 当前挂载的输出通道。
 // 锁顺序：wc.mu → ls.mu（ls.mu 内不做网络 I/O）。
 type liveSession struct {
-	id      string
+	id string
+	// nodeKey 建会话时的节点连接键（model.Node.ConnectionKey）。
+	// session_id 由客户端提供，复用时必须核对身份：id 对不上节点即拒绝（见 getOrCreate）。
+	nodeKey string
 	sess    *terminal.Session
 	sshConn *sshpool.Connection
 	history *ring.Buffer // scrollback：超限丢头部，截断不切断字符（不变量由 ring 保证）
@@ -81,10 +85,13 @@ type liveSession struct {
 // getOrCreate 查找或创建会话，返回 (会话, 是否复用已存在的)。
 // 不挂载输出、不回放：这两步由调用方在写出 open 响应的同一把写锁里完成
 // （见 wsConn.writeOpen），否则实时输出可能插到回放之前。
+// 命中已有会话时核对节点身份：session_id 是客户端给的，若不核对，
+// 一个陈旧或构造的 id 就能接上另一节点正在跑的 shell，输入被搬到别的机器执行。
 // 用 keyLocks 串行化同一 sessionID 的并发创建，避免竞态导致 SSH 连接与 goroutine 泄漏。
 func (m *sessionManager) getOrCreate(id string, node model.Node, cols, rows int) (*liveSession, bool, error) {
+	wantKey := node.ConnectionKey()
 	if id == "" {
-		id = node.ConnectionKey()
+		id = wantKey
 	}
 
 	m.keyLocks.Lock(id)
@@ -99,6 +106,9 @@ func (m *sessionManager) getOrCreate(id string, node model.Node, cols, rows int)
 	}
 	m.mu.Unlock()
 	if ok {
+		if existing.nodeKey != wantKey {
+			return nil, false, fmt.Errorf("session_id %q 已属于另一节点，会话不能跨节点复用；请换一个新的 session_id", id)
+		}
 		return existing, true, nil
 	}
 
@@ -122,6 +132,7 @@ func (m *sessionManager) getOrCreate(id string, node model.Node, cols, rows int)
 	ctx, cancel := context.WithCancel(context.Background())
 	ls := &liveSession{
 		id:      id,
+		nodeKey: wantKey,
 		sess:    sess,
 		sshConn: sshConn,
 		history: ring.New(ring.DefaultMax),

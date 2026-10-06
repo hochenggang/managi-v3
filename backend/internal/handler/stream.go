@@ -7,6 +7,10 @@
 //
 // 两个大小都来自 config，且只在 config.Normalize 一处兜底默认值：
 // 使用点再各写一遍「<=0 就用默认」会把同一个不变量散落到四个文件里。
+//
+// 入站方向另有一个流量窗口：客户端可以领先服务端多少字节（以未收到 ack 的字节计）。
+// 窗口随 open 响应下发给前端，服务端每消费一帧（或作废）就推一帧 ack 让它滑动；
+// 队列预算取窗口 + 一片余量，正常客户端（按窗口节流）永远不会撞上队列满。
 package handler
 
 import (
@@ -19,11 +23,23 @@ import (
 	"managi/internal/wire"
 )
 
+// inputWindowFrames 输入窗口：单通道允许「未确认」的帧数上限。
+// 8 帧 × 入站切片大小（默认 1MB）= 8MB 在途：够盖住远端 sftp/磁盘的 RTT 抖动，
+// 又给每通道输入队列的内存封顶（旧实现允许浏览器侧堆 8MB，量级与此对齐）。
+const inputWindowFrames = 8
+
 // inFrameSize 客户端→服务端每帧载荷上限。
 func (h *hub) inFrameSize() int { return h.cfg.ChunkSize }
 
 // outFrameSize 服务端→客户端每帧字节数（scrollback 回放与文件下载共用）。
 func (h *hub) outFrameSize() int { return h.cfg.DownloadChunkSize }
+
+// inputWindow 输入流量窗口（字节），随 open 响应下发给前端做发送节流。
+func (h *hub) inputWindow() int { return inputWindowFrames * h.inFrameSize() }
+
+// inputBudget 单通道输入队列的字节预算：窗口 + 一片余量。
+// 余量给重连补发与零星控制帧，正常客户端在窗口内发送则队列必不满。
+func (h *hub) inputBudget() int { return h.inputWindow() + h.inFrameSize() }
 
 // wsReadLimit 连接级单帧上限：一帧载荷最大为入站切片大小，再加上帧头与余量。
 // 上限必须有，否则一条超大帧就能把内存打爆（分片大小已不再对外开放配置）。

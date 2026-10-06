@@ -3,21 +3,26 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 )
 
-// 用户可配置的环境变量只有下面 5 个：
+// 用户可配置的环境变量只有下面 8 个：
 //
-//	MANAGI_HOST        监听地址
-//	MANAGI_PORT        监听端口
-//	MANAGI_AUTH        Basic Auth 凭据，格式 user:pass；非空即启用鉴权
-//	MANAGI_INDEX_HTML  前端单页文件路径
-//	MANAGI_KNOWN_HOSTS OpenSSH known_hosts 路径，设置即启用严格主机密钥校验
+//	MANAGI_HOST              监听地址
+//	MANAGI_PORT              监听端口
+//	MANAGI_AUTH              Basic Auth 凭据，格式 user:pass；非空即启用鉴权
+//	MANAGI_INDEX_HTML        前端单页文件路径
+//	MANAGI_KNOWN_HOSTS       OpenSSH known_hosts 路径，设置即启用严格主机密钥校验
+//	MANAGI_TLS_CERT          HTTPS 证书路径（与 TLS_KEY 成对设置才启用 TLS）
+//	MANAGI_TLS_KEY           HTTPS 私钥路径
+//	MANAGI_TRUSTED_PROXIES   可信反向代理网段（逗号分隔 CIDR 或裸 IP），仅来自这些地址的连接才采信 X-Forwarded-For
 //
 // 其余超时、心跳、连接池容量与分片大小都是协议调优参数而非用户选项：
 // 改错的代价（周期性掉线、单帧放大到几百 MB 打爆内存）远大于收益，故不再开放。
@@ -52,9 +57,23 @@ type Config struct {
 	BasicAuthPassword string
 
 	// SSH 主机密钥校验
-	// KnownHostsFile 非空时启用严格校验（OpenSSH known_hosts 格式），
-	// 取代进程内 TOFU；留空表示沿用 TOFU（首次信任）。
+	// KnownHostsFile 非空时启用严格校验（OpenSSH known_hosts 格式），取代 TOFU。
+	// 留空沿用 TOFU（首次信任），信任记录落盘在 TOFUKnownHostsFile。
 	KnownHostsFile string
+	// TOFUKnownHostsFile 是 TOFU 信任库路径（OpenSSH known_hosts 格式），
+	// Load 默认填充 ~/.managi/known_hosts。留空 = 记录只留在进程内
+	// （取不到用户目录，或路径不可写时的降级形态）：可用，但重启即失忆。
+	TOFUKnownHostsFile string
+
+	// HTTPS：证书与私钥成对设置才启用 TLS（wss 随之可用）。
+	// 前置反向代理终结 TLS 的部署不必配置，改为声明 TrustedProxies。
+	TLSCertFile string
+	TLSKeyFile  string
+
+	// TrustedProxies 可信反向代理网段：仅当连接来自这些网段时才采信
+	// X-Forwarded-For（取最右侧的非代理地址）。留空 = 完全忽略 XFF，
+	// 「谁连我谁就是客户端」——XFF 可伪造，无条件采信等于关掉登录失败限流。
+	TrustedProxies []*net.IPNet
 
 	// 前端静态文件
 	IndexHTMLPath string
@@ -98,17 +117,69 @@ func Load() *Config {
 		SessionIdleTimeout: DefaultSessionIdleTimeout,
 		ChunkSize:          DefaultChunkSize,
 		DownloadChunkSize:  DefaultDownloadChunkSize,
-		// 空表示未显式配置：启用 BasicAuth 时由服务入口生成随机强口令，避免固定弱默认值
-		BasicAuthEnabled:  user != "",
-		BasicAuthUser:     user,
-		BasicAuthPassword: pass,
-		KnownHostsFile:    expandHome(envStr("MANAGI_KNOWN_HOSTS", "")),
-		IndexHTMLPath:     envStr("MANAGI_INDEX_HTML", "index.html"),
+		// 启用但口令为空（user:）是安装错误：Validate 拒绝启动，不做随机口令兜底
+		BasicAuthEnabled:   user != "",
+		BasicAuthUser:      user,
+		BasicAuthPassword:  pass,
+		KnownHostsFile:     expandHome(envStr("MANAGI_KNOWN_HOSTS", "")),
+		TOFUKnownHostsFile: defaultTOFUKnownHostsFile(),
+		TLSCertFile:        expandHome(envStr("MANAGI_TLS_CERT", "")),
+		TLSKeyFile:         expandHome(envStr("MANAGI_TLS_KEY", "")),
+		TrustedProxies:     parseTrustedProxies(envStr("MANAGI_TRUSTED_PROXIES", "")),
+		IndexHTMLPath:      envStr("MANAGI_INDEX_HTML", "index.html"),
 	}
 	if fixed := cfg.Normalize(); len(fixed) > 0 {
 		slog.Warn("invalid config replaced with defaults", "items", strings.Join(fixed, "; "))
 	}
 	return cfg
+}
+
+// TLSEnabled 证书与私钥是否成对配置（成对才启用 TLS）。
+func (c *Config) TLSEnabled() bool {
+	return c.TLSCertFile != "" && c.TLSKeyFile != ""
+}
+
+// Validate 返回必须人工修正的启动级错误（区别于 Normalize 的可自动校正项），
+// 由入口在装配前调用并在出错时拒绝启动。
+// 两类：TLS 证书与私钥必须成对——只配一半说明运维意图就是 HTTPS，
+// 静默退回明文是一次安全降级；鉴权启用但密码为空——空口令绝不构成有效凭据，
+// 兜底生成随机口令只会把密码写进日志供人翻找，宁可拒绝启动。
+func (c *Config) Validate() error {
+	if (c.TLSCertFile == "") != (c.TLSKeyFile == "") {
+		return errors.New("MANAGI_TLS_CERT 与 MANAGI_TLS_KEY 必须成对配置（当前只设置了其中一个）")
+	}
+	if c.BasicAuthEnabled && c.BasicAuthPassword == "" {
+		return errors.New("MANAGI_AUTH 缺少密码（格式为 user:pass，密码不能为空）；不打算鉴权就整个不设该变量")
+	}
+	return nil
+}
+
+// parseTrustedProxies 解析 MANAGI_TRUSTED_PROXIES=CIDR[,CIDR...]。
+// 裸 IP 视为单机网段（/32 或 /128）；非法项出声跳过而非整份失效——
+// 一个条目写错不该让其余可信代理集体失忆（表现是限流按代理 IP 计）。
+func parseTrustedProxies(v string) []*net.IPNet {
+	var nets []*net.IPNet
+	for _, part := range strings.Split(v, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if _, n, err := net.ParseCIDR(part); err == nil {
+			nets = append(nets, n)
+			continue
+		}
+		ip := net.ParseIP(part)
+		if ip == nil {
+			slog.Warn("MANAGI_TRUSTED_PROXIES 条目无法解析，已忽略", "item", part)
+			continue
+		}
+		bits := 128
+		if ip.To4() != nil {
+			bits = 32
+		}
+		nets = append(nets, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+	}
+	return nets
 }
 
 // parseBasicAuth 解析 MANAGI_AUTH=user:pass。
@@ -182,6 +253,18 @@ func (c *Config) Normalize() []string {
 		}
 	}
 	return fixed
+}
+
+// defaultTOFUKnownHostsFile TOFU 信任库的默认位置：~/.managi/known_hosts。
+// 单独放一个目录而非塞进 ~/.ssh：与 OpenSSH 自己的 known_hosts 互不污染，
+// 用户手工管理的文件继续走 MANAGI_KNOWN_HOSTS。
+// 取不到用户目录时返回空串，sshpool 据此降级为进程内记录并告警。
+func defaultTOFUKnownHostsFile() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".managi", "known_hosts")
 }
 
 // expandHome 展开开头的 "~"（用户会直接写 MANAGI_KNOWN_HOSTS=~/.ssh/known_hosts）。

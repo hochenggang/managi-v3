@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -155,6 +156,70 @@ func TestGet_ReusesConnection(t *testing.T) {
 
 	// mock server 应只 accept 一条 TCP 连接
 	assert.Equal(t, int32(1), srv.Accepts())
+}
+
+// shortProbe 把探测超时缩到 100ms，测试结束还原（探测逻辑与生产同路径，只缩短等待）。
+func shortProbe(t *testing.T) {
+	t.Helper()
+	prev := probeTimeout
+	probeTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { probeTimeout = prev })
+}
+
+// TestIsAlive_TrueOnHealthyConn 验证对端正常回包时探测为真。
+func TestIsAlive_TrueOnHealthyConn(t *testing.T) {
+	srv := testutil.Start(t)
+	defer srv.Close()
+
+	client := srv.Dial(t)
+	defer func() { _ = client.Close() }()
+
+	assert.True(t, isAlive(client))
+}
+
+// TestIsAlive_TimesOutAndClosesSilentPeer 验证半开链路（TCP 在、对端不回包）上探测不再无限等待：
+// 到点即判死并关闭连接，否则 reuse 请求路径会挂在分钟级的系统 TCP 超时上。
+func TestIsAlive_TimesOutAndClosesSilentPeer(t *testing.T) {
+	srv := testutil.Start(t)
+	defer srv.Close()
+	srv.SilentGlobalRequests()
+	shortProbe(t)
+
+	client := srv.Dial(t)
+	defer func() { _ = client.Close() }()
+
+	start := time.Now()
+	assert.False(t, isAlive(client))
+	elapsed := time.Since(start)
+	assert.GreaterOrEqual(t, elapsed, 100*time.Millisecond)
+	assert.Less(t, elapsed, 2*time.Second, "应在探测超时附近返回，而不是等系统 TCP 超时")
+
+	// 超时路径已关闭连接：再次探测立即失败（上一次的关闭确实生效）
+	start = time.Now()
+	assert.False(t, isAlive(client))
+	assert.Less(t, time.Since(start), 100*time.Millisecond)
+}
+
+// TestGet_ReplacesHalfOpenConn 验证复用时半开连接被探测剔除并重建，而不是把后续请求挂住。
+func TestGet_ReplacesHalfOpenConn(t *testing.T) {
+	srv := testutil.Start(t)
+	defer srv.Close()
+	srv.SilentGlobalRequests() // 拨号（握手）不受影响，只有全局请求不回包
+	shortProbe(t)
+
+	pool := New(testutil.TestConfig())
+	defer pool.CloseAll()
+
+	node := testutil.TestNode(srv.Host(), srv.Port())
+	first, err := pool.Get(node)
+	require.NoError(t, err)
+	pool.Release(first)
+
+	start := time.Now()
+	second, err := pool.Get(node)
+	require.NoError(t, err)
+	assert.NotSame(t, first, second, "半开连接应被剔除并重建")
+	assert.Less(t, time.Since(start), 2*time.Second)
 }
 
 // TestGet_AuthFailure 验证错误密码返回错误。
@@ -418,11 +483,14 @@ func TestHostKey_BrokenKnownHostsFailsClosed(t *testing.T) {
 	assert.Contains(t, err.Error(), "MANAGI_KNOWN_HOSTS")
 }
 
-// TestHostKeyCallback_TOFU 验证未配置 known_hosts 时的进程内首次信任：
-// 记录首个公钥并接受，之后密钥变化即拒绝（防中间人）。
+// TestHostKeyCallback_TOFU 验证 TOFU 首次信任：记录首个公钥并接受，之后密钥变化即拒绝（防中间人），
+// 记录必须落盘到信任库——只留在内存的信任锚随进程消失，防不住重启后的中间人。
 // 直接驱动回调而非两次 Execute：同 key 的第二次拨号会复用池中连接，不再走校验。
 func TestHostKeyCallback_TOFU(t *testing.T) {
-	pool := New(testutil.TestConfig())
+	cfg := testutil.TestConfig()
+	cfg.TOFUKnownHostsFile = filepath.Join(t.TempDir(), "known_hosts")
+
+	pool := New(cfg)
 	defer pool.CloseAll()
 
 	node := testutil.TestNode("127.0.0.1", 2222)
@@ -442,4 +510,80 @@ func TestHostKeyCallback_TOFU(t *testing.T) {
 	recorded, ok := pool.hostKeys.recorded(addr)
 	require.True(t, ok)
 	assert.True(t, bytes.Equal(recorded.Marshal(), first.Marshal()), "TOFU 只记录首次公钥，不因拒绝而改写")
+
+	// 信任库里有可离线核对的一行，且不因密钥不符被改写
+	data, err := os.ReadFile(cfg.TOFUKnownHostsFile)
+	require.NoError(t, err)
+	fields := strings.SplitN(strings.TrimSpace(string(data)), " ", 2)
+	require.Len(t, fields, 2, "信任库必须是 <host> <key> 两列")
+	key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(fields[1]))
+	require.NoError(t, err, "信任库必须是合法 known_hosts 行")
+	assert.True(t, bytes.Equal(key.Marshal(), first.Marshal()), "落盘公钥必须是首次记录的那把")
+}
+
+// TestHostKey_TOFUPersistsAcrossRestart 验证 TOFU 信任跨进程重启延续：
+// 重建校验器（同一信任库）后，旧公钥仍被接受、换钥仍被拒绝。
+// 这正是旧「进程内 TOFU」缺失的一环：每次重启都把首次连接窗口重新暴露给中间人。
+func TestHostKey_TOFUPersistsAcrossRestart(t *testing.T) {
+	cfg := testutil.TestConfig()
+	cfg.TOFUKnownHostsFile = filepath.Join(t.TempDir(), "known_hosts")
+
+	node := testutil.TestNode("127.0.0.1", 2222)
+	addr := net.JoinHostPort(node.Host, strconv.Itoa(node.Port))
+	remote := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 2222}
+	first, other := genHostKey(t), genHostKey(t)
+
+	// 第一次运行：首次连接记录信任
+	p1 := New(cfg)
+	require.NoError(t, p1.hostKeys.callback(addr)(addr, remote, first))
+	p1.CloseAll()
+
+	// 第二次运行：信任库载入既有记录，旧公钥不得被当成「首次」而非报错
+	p2 := New(cfg)
+	defer p2.CloseAll()
+	cb := p2.hostKeys.callback(addr)
+	require.NoError(t, cb(addr, remote, first), "重启后首次信任必须延续")
+	require.Error(t, cb(addr, remote, other), "重启后换钥仍须拒绝")
+}
+
+// TestHostKey_TOFUBrokenFileFailsClosed 验证 TOFU 信任库损坏时拒绝所有连接：
+// 跳过坏行会让对应主机的信任锚静默消失，下次连接被当成「首次」而信任任意密钥。
+func TestHostKey_TOFUBrokenFileFailsClosed(t *testing.T) {
+	srv := testutil.Start(t)
+	defer srv.Close()
+
+	cfg := testutil.TestConfig()
+	cfg.TOFUKnownHostsFile = filepath.Join(t.TempDir(), "known_hosts")
+	require.NoError(t, os.WriteFile(cfg.TOFUKnownHostsFile, []byte("127.0.0.1\n"), 0o600))
+
+	pool := New(cfg)
+	defer pool.CloseAll()
+
+	_, _, err := pool.Execute(context.Background(), testutil.TestNode(srv.Host(), srv.Port()), []string{"echo hi"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TOFU 信任库")
+}
+
+// TestHostKey_TOFUUnwritableFallsBackToMemory 验证信任库不可写时降级为进程内记录：
+// 只读根文件系统的容器是推荐部署形态，不能因此拒绝所有连接；
+// 降级的边界是「重启失忆」而非「功能中止」，且进程内仍要防密钥中途更换。
+func TestHostKey_TOFUUnwritableFallsBackToMemory(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o600))
+
+	cfg := testutil.TestConfig()
+	cfg.TOFUKnownHostsFile = filepath.Join(blocker, "known_hosts") // 父路径是文件 → 目录建不出来
+
+	pool := New(cfg)
+	defer pool.CloseAll()
+
+	node := testutil.TestNode("127.0.0.1", 2222)
+	addr := net.JoinHostPort(node.Host, strconv.Itoa(node.Port))
+	remote := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 2222}
+	first, other := genHostKey(t), genHostKey(t)
+
+	cb := pool.hostKeys.callback(addr)
+	require.NoError(t, cb(addr, remote, first), "降级也不能拒绝连接")
+	require.NoError(t, cb(addr, remote, first))
+	require.Error(t, cb(addr, remote, other), "降级仍要防同进程内的密钥更换")
 }

@@ -27,7 +27,7 @@ const (
 )
 
 // 控制面动词。
-// 请求 seq>0 ⇒ 同 type、同 seq 回且只回一次；seq=0 ⇒ 不等回复（resize/ping）。
+// 请求 seq>0 ⇒ 同 type、同 seq 回且只回一次；seq=0 ⇒ 不等回复（resize）或服务端主动推。
 const (
 	msgOpen      = "open"       // 打开通道（pty 或 sftp）
 	msgClose     = "close"      // 关闭通道
@@ -35,6 +35,7 @@ const (
 	msgPing      = "ping"       // 客户端心跳请求
 	msgPong      = "pong"       // 服务端心跳响应
 	msgError     = "error"      // 错误（带 chan 表示某通道上的流错误）
+	msgAck       = "ack"        // 输入窗口确认（服务端主动推，见 ackData）
 	msgLS        = "ls"         // 列目录
 	msgMkdir     = "mkdir"      // 建目录
 	msgRM        = "rm"         // 删除
@@ -55,6 +56,14 @@ type wsEnvelope struct {
 type wsErrorData struct {
 	Chan    uint32 `json:"chan,omitempty"`
 	Message string `json:"message"`
+}
+
+// ackData 输入窗口确认：bytes 为该通道自打开以来「已消费或已作废」的输入字节累计值。
+// 客户端以未确认字节数（已发 - 已确认）对照 open 响应下发的 window 节流发送；
+// 被丢弃/作废的字节同样推进它，否则对端会在窗口上死等一个永远不到 ack 的字节。
+type ackData struct {
+	Chan  uint32 `json:"chan"`
+	Bytes int64  `json:"bytes"`
 }
 
 // wsUpgrader /ws 的升级器。

@@ -37,6 +37,9 @@ export function useSFTP(node: ApiNode) {
   // 一路通道同时只跑一路字节流（上传或下载）：交错两路只会得到内容错乱的文件，
   // 服务端同样按此假设（第二个 upload 请求会接管前一路）。
   let stream: Stream | null = null
+  // 通道级错误的最近一次原文：上传循环在等窗口期间被叫醒时据此收手，
+  // 否则会对着一条已被服务端中止、不会再回 ack 的通道继续发送。
+  let streamErr: Error | null = null
   let chunks: Uint8Array[] = []
   let received = 0
   let expectedTotal = 0
@@ -80,8 +83,12 @@ export function useSFTP(node: ApiNode) {
       const message = (data as ErrorData | undefined)?.message ?? 'SFTP 出错'
       // 通道级错误一律判给在途传输（写盘失败、下载被截断），否则调用方会一直等落定信号；
       // 没有传输在跑时才是真的没主的事，出声让用户看到。
-      if (stream) settleStream(new Error(message))
-      else handleError(message)
+      if (stream) {
+        streamErr = new Error(message)
+        settleStream(streamErr)
+      } else {
+        handleError(message)
+      }
     },
   })
 
@@ -157,12 +164,15 @@ export function useSFTP(node: ApiNode) {
 
   async function upload(remoteDir: string, file: File): Promise<void> {
     uploadProgress.value = 0
+    streamErr = null
     const done = startStream('upload')
     try {
       const init = await channel.request<UploadData>('upload', {
         path: remoteDir,
         filename: file.name,
         size: file.size,
+        // mtime 与 size 一起是 .part 的续传身份：服务端据此判断旧残片是否可续
+        mtime: file.lastModified,
       })
       // 切片大小由服务端定（同时是它的单帧上限），客户端不自作主张
       const chunkSize = init?.chunk_size ?? 0
@@ -170,10 +180,12 @@ export function useSFTP(node: ApiNode) {
 
       for (let pos = init.offset ?? 0; pos < file.size; pos += chunkSize) {
         const bytes = new Uint8Array(await file.slice(pos, pos + chunkSize).arrayBuffer())
+        // 先等窗口腾出这片空间再发：慢链路下不会在浏览器里堆出无界发送队列
+        await channel.waitAck(bytes.byteLength)
+        // 等待期间通道被判死（如服务端积压中止）：就此收手，别对着死通道续发
+        if (streamErr) throw streamErr
         if (!channel.frame(bytes)) throw new Error('连接已断开')
         uploadProgress.value = percent(pos + bytes.byteLength, file.size)
-        // 跟着网络走：慢链路下不能把整个文件堆进浏览器发送缓冲
-        await channel.waitDrain()
       }
       if (!channel.frame(NO_BYTES, true)) throw new Error('连接已断开')
       await done

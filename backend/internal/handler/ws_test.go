@@ -168,6 +168,20 @@ func (h *hubTest) expectControl(typ string) map[string]any {
 	}
 }
 
+// expectErrorContains 读到 message 含 want 的 error 帧（跳过数据帧、ack 与其它错误帧）。
+func (h *hubTest) expectErrorContains(want string) map[string]any {
+	h.t.Helper()
+	for {
+		d := h.readControl()
+		if d["_type"] != msgError {
+			continue
+		}
+		if msg, _ := d["message"].(string); strings.Contains(msg, want) {
+			return d
+		}
+	}
+}
+
 // openPTY 打开一路终端通道，返回通道号与 open 响应。
 func (h *hubTest) openPTY(node model.Node, sessionID string, cols, rows int) (uint32, map[string]any) {
 	h.t.Helper()
@@ -263,6 +277,25 @@ func TestPTY_EchoOverDataPlane(t *testing.T) {
 	assert.Contains(t, h.readOutput(chanID, "echo hi"), "echo hi")
 }
 
+// TestPTY_InputAckAdvancesWindow 验证输入方向流控：open 响应下发窗口，
+// 每消费一帧回一帧累计 ack——前端据此滑动发送窗口，粘贴才不会把服务端内存顶穿。
+func TestPTY_InputAckAdvancesWindow(t *testing.T) {
+	h := newHubTest(t, nil)
+	chanID, resp := h.openPTY(h.node(), "sess-ack", 80, 24)
+	chunk := resp["chunk_size"].(float64)
+	assert.Equal(t, chunk*inputWindowFrames, resp["window"].(float64),
+		"窗口 = 帧数 × 入站切片大小")
+
+	h.sendFrame(wire.Frame{Chan: chanID, Payload: []byte("echo A\n")})
+	d := h.expectControl(msgAck)
+	assert.Equal(t, float64(chanID), d["chan"])
+	assert.Equal(t, float64(7), d["bytes"])
+
+	h.sendFrame(wire.Frame{Chan: chanID, Payload: []byte("echo B\n")})
+	d = h.expectControl(msgAck)
+	assert.Equal(t, float64(14), d["bytes"], "ack 是累计值而非增量")
+}
+
 // TestPTY_PreservesRawBytes 验证数据面不改动字节：含 0x00/0xFF 等非法 UTF-8 的输入
 // 原样回显。JSON 字符串协议下这些字节会被替换成 U+FFFD，粘贴转义序列也就失真了。
 func TestPTY_PreservesRawBytes(t *testing.T) {
@@ -286,6 +319,33 @@ func TestPTY_ResizeKeepsSession(t *testing.T) {
 
 	h.sendFrame(wire.Frame{Chan: chanID, Payload: []byte("echo RESIZED\n")})
 	assert.Contains(t, h.readOutput(chanID, "RESIZED"), "RESIZED")
+}
+
+// TestPTY_InputOverflowDropsButKeepsChannel 验证终端输入的溢出策略：丢弃并限频出声。
+// 远端读端卡死（窗口 2MB 打满）时，超出窗口的输入按帧丢弃，通道本身保持可用——
+// 丢一帧输入是可用性的代价，冻住整条连接不是。
+func TestPTY_InputOverflowDropsButKeepsChannel(t *testing.T) {
+	cfg := testutil.TestConfig()
+	cfg.ChunkSize = 4096 // 窗口 32KB、队列预算 36KB：几 MB 输入必然打到溢出
+	e := newHubEnv(t, cfg)
+	e.srv.StalledShell()
+	h := e.connect()
+	chanID, _ := h.openPTY(h.node(), "sess-overflow", 80, 24)
+
+	// 灌到 SSH 通道窗口（x/crypto 默认 2MB）耗尽、队列打满：2.9MB 足够越过两者
+	payload := bytes.Repeat([]byte("x"), cfg.ChunkSize)
+	for i := 0; i < 700; i++ {
+		h.sendFrame(wire.Frame{Chan: chanID, Payload: payload})
+	}
+
+	d := h.expectErrorContains("丢弃")
+	assert.Equal(t, float64(chanID), d["chan"], "溢出提示必须归属本通道")
+
+	// 通道必须还活着：close 得到正常回声，而不是 unknown channel
+	seq := h.send(msgClose, map[string]any{"chan": chanID})
+	closed := h.expectControl(msgClose)
+	assert.Equal(t, seq, closed["_seq"])
+	assert.Equal(t, float64(chanID), closed["chan"])
 }
 
 // TestPTY_BadPasswordRepliesErrorWithSeq 验证拨号失败回 error 帧且回填请求 seq：
@@ -439,14 +499,14 @@ func TestSFTP_EmptyPathRejected(t *testing.T) {
 }
 
 // TestSFTP_UploadStreamsFramesAndFinalizes 验证上传：upload 响应给续传点与切片大小，
-// 数据帧直接落盘，FlagEnd 帧触发落定并主动推 upload_end——不再有每片一次的 chunk_ack 往返。
+// 数据帧直接落盘（每帧回累计 ack 滑动窗口），FlagEnd 帧触发落定并主动推 upload_end。
 func TestSFTP_UploadStreamsFramesAndFinalizes(t *testing.T) {
 	h := newHubTest(t, nil)
 	chanID, _ := h.openSFTP(h.node())
 
 	payload := []byte("AAAABBBB")
 	seq := h.send(msgUpload, map[string]any{
-		"chan": chanID, "path": "/up", "filename": "f.bin", "size": len(payload),
+		"chan": chanID, "path": "/up", "filename": "f.bin", "size": len(payload), "mtime": 1728000000,
 	})
 	d := h.expectControl(msgUpload)
 	assert.Equal(t, seq, d["_seq"])
@@ -454,7 +514,12 @@ func TestSFTP_UploadStreamsFramesAndFinalizes(t *testing.T) {
 	assert.Greater(t, d["chunk_size"].(float64), float64(0), "切片大小由服务端下发")
 
 	h.sendFrame(wire.Frame{Chan: chanID, Payload: payload[:4]})
+	ack := h.expectControl(msgAck)
+	assert.Equal(t, float64(4), ack["bytes"], "每片落盘后都要推进窗口")
+
 	h.sendFrame(wire.Frame{Chan: chanID, Payload: payload[4:], Flags: wire.FlagEnd})
+	ack = h.expectControl(msgAck)
+	assert.Equal(t, float64(8), ack["bytes"])
 
 	end := h.expectControl(msgUploadEnd)
 	assert.Equal(t, float64(chanID), end["chan"])
@@ -463,20 +528,20 @@ func TestSFTP_UploadStreamsFramesAndFinalizes(t *testing.T) {
 	content, err := os.ReadFile(filepath.Join(h.srv.RootDir(), "up", "f.bin"))
 	require.NoError(t, err)
 	assert.Equal(t, payload, content)
-	assert.NoFileExists(t, filepath.Join(h.srv.RootDir(), "up", "f.bin.part"))
+	assert.NoFileExists(t, filepath.Join(h.srv.RootDir(), "up", "f.bin.8-1728000000.part"))
 }
 
-// TestSFTP_UploadResumesFromPartOffset 验证断点续传：残留 .part 时 upload 响应给出续传点，
+// TestSFTP_UploadResumesFromPartOffset 验证断点续传：残留同身份 .part 时 upload 响应给出续传点，
 // 客户端从该偏移继续，服务端只按到达顺序追加。
 func TestSFTP_UploadResumesFromPartOffset(t *testing.T) {
 	h := newHubTest(t, nil)
 	require.NoError(t, os.MkdirAll(filepath.Join(h.srv.RootDir(), "up"), 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(h.srv.RootDir(), "up", "f.bin.part"), []byte("AAAA"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(h.srv.RootDir(), "up", "f.bin.8-1234567890.part"), []byte("AAAA"), 0644))
 
 	chanID, _ := h.openSFTP(h.node())
-	h.send(msgUpload, map[string]any{"chan": chanID, "path": "/up", "filename": "f.bin", "size": 8})
+	h.send(msgUpload, map[string]any{"chan": chanID, "path": "/up", "filename": "f.bin", "size": 8, "mtime": 1234567890})
 	d := h.expectControl(msgUpload)
-	assert.Equal(t, float64(4), d["offset"], "必须报出 .part 已有大小")
+	assert.Equal(t, float64(4), d["offset"], "必须报出同身份 .part 已有大小")
 
 	h.sendFrame(wire.Frame{Chan: chanID, Payload: []byte("BBBB"), Flags: wire.FlagEnd})
 	h.expectControl(msgUploadEnd)
@@ -493,12 +558,12 @@ func TestSFTP_UploadSecondStartTakesOver(t *testing.T) {
 	h := newHubTest(t, nil)
 	chanID, _ := h.openSFTP(h.node())
 
-	h.send(msgUpload, map[string]any{"chan": chanID, "path": "/up", "filename": "f.bin", "size": 8})
+	h.send(msgUpload, map[string]any{"chan": chanID, "path": "/up", "filename": "f.bin", "size": 8, "mtime": 42})
 	h.expectControl(msgUpload)
 	// 只写了一半就放弃这一路
 	h.sendFrame(wire.Frame{Chan: chanID, Payload: []byte("AAAA")})
 
-	seq := h.send(msgUpload, map[string]any{"chan": chanID, "path": "/up", "filename": "f.bin", "size": 8})
+	seq := h.send(msgUpload, map[string]any{"chan": chanID, "path": "/up", "filename": "f.bin", "size": 8, "mtime": 42})
 	d := h.expectControl(msgUpload)
 	assert.Equal(t, seq, d["_seq"])
 	assert.Equal(t, float64(4), d["offset"], "接管后从已落盘的 .part 续上")
@@ -521,6 +586,42 @@ func TestSFTP_DataFrameWithoutUploadRejected(t *testing.T) {
 	d := h.readControl()
 	assert.Equal(t, msgError, d["_type"])
 	assert.Contains(t, d["message"], "no upload in progress")
+}
+
+// TestSFTP_UploadOverflowAbortsChannel 验证上传溢出的策略与终端相反：终止整条通道。
+// 丢帧的上传会悄悄产出坏文件，宁可中止——补偿 ack 把作废字节也推进窗口，
+// 客户端的上传循环才能从错误里立即退出；断线重开后再从 .part 续传。
+func TestSFTP_UploadOverflowAbortsChannel(t *testing.T) {
+	cfg := testutil.TestConfig()
+	cfg.ChunkSize = 4096
+	e := newHubEnv(t, cfg)
+	e.srv.StallWrites() // 落盘被闸住：工作协程卡在首帧写入上
+	h := e.connect()
+	chanID, _ := h.openSFTP(h.node())
+
+	h.send(msgUpload, map[string]any{"chan": chanID, "path": "/up", "filename": "f.bin", "size": 1 << 20})
+	h.expectControl(msgUpload)
+
+	// 首帧被闸在落盘上 → 队列打满 → 之后的帧触发终止
+	payload := bytes.Repeat([]byte("x"), cfg.ChunkSize)
+	const sent = 40
+	for i := 0; i < sent; i++ {
+		h.sendFrame(wire.Frame{Chan: chanID, Payload: payload})
+	}
+
+	errFrame := h.expectErrorContains("积压")
+	assert.Equal(t, float64(chanID), errFrame["chan"])
+
+	// 补偿 ack：在途首帧之外的已收字节全部作废并要求窗口补偿，
+	// 否则客户端等在对端 ack 上，连这条错误都换不出动作
+	ack := h.expectControl(msgAck)
+	per := frameOpCost + cfg.ChunkSize
+	queued := (inputWindowFrames*cfg.ChunkSize + cfg.ChunkSize) / per
+	assert.Equal(t, float64((queued+1)*cfg.ChunkSize), ack["bytes"])
+
+	// 通道已归还：再发帧只得到 unknown channel
+	h.sendFrame(wire.Frame{Chan: chanID, Payload: []byte("x")})
+	h.expectErrorContains("unknown channel")
 }
 
 // TestSFTP_DownloadFramesEndWithFlag 验证下载：响应先给出 total/filename，
@@ -581,7 +682,8 @@ func TestSFTP_DownloadRejectsConcurrent(t *testing.T) {
 }
 
 // TestSFTP_ReuseChannelsOnOneConnection 验证一条连接跑多路通道：
-// 两个文件管理标签各自 ls，响应按 chan 区分，互不干扰。
+// 两个文件管理标签各自 ls，响应各带自己的 chan。每通道一个工作协程，
+// 跨通道的响应顺序不做保证，能对号入座即可。
 func TestSFTP_ReuseChannelsOnOneConnection(t *testing.T) {
 	h := newHubTest(t, nil)
 	require.NoError(t, os.WriteFile(filepath.Join(h.srv.RootDir(), "one.txt"), []byte("1"), 0644))
@@ -590,13 +692,14 @@ func TestSFTP_ReuseChannelsOnOneConnection(t *testing.T) {
 	chanB, _ := h.openSFTP(h.node())
 	assert.NotEqual(h.t, chanA, chanB, "每次 open 必须分到新通道号")
 
-	// 读循环串行处理请求，因此响应顺序就是请求顺序，且各带自己的 chan
 	h.send(msgLS, map[string]any{"chan": chanB, "path": "/"})
 	h.send(msgLS, map[string]any{"chan": chanA, "path": "/"})
-	for _, want := range []uint32{chanB, chanA} {
+	got := map[float64]bool{}
+	for i := 0; i < 2; i++ {
 		d := h.expectControl(msgLS)
-		assert.Equal(t, float64(want), d["chan"])
+		got[d["chan"].(float64)] = true
 	}
+	assert.True(t, got[float64(chanA)] && got[float64(chanB)], "两路标签各自的 ls 都必须回话")
 }
 
 // TestSFTP_OperationOnPTYChannelRejected 验证把 SFTP 动词发给终端通道会明确报错，

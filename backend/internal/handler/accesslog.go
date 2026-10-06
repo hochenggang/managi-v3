@@ -15,28 +15,32 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"managi/internal/config"
 )
 
 // AccessLog 记录每个请求的一行访问日志（方法、路径、状态、字节数、耗时、来源 IP）。
-// remote 与 BasicAuth 限流同源（都取真实连接地址），排查时对得上号。
-func AccessLog(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// /health 由容器健康检查按秒级轮询，记下来只会淹没真实访问
-		if r.URL.Path == "/health" {
-			next.ServeHTTP(w, r)
-			return
-		}
-		rec := &loggedResponse{ResponseWriter: w, start: time.Now()}
-		next.ServeHTTP(rec, r)
-		slog.Info("http access",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"status", rec.statusCode(),
-			"bytes", rec.written,
-			"duration_ms", time.Since(rec.start).Milliseconds(),
-			"remote", clientIP(r),
-		)
-	})
+// remote 与 BasicAuth 限流同源（都走 clientIP，含 MANAGI_TRUSTED_PROXIES 归因），排查时对得上号。
+func AccessLog(cfg *config.Config) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// /health 由容器健康检查按秒级轮询，记下来只会淹没真实访问
+			if r.URL.Path == "/health" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			rec := &loggedResponse{ResponseWriter: w, start: time.Now()}
+			next.ServeHTTP(rec, r)
+			slog.Info("http access",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"status", rec.statusCode(),
+				"bytes", rec.written,
+				"duration_ms", time.Since(rec.start).Milliseconds(),
+				"remote", clientIP(r, cfg.TrustedProxies),
+			)
+		})
+	}
 }
 
 // loggedResponse 记录状态码与写出字节数，并透传 Flusher / Hijacker：

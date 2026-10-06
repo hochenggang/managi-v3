@@ -18,11 +18,23 @@ services:
       # 安全默认值：MANAGI_AUTH 非空即启用 BasicAuth（凭据本身就是开关），
       # 避免误暴露在公网成为开放跳板机。凭据必须由宿主环境或同目录 .env 提供：
       #   echo 'MANAGI_AUTH=admin:你的密码' > .env
-      # 留空的后果不是「无密码」，而是每次启动生成一个新随机口令并写进启动日志：
-      # 配合 restart: unless-stopped，容器每次重启口令都变，日志里还留着历史明文。
-      - "MANAGI_AUTH=${MANAGI_AUTH:?请先在 .env 设置 MANAGI_AUTH=user:pass（留空会每次重启换随机口令并打印到日志）}"
+      # 空口令（只写 user:）会被服务端拒绝启动，compose 在这里先一步拦住。
+      - "MANAGI_AUTH=${MANAGI_AUTH:?请先在 .env 设置 MANAGI_AUTH=user:pass（空口令会拒绝启动）}"
       # 严格主机密钥校验（可选）：挂载 known_hosts 后设 MANAGI_KNOWN_HOSTS 指向它
       # - MANAGI_KNOWN_HOSTS=/app/known_hosts
+      # TOFU 信任库（可选）：默认落在 $HOME/.managi/known_hosts。容器以 nobody 运行、
+      # 根文件系统只读，HOME 缺失或不可写时降级为「进程内信任、每次重启重新信任首见密钥」。
+      # 要跨重启保留首次信任：启用本行 + 文件尾部的卷，让信任库落在可写卷上
+      # - HOME=/data
+      # HTTPS（可选）：证书与私钥成对挂载后给出路径（只配一半会拒绝启动）。
+      # 前置反向代理终结 TLS 时不要配，改为声明可信代理网段：
+      # - MANAGI_TLS_CERT=/app/tls/cert.pem
+      # - MANAGI_TLS_KEY=/app/tls/key.pem
+      # - MANAGI_TRUSTED_PROXIES=172.16.0.0/12
+    # volumes:
+    #   - ./tls:/app/tls:ro
+    #   # 与上面的 HOME=/data 配套：TOFU 信任库落进卷里，重启不丢
+    #   - managi-home:/data
     restart: unless-stopped
     # 容器硬化：只读根文件系统、最小权限、禁用特权升级
     read_only: true
@@ -42,3 +54,7 @@ services:
       start_period: 5s
     # 跳板机需要访问内网 SSH，使用 host 网络更合适：
     # network_mode: host
+
+# 与 environment 里注释的 HOME=/data 配套（TOFU 信任库持久化）
+# volumes:
+#   managi-home:

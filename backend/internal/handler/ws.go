@@ -2,7 +2,7 @@
 //
 // 控制面（文本帧，JSON envelope {type, data, seq}）动词：
 //
-//	{type:"open",   data:{kind:"pty"|"sftp", node, session_id?, cols?, rows?}}  → {chan, kind, reattached?, home?, chunk_size?}
+//	{type:"open",   data:{kind:"pty"|"sftp", node, session_id?, cols?, rows?}}  → {chan, kind, reattached?, home?, chunk_size?, window?}
 //	{type:"close",  data:{chan}}                                                → {chan}
 //	{type:"resize", data:{chan, cols, rows}}                                    （seq=0，不等回复）
 //	{type:"ls",     data:{chan, path}}                                          → {chan, path, files?}
@@ -10,13 +10,19 @@
 //	{type:"upload", data:{chan, path, filename, size}}                          → {chan, offset, chunk_size}
 //	{type:"download", data:{chan, path, offset?}}                               → {chan, filename, total}
 //	{type:"ping"}                                                                → {type:"pong"}
-//	服务端主动推：{type:"upload_end", data:{chan, size}}（seq 省略）
+//	服务端主动推：{type:"upload_end", data:{chan, size}}、{type:"ack", data:{chan, bytes}}（seq 均省略）
 //	失败一律回 {type:"error", data:{chan?, message}}，seq 回填失败请求。
+//
+// ack 是输入方向的流量控制（见 stream.go 的 inputWindow）：bytes 为该通道
+// 「已消费或已作废」的输入字节累计值，客户端据此滑动发送窗口。
 //
 // 数据面（二进制帧，internal/wire）：
 //   - 客户端 → 服务端：PTY 输入（写入 stdin）、上传分片（落进 .part）；
 //     最后一片置 FlagEnd（上传即「写完请落定」）。
 //   - 服务端 → 客户端：PTY 输出、下载内容；流结束时最后一片置 FlagEnd。
+//
+// 通道上的字节搬运与目录调用都跑在各通道自己的工作协程上：读循环只做非阻塞
+// 入队（input_queue.go），一个卡死的远端只会拖住它自己的通道。
 //
 // 凭据只在请求体/内存里存在，服务端不落盘、不缓存到会话之外。
 package handler
@@ -78,24 +84,31 @@ type hub struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// chans 只由读协程读写：控制帧与数据帧在同一条协程上分发，因此无需加锁。
-	// 派生出的输出协程（PTY outputLoop、下载 pump）只持有 wc，不触碰这张表。
+	// chans 只由读协程读写（get/alloc/remove 皆在读循环上），因此无需加锁。
+	// 通道自己的工作协程只持有自己的 handler，不触碰这张表。
 	chans map[uint32]*channel
 	next  uint32
 }
 
 // channel 一路子通道：PTY（终端标签）或 SFTP（文件管理标签）。
-// 两类通道对 hub 只需回答同样两个问题（上行的数据帧怎么处置、关闭时释放什么），
-// 故表里只存一个 handler：不再用「哪个指针非空」表示种类，也就没有成片的 nil 判定。
+// 两类通道对 hub 只需回答同样三个问题（上行的数据帧怎么处置、控制动词怎么执行、
+// 关闭时释放什么），故表里只存一个 handler：不再用「哪个指针非空」表示种类，
+// 也就没有成片的 nil 判定。
 type channel struct {
 	id      uint32
 	handler channelHandler
 }
 
 // channelHandler 一路子通道对 hub 的契约。
+// 两个入口都必须在读循环上快速返回：真正会阻塞的 I/O 由各通道的工作协程执行
+// （入队细节见 input_queue.go），任何一处同步等网络都会把整条连接拖住。
 type channelHandler interface {
-	// writeData 处置该通道上行的数据帧（PTY 输入 / 上传分片）。
-	writeData(wc *wsConn, f wire.Frame)
+	// writeData 处置该通道上行的数据帧（PTY 输入 / 上传分片/ 队列满按通道策略处置）。
+	// 返回 false 表示通道已自行终止（如输入溢出），调用方负责摘除并收尾。
+	writeData(wc *wsConn, f wire.Frame) bool
+	// control 处置该通道的控制动词（resize / ls / mkdir / rm / upload / download）。
+	// 动词负载的解析与执行都在通道工作协程上。
+	control(wc *wsConn, env wsEnvelope)
 	// close 释放该通道占用的资源（摘除输出 / 中止传输 / 归还连接）。
 	close(h *hub)
 }
@@ -137,16 +150,30 @@ func (h *hub) handleControl(env wsEnvelope) {
 		h.open(env)
 	case msgClose:
 		h.closeChannel(env)
-	case msgResize:
-		h.resize(env)
-	case msgLS, msgMkdir, msgRM, msgUpload, msgDownload:
-		h.sftpOp(env)
+	case msgResize, msgLS, msgMkdir, msgRM, msgUpload, msgDownload:
+		h.routeControl(env)
 	case msgUploadEnd:
 		// 客户端不会发这个动词：忽略并出声，避免前端误以为已经落定
 		_ = h.wc.writeError(0, env.Seq, "upload_end is server-only")
 	default:
 		_ = h.wc.writeError(0, env.Seq, "unknown verb: "+env.Type)
 	}
+}
+
+// routeControl 把带 chan 的控制动词投给所属通道的工作协程。
+// 这里只解析 chan：动词的完整负载由工作协程解析执行，
+// 通道上的 I/O（sftp 调用、resize）因此不再阻塞读循环。
+func (h *hub) routeControl(env wsEnvelope) {
+	var req chanRequest
+	if err := decodeData(env.Data, &req); err != nil {
+		_ = h.wc.writeError(0, env.Seq, "invalid "+env.Type+" data: "+err.Error())
+		return
+	}
+	ch := h.get(req.Chan, env.Seq)
+	if ch == nil {
+		return
+	}
+	ch.handler.control(h.wc, env)
 }
 
 // alloc 分配一个通道号。0 保留给「与具体通道无关」的控制帧，故从 1 起。
@@ -225,7 +252,10 @@ func (h *hub) routeData(f wire.Frame) {
 		_ = h.wc.writeError(f.Chan, 0, "unknown channel")
 		return
 	}
-	ch.handler.writeData(h.wc, f)
+	// 通道自报终止（输入溢出）：从表里摘除并收尾，后续帧按未知通道处理
+	if !ch.handler.writeData(h.wc, f) {
+		h.remove(ch.id)
+	}
 }
 
 // chanRequest 只带通道号的请求（close）。
@@ -244,11 +274,13 @@ type openRequest struct {
 }
 
 // openResponse open 响应负载。
-// ChunkSize 只对 PTY 有意义（SFTP 的切片大小随 upload 响应下发），故 omitempty。
+// ChunkSize 只对 PTY 有意义（SFTP 的切片大小随 upload 响应下发），故 omitempty；
+// Window 是输入窗口字节数（见 stream.go），两类通道的入站方向都用它节流。
 type openResponse struct {
 	Kind       string `json:"kind"`
 	Chan       uint32 `json:"chan"`
 	Reattached bool   `json:"reattached,omitempty"`
 	Home       string `json:"home,omitempty"`
 	ChunkSize  int    `json:"chunk_size,omitempty"`
+	Window     int    `json:"window,omitempty"`
 }

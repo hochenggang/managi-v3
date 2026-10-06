@@ -1,12 +1,12 @@
 package handler
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -35,7 +35,7 @@ func TestBatchHandler_Success(t *testing.T) {
 	}
 	body, _ := json.Marshal(req)
 
-	httpReq := httptest.NewRequest("POST", "/api/ssh/batch", bytes.NewReader(body))
+	httpReq := jsonPost("/api/ssh/batch", body)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httpReq)
 
@@ -76,7 +76,7 @@ func TestBatchHandler_PartialFailure(t *testing.T) {
 	}
 	body, _ := json.Marshal(req)
 
-	httpReq := httptest.NewRequest("POST", "/api/ssh/batch", bytes.NewReader(body))
+	httpReq := jsonPost("/api/ssh/batch", body)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httpReq)
 
@@ -95,11 +95,48 @@ func TestBatchHandler_BadJSON(t *testing.T) {
 	defer pool.CloseAll()
 
 	h := batchHandler(pool)
-	req := httptest.NewRequest("POST", "/api/ssh/batch", bytes.NewReader([]byte("bad")))
+	req := jsonPost("/api/ssh/batch", []byte("bad"))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// TestBatchHandler_TooManyNodes 验证节点数超上限直接 400，不进入逐个拨号。
+func TestBatchHandler_TooManyNodes(t *testing.T) {
+	pool := sshpool.New(testutil.TestConfig())
+	defer pool.CloseAll()
+
+	h := batchHandler(pool)
+	req := model.BatchCmdRequest{
+		Nodes: make([]model.Node, maxBatchNodes+1),
+		Cmds:  []string{"echo x"},
+	}
+	body, _ := json.Marshal(req)
+
+	httpReq := jsonPost("/api/ssh/batch", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httpReq)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "上限")
+}
+
+// TestExecuteSingle_TimeoutMessage 验证总时限到点时给出可读文案而非裸 ctx 错误。
+func TestExecuteSingle_TimeoutMessage(t *testing.T) {
+	srv := testutil.Start(t)
+	defer srv.Close()
+
+	pool := sshpool.New(testutil.TestConfig())
+	defer pool.CloseAll()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	result := executeSingle(ctx, pool, testutil.TestNode(srv.Host(), srv.Port()), []string{"hang"})
+	assert.False(t, result.Success)
+	require.NotEmpty(t, result.Error)
+	assert.Contains(t, result.Error[0], "超时")
 }
 
 // TestExecuteSingle_MasksNode 验证返回的 Node 已脱敏。

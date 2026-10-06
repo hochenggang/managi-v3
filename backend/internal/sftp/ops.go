@@ -6,6 +6,7 @@ package sftp
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path"
 	"strings"
@@ -134,25 +135,25 @@ type Upload struct {
 	offset int64 // 已落盘字节数，等于 .part 当前大小
 }
 
-// BeginUpload 准备上传：建父目录、探测 .part 续传点、打开写句柄。
+// BeginUpload 准备上传：建父目录、清理失配残片、按身份探测续传点、打开写句柄。
 // 返回的 Upload 从 Offset() 处继续接收数据，客户端据此跳过已上传的部分。
-func (c *Client) BeginUpload(remoteDir, filename string, totalSize int64) (*Upload, error) {
+func (c *Client) BeginUpload(remoteDir, filename string, totalSize, mtime int64) (*Upload, error) {
 	if err := validateFilename(filename); err != nil {
 		return nil, err
 	}
 	finalPath := path.Join(remoteDir, filename)
-	partPath := finalPath + ".part"
+	partPath := partFilePath(finalPath, totalSize, mtime)
 
 	if err := c.sc.MkdirAll(remoteDir); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", remoteDir, err)
 	}
+	c.cleanStaleParts(remoteDir, filename, path.Base(partPath))
 
-	// 已有 .part 说明上次上传中断，以其大小作为续传点
+	// 已有同身份 .part 说明上次上传中断，以其大小作为续传点
 	var offset int64
 	if info, err := c.sc.Stat(partPath); err == nil {
 		offset = info.Size()
-		// 脏 .part（上次崩溃残留，或同名文件换小了的旧内容）比本次总长还大时，
-		// 续传点永远追不上客户端，只能丢弃从头传，而不是让上传卡死。
+		// 同身份却超出声明大小：残片被外部动过，身份已不可信，丢弃从头传
 		if totalSize > 0 && offset > totalSize {
 			if rmErr := c.sc.Remove(partPath); rmErr == nil {
 				offset = 0
@@ -180,6 +181,64 @@ func (c *Client) BeginUpload(remoteDir, filename string, totalSize int64) (*Uplo
 		file:      f,
 		offset:    offset,
 	}, nil
+}
+
+// partFilePath 给上传残片编上身份：<final>.<size>-<mtime>.part。
+// 身份进文件名，续传只在「大小与修改时间都吻合」时发生——
+// 同名但内容已变的旧残片不会被续上，避免新旧字节拼接出静默损坏的文件。
+func partFilePath(finalPath string, size, mtime int64) string {
+	if mtime < 0 {
+		// 负值只可能来自构造的请求；归零保持文件名能被陈旧清理规则解析
+		mtime = 0
+	}
+	return fmt.Sprintf("%s.%d-%d.part", finalPath, size, mtime)
+}
+
+// cleanStaleParts 清理同名目标文件的陈旧残片（保留本次身份的 keep）。
+// 旧版无身份的 "<name>.part" 同样清掉：身份无从验证，续传的安全性就无从谈起。
+// 清理是尽力而为：列目录失败只是留下旧残片，不该让上传本身失败。
+func (c *Client) cleanStaleParts(remoteDir, filename, keep string) {
+	entries, err := c.sc.ReadDir(remoteDir)
+	if err != nil {
+		slog.Debug("clean stale .part: readdir failed", "dir", remoteDir, "err", err)
+		return
+	}
+	legacy := filename + ".part"
+	prefix := filename + "."
+	for _, e := range entries {
+		name := e.Name()
+		if name == keep || e.IsDir() {
+			continue
+		}
+		stale := name == legacy
+		if !stale && strings.HasPrefix(name, prefix) && strings.HasSuffix(name, ".part") {
+			stale = isIdentityPart(name[len(prefix) : len(name)-len(".part")])
+		}
+		if !stale {
+			continue
+		}
+		full := path.Join(remoteDir, name)
+		if err := c.sc.Remove(full); err != nil {
+			slog.Debug("clean stale .part: remove failed", "path", full, "err", err)
+		}
+	}
+}
+
+// isIdentityPart 判断 <size>-<mtime> 段是否为合法身份（两侧均为非空纯数字）。
+// 不匹配的一律不碰：宁可与用户自建的同前缀文件共存，也不误删。
+func isIdentityPart(mid string) bool {
+	i := strings.IndexByte(mid, '-')
+	return i > 0 && i < len(mid)-1 && isDigits(mid[:i]) && isDigits(mid[i+1:])
+}
+
+// isDigits 判断 s 为非空纯 ASCII 数字。
+func isDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return s != ""
 }
 
 // Offset 返回已落盘字节数。

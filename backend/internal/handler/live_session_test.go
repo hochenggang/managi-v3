@@ -76,6 +76,37 @@ func TestGetOrCreate_FallsBackToConnectionKey(t *testing.T) {
 	assert.Same(t, ls1, ls2)
 }
 
+// TestGetOrCreate_RejectsCrossNodeReuse 验证会话不跨节点复用：
+// 显式 session_id 命中已有会话时必须核对节点身份，失配即拒绝——
+// 否则陈旧/构造的 id 能接上另一节点正在跑的 shell，输入被搬到别的机器执行。
+func TestGetOrCreate_RejectsCrossNodeReuse(t *testing.T) {
+	srv := testutil.Start(t)
+	t.Cleanup(srv.Close)
+
+	cfg := testutil.TestConfig()
+	pool := sshpool.New(cfg)
+	t.Cleanup(pool.CloseAll)
+	mgr := newSessionManager(pool, cfg)
+
+	node := testutil.TestNode(srv.Host(), srv.Port())
+	ls1, _, err := mgr.getOrCreate("sess-shared", node, 80, 24)
+	require.NoError(t, err)
+	t.Cleanup(func() { mgr.close(ls1.id) })
+
+	// 身份不同（换了用户名）但沿用同一 session_id：拨号前就应被拒
+	other := node
+	other.Username = "other"
+	_, _, err = mgr.getOrCreate("sess-shared", other, 80, 24)
+	require.Error(t, err, "session_id 指向另一节点时必须拒绝复用")
+	assert.Contains(t, err.Error(), "另一节点")
+
+	// 拒绝不应破坏原会话：同节点重开照常复用
+	ls2, reattached, err := mgr.getOrCreate("sess-shared", node, 80, 24)
+	require.NoError(t, err)
+	assert.True(t, reattached)
+	assert.Same(t, ls1, ls2)
+}
+
 // TestLiveSession_AttachReplaysSnapshot 验证 attach 的原子约定：
 // 返回挂载前累积的 scrollback，并把输出目的地换成自己——此后实时输出都走新 sink。
 func TestLiveSession_AttachReplaysSnapshot(t *testing.T) {
